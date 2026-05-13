@@ -1,0 +1,234 @@
+# %% [markdown]
+# # CrispASR — vibevoice-asr F16 vs Q4_K test on Kaggle T4
+#
+# Three users in HF discussion
+# https://huggingface.co/cstr/vibevoice-asr-GGUF/discussions/1
+# report Q4_K is bad. Sunknown specifically said "clear high quality
+# speech without background noise transcribes to just '[Music]'" on
+# CUDA. The F16 was just uploaded today; this kernel:
+#
+#   1. Builds CrispASR-CLI with CUDA.
+#   2. Downloads both F16 (15.5 GB) and Q4_K (4.5 GB).
+#   3. Transcribes samples/jfk.wav with each.
+#   4. Prints both transcripts side-by-side.
+#
+# Expectation: F16 produces a real transcript; Q4_K confirms the
+# regression (either gibberish or "[Music]"). If both work, the
+# regression reports are environment-specific to one of the
+# reporters' setups. If only F16 works, that's an actionable
+# datapoint we can post back to the discussion.
+
+# %% [code]
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── unbuffered I/O + step checkpoint (HF live-progress on by default) ──
+os.environ["PYTHONUNBUFFERED"] = "1"
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):
+    pass
+
+WORK = Path("/kaggle/working")
+_PROGRESS = WORK / "progress.jsonl"
+_T0 = time.time()
+_HF_LAST_PUSH = 0.0
+_HF_REPO = "cstr/crispasr-kaggle-progress"
+_HF_PATH = (f"runs/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            f"-vibevoice-asr-bench.jsonl")
+
+
+def _push_hf():
+    global _HF_LAST_PUSH
+    if time.time() - _HF_LAST_PUSH < 30:
+        return
+    if not os.environ.get("HF_TOKEN") or not _PROGRESS.exists():
+        return
+    try:
+        from huggingface_hub import HfApi
+        HfApi(token=os.environ["HF_TOKEN"]).upload_file(
+            path_or_fileobj=str(_PROGRESS), path_in_repo=_HF_PATH,
+            repo_id=_HF_REPO, repo_type="dataset",
+            commit_message=f"progress @ {int(time.time()-_T0)}s")
+        _HF_LAST_PUSH = time.time()
+    except Exception:
+        pass
+
+
+def step(name, **extra):
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "elapsed_s": round(time.time() - _T0, 2), "step": name, **extra}
+    _PROGRESS.parent.mkdir(parents=True, exist_ok=True)
+    with _PROGRESS.open("a") as f:
+        f.write(json.dumps(rec) + "\n")
+    print(f"[step {rec['elapsed_s']:>7.1f}s] {name}" +
+          (f"  {extra}" if extra else ""), flush=True)
+    _push_hf()
+
+
+step("script.start")
+
+# %% [code]
+# Read HF_TOKEN from Kaggle secret if present (for HF progress push).
+try:
+    from kaggle_secrets import UserSecretsClient
+    tok = UserSecretsClient().get_secret("HF_TOKEN")
+    os.environ["HF_TOKEN"] = tok
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = tok
+    step("hf_token.loaded")
+except Exception as exc:
+    step("hf_token.missing", error=f"{type(exc).__name__}")
+
+# %% [code]
+step("install-deps.begin")
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", "--quiet",
+    "huggingface_hub", "hf_transfer",
+])
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+step("install-deps.done")
+
+# %% [code]
+step("apt-install.begin")
+subprocess.check_call(
+    "apt-get update -qq && apt-get install -y --no-install-recommends "
+    "cmake ninja-build g++ libopenblas-dev ccache mold || true",
+    shell=True)
+step("apt-install.done")
+
+# %% [code]
+step("git-clone.begin")
+REPO = WORK / "CrispASR"
+if not REPO.exists():
+    subprocess.check_call(
+        f"git clone --depth 1 https://github.com/CrispStrobe/CrispASR.git {REPO}",
+        shell=True)
+step("git-clone.done")
+
+# %% [code]
+step("cmake-configure.begin")
+BUILD = WORK / "build"
+import shutil as _shutil
+HAS_GPU = _shutil.which("nvcc") is not None
+CMAKE_FLAGS = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCRISPASR_BUILD_TESTS=OFF",
+    "-DCRISPASR_BUILD_EXAMPLES=ON",
+    "-DCRISPASR_BUILD_SERVER=OFF",
+]
+if _shutil.which("ccache"):
+    CCACHE_DIR = WORK / ".ccache"
+    CCACHE_DIR.mkdir(exist_ok=True)
+    os.environ["CCACHE_DIR"] = str(CCACHE_DIR)
+    CMAKE_FLAGS += [
+        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
+    ]
+if _shutil.which("mold"):
+    for kind in ("EXE", "SHARED", "MODULE"):
+        CMAKE_FLAGS.append(f"-DCMAKE_{kind}_LINKER_FLAGS=-fuse-ld=mold")
+if HAS_GPU:
+    CMAKE_FLAGS += ["-DGGML_CUDA=ON", "-DGGML_CUDA_NO_VMM=ON",
+                    "-DCMAKE_CUDA_ARCHITECTURES=60",
+                    "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"]
+subprocess.check_call(
+    ["cmake", "-S", str(REPO), "-B", str(BUILD), "-G", "Ninja", *CMAKE_FLAGS])
+step("cmake-configure.done")
+
+# %% [code]
+step("cmake-build.begin")
+subprocess.check_call(
+    ["cmake", "--build", str(BUILD), "--target", "crispasr-cli", "-j",
+     str(os.cpu_count() or 4)])
+CRISPASR = BUILD / "bin" / "crispasr"
+assert CRISPASR.is_file(), f"binary missing: {CRISPASR}"
+step("cmake-build.done", binary=str(CRISPASR))
+
+# %% [code]
+# Pre-download both quants from HF
+step("download-f16.begin")
+from huggingface_hub import hf_hub_download
+MODELS_DIR = WORK / "models"
+MODELS_DIR.mkdir(exist_ok=True)
+f16_path = hf_hub_download(
+    repo_id="cstr/vibevoice-asr-GGUF",
+    filename="vibevoice-asr-f16.gguf",
+    local_dir=str(MODELS_DIR),
+)
+step("download-f16.done", size_gb=round(Path(f16_path).stat().st_size / 1e9, 2))
+
+step("download-q4_k.begin")
+q4k_path = hf_hub_download(
+    repo_id="cstr/vibevoice-asr-GGUF",
+    filename="vibevoice-asr-q4_k.gguf",
+    local_dir=str(MODELS_DIR),
+)
+step("download-q4_k.done", size_gb=round(Path(q4k_path).stat().st_size / 1e9, 2))
+
+# %% [code]
+# Transcribe with each. samples/jfk.wav already in the repo.
+WAV = REPO / "samples" / "jfk.wav"
+assert WAV.is_file(), f"sample WAV missing: {WAV}"
+
+def transcribe(gguf: Path, label: str) -> dict:
+    step(f"transcribe-{label}.begin", gguf=gguf.name)
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            [str(CRISPASR), "-m", str(gguf), "-f", str(WAV),
+             "--backend", "vibevoice"],
+            capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        step(f"transcribe-{label}.timeout")
+        return {"label": label, "transcript": None, "wallclock_s": 600,
+                "stderr_tail": "TIMEOUT"}
+    elapsed = time.time() - t0
+    # Take the last non-empty stdout line (the CLI's transcript output)
+    text_lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    transcript = text_lines[-1] if text_lines else "(no stdout)"
+    step(f"transcribe-{label}.done", wallclock_s=round(elapsed, 1),
+         exit=proc.returncode, len_chars=len(transcript))
+    return {
+        "label": label,
+        "transcript": transcript,
+        "wallclock_s": round(elapsed, 1),
+        "exit": proc.returncode,
+        "stderr_tail": proc.stderr[-400:] if proc.returncode else "",
+    }
+
+
+results = []
+for label, path in (("F16", Path(f16_path)), ("Q4_K", Path(q4k_path))):
+    results.append(transcribe(path, label))
+
+# %% [code]
+# Headline comparison
+step("results.begin")
+print("\n=== TRANSCRIPTS ===\n", flush=True)
+for r in results:
+    print(f"{r['label']:6s}  {r['wallclock_s']}s  exit={r.get('exit','?')}")
+    print(f"        {r['transcript']!r}")
+    if r.get('exit'):
+        print(f"        stderr tail: {r['stderr_tail']}")
+    print()
+
+GOLD = ("And so, my fellow Americans, ask not what your country can do for you, "
+        "ask what you can do for your country.")
+print(f"\nGOLD: {GOLD!r}\n")
+
+# Save JSON sidecar
+RESULTS_PATH = WORK / "vibevoice-asr-bench.json"
+RESULTS_PATH.write_text(json.dumps({
+    "ts": datetime.now(timezone.utc).isoformat(),
+    "results": results,
+    "gold": GOLD,
+}, indent=2))
+print(f"wrote {RESULTS_PATH}")
+step("results.done")
