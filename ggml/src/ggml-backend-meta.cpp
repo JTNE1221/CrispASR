@@ -836,6 +836,7 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(co
                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
             case GGML_OP_NORM:
+            case GGML_OP_NORM_AFFINE:
             case GGML_OP_RMS_NORM:
             case GGML_OP_RMS_NORM_BACK:
             case GGML_OP_GROUP_NORM:
