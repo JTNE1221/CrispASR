@@ -24,8 +24,8 @@ Truecasing models for restoring proper capitalization in lowercase ASR output. U
 | `truecaser-lstm-en.bin` | BiLSTM char-level | English | 3.2 MB | 93.0% | Apache-2.0 | `lstm-en` |
 | `truecaser-lstm-es.bin` | BiLSTM char-level | Spanish | 3.2 MB | — | Apache-2.0 | `lstm-es` |
 | `truecaser-lstm-ru.bin` | BiLSTM char-level | Russian | 4.1 MB | — | Apache-2.0 | `lstm-ru` |
-| `truecaser-crf-de.bin` | CRF + context | 24 MB | ~95% | MIT | |
-| `truecaser-de.bin` | Statistical freq | 9.2 MB | ~93% | MIT | |
+| `truecaser-crf-de.bin` | CRF + context | German | 8.5 MB | ~95% | MIT | `crf` |
+| `truecaser-de.bin` | Statistical freq | German | 1.7 MB | ~93% | MIT | `auto` |
 
 ## BiLSTM Truecaser (recommended)
 
