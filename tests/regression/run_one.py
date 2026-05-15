@@ -216,6 +216,23 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
         entry["gguf"]["revision"],
         work_dir,
     )
+    # Some backends (e.g. moonshine) need companion files (tokenizer.bin)
+    # placed in the same HF cache snapshot dir as the GGUF. The manifest
+    # lists them under `gguf.companion_files`; each is downloaded from the
+    # same repo+revision as the GGUF and symlinked/placed next to the GGUF.
+    for companion in entry["gguf"].get("companion_files", []):
+        companion_local = hf_download(
+            entry["gguf"]["repo"],
+            companion,
+            entry["gguf"]["revision"],
+            work_dir,
+        )
+        # Place companion in same directory as gguf_local so backends can
+        # find it by relative path (e.g. tokenizer.bin next to moonshine.gguf).
+        companion_dest = gguf_local.parent / Path(companion).name
+        if not companion_dest.exists():
+            import shutil
+            shutil.copy2(companion_local, companion_dest)
     skip_diff = entry.get("skip_diff", False)
     ref_local: Path | None = None
     if not skip_diff:
@@ -333,6 +350,12 @@ def dry_run(manifest: dict, backend_filter: str | None = None) -> int:
 
     for entry in backends:
         name = entry["name"]
+        # skip_preflight: true — GGUF repo temporarily inaccessible (e.g. HF
+        # private-repo storage limit). Dry-run skips the artifact check so CI
+        # doesn't fail on an infrastructure issue outside our control.
+        if entry.get("skip_preflight", False):
+            print(f"  \033[33mSKIP\033[0m {name}: skip_preflight=true (GGUF repo check disabled)")
+            continue
         gguf_repo = entry["gguf"]["repo"]
         gguf_rev = entry["gguf"]["revision"]
         gguf_file = entry["gguf"]["file"]

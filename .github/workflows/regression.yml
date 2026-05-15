@@ -134,7 +134,9 @@ jobs:
           - canary-1b-v2
           - firered-asr2-aed
           - glm-asr-nano
-          - cohere-transcribe
+          # cohere-transcribe: removed from matrix — cstr/cohere-transcribe-GGUF
+          # is hitting HF private-repo storage limit (403). Re-add once the
+          # repo is made public or space is freed on the HF account.
           - granite-speech-4.1-2b
     steps:
       - uses: actions/checkout@v4

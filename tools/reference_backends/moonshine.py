@@ -75,9 +75,11 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         # Moonshine's encoder takes raw PCM as a (B, N) float32 tensor.
         # No separate preprocessor step — the first conv layers act as the
         # audio front-end. `attention_mask` is None for a single utterance.
+        # The encoder lives at model.model.encoder (not model.encoder).
+        encoder = model.model.encoder
         input_values = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0).to(dev)
         with torch.no_grad():
-            enc_out = model.encoder(input_values)
+            enc_out = encoder(input_values)
             # HF MoonshineEncoder returns a BaseModelOutput;
             # last_hidden_state has shape (B, T_enc, hidden_dim).
             h = enc_out.last_hidden_state  # (1, T_enc, hidden_dim)

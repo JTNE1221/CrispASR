@@ -173,6 +173,11 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # TitaNet-Large speaker verification. model_dir = HF id or local .nemo.
     # Audio arg is a single speaker utterance (16 kHz mono).
     "titanet":         "reference_backends.titanet",
+    # Moonshine (UsefulSensors tiny/base). model_dir = usefulsensors/moonshine-tiny
+    # or usefulsensors/moonshine-base (or a local snapshot). Audio arg is a 16 kHz
+    # mono WAV. Captures encoder_output (T_enc, hidden_dim) matching moonshine_encode().
+    "moonshine":       "reference_backends.moonshine",
+    "moonshine-base":  "reference_backends.moonshine",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import
