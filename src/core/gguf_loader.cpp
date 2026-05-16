@@ -447,6 +447,24 @@ static bool mmap_loader_enabled() {
     return *v != '0';
 }
 
+// Non-CPU (Metal / discrete-GPU) zero-copy mmap path. Default OFF because
+// the current implementation wraps the inner backend buffer with our own
+// iface, which sets `buffer->context = mmap_wrap_ctx *`. ggml-metal's
+// tensor-lookup path (`ggml_metal_get_buffer_id` in
+// ggml-metal-context.m) casts `buffer->context` directly to its internal
+// `ggml_metal_buffer_t` struct, so the wrap pattern makes Metal read
+// garbage and print "tensor 'X' buffer is nil" for every tensor on a
+// wrapped buffer. Kokoro on Apple Silicon Metal reproduced this as a
+// gibberish-audio regression after commit 8c895a7a flipped the global
+// mmap default to ON.
+//
+// Opt back in with `CRISPASR_GGUF_MMAP_GPU=1` once the wrap-iface bug is
+// fixed (see TODO in the Metal mmap branch of load_weights).
+static bool mmap_loader_gpu_enabled() {
+    const char* v = std::getenv("CRISPASR_GGUF_MMAP_GPU");
+    return v && *v && *v != '0';
+}
+
 // PLAN #60c: opt-in preload — page-walk the entire mmap region so every
 // page is resident before we return. Trades cold-start *load* time for
 // cold-start *prefill* time; useful for benchmarking and for users with
@@ -591,7 +609,15 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
     // device-cap probe means we silently fall through on backends that
     // don't advertise host-pointer support (CUDA without managed memory,
     // Vulkan, etc.).
-    if (mmap_loader_enabled() && !ggml_backend_is_cpu(backend)) {
+    //
+    // TODO(kokoro-metal-regression): the `mmap_wrap_iface` below is
+    // broken on Metal — `ggml_metal_get_buffer_id` casts
+    // `buffer->context` straight to `ggml_metal_buffer_t`, so wrapping
+    // makes Metal read garbage and emit "tensor 'X' buffer is nil" for
+    // every weight. Gated to opt-in (CRISPASR_GGUF_MMAP_GPU=1) until the
+    // path is rewritten to use the inner buffer directly + track the
+    // mmap region separately so the wrap is unnecessary.
+    if (mmap_loader_gpu_enabled() && !ggml_backend_is_cpu(backend)) {
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
         ggml_backend_dev_props props{};
         ggml_backend_dev_get_props(dev, &props);
