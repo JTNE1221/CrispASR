@@ -203,6 +203,34 @@ void main() {
         reason: 'rebuild libcrispasr — 0.5.9 grammar setter is missing');
   });
 
+  test('0.5.13 whisper alt-token capture symbols resolve', () {
+    // 0.5.13 adds top-N alternative-candidate capture for whisper
+    // greedy decode. The C side exposes them at three layers:
+    //   * params-level (`crispasr_params_set_alt_n`) for the
+    //     low-level transcribePcm path
+    //   * session-level sticky setter
+    //     (`crispasr_session_set_alt_n`)
+    //   * per-token + per-word accessors so consumers can surface
+    //     runner-up candidates in tap-to-pick UIs.
+    // Pre-0.5.13 dylibs don't have any of these; the Dart wrapper
+    // raises UnsupportedError so apps can graceful-degrade.
+    for (final s in [
+      'crispasr_params_set_alt_n',
+      'crispasr_session_set_alt_n',
+      'crispasr_token_n_alts',
+      'crispasr_token_alt_id',
+      'crispasr_token_alt_p',
+      'crispasr_token_alt_text',
+      'crispasr_session_result_word_n_alts',
+      'crispasr_session_result_word_alt_text',
+      'crispasr_session_result_word_alt_p',
+    ]) {
+      expect(() => lib.lookup(s), returnsNormally,
+          reason: 'rebuild libcrispasr — 0.5.13 alt-token symbol '
+              '$s is missing');
+    }
+  });
+
   test('0.5.12 audio enhancement helper resolves', () {
     // crispasr_enhance_audio_rnnoise runs RNNoise on a 16 kHz mono
     // float32 buffer (upsample → denoise frames → downsample) as a

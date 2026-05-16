@@ -32,17 +32,42 @@ class Word {
   final double start; // seconds
   final double end;   // seconds
   final double p;     // token probability [0, 1]
+  /// Top-N runner-up candidates for this token. Populated only when
+  /// the caller asked for alt-token capture (`altN` > 0 on the
+  /// session or `crispasr_params_set_alt_n` on the low-level path)
+  /// AND the loaded libcrispasr is ≥ 0.5.13. Empty otherwise. Ordered
+  /// descending by probability and the chosen token is not present.
+  final List<AltToken> alts;
 
   const Word({
     required this.text,
     required this.start,
     required this.end,
     required this.p,
+    this.alts = const [],
   });
 
   @override
   String toString() =>
       '${start.toStringAsFixed(2)}-${end.toStringAsFixed(2)} $text';
+}
+
+/// A single alternative-candidate suggestion. Surfaced for Whisper
+/// greedy decode when `altN` > 0; lets transcript-editor UIs offer
+/// tap-to-pick over ambiguous proper nouns / technical jargon.
+class AltToken {
+  /// The candidate's display text (already passed through the
+  /// tokenizer's id→string mapping; for Whisper sub-word BPE this
+  /// includes the leading-space marker when present).
+  final String text;
+
+  /// Softmax probability at the same decode step in `[0, 1]`.
+  final double p;
+
+  const AltToken({required this.text, required this.p});
+
+  @override
+  String toString() => '$text(${(p * 100).toStringAsFixed(1)}%)';
 }
 
 /// Result of [CrispASR.detectLanguage].
@@ -784,6 +809,13 @@ class TranscribeOptions {
   /// split segments on.
   final bool tdrz;
 
+  /// Capture top-N alternative-candidate tokens per greedy-sampled
+  /// step. 0 (default) = off. Whisper-only and meaningful only for
+  /// greedy decoding (beam search candidates aren't comparable). UI
+  /// layers should cap at 5 — beyond that the memory cost grows
+  /// linearly with no real benefit.
+  final int altN;
+
   const TranscribeOptions({
     this.strategy = 0,
     this.language,
@@ -802,6 +834,7 @@ class TranscribeOptions {
     this.vadMinSpeechMs = 250,
     this.vadMinSilenceMs = 100,
     this.tdrz = false,
+    this.altN = 0,
   });
 }
 
@@ -861,6 +894,21 @@ typedef _TokenT0       = int   Function(Pointer<Void>, int, int);
 
 typedef _TokenPNative = Float  Function(Pointer<Void>, Int32, Int32);
 typedef _TokenP       = double Function(Pointer<Void>, int, int);
+
+// Alt-token accessors (0.5.13). All take (ctx, i_seg, i_tok) +
+// optionally (i_alt) and return small POD values, so Dart FFI binds
+// directly.
+typedef _TokenNAltsNative = Int32 Function(Pointer<Void>, Int32, Int32);
+typedef _TokenNAlts       = int   Function(Pointer<Void>, int, int);
+
+typedef _TokenAltIdNative = Int32 Function(Pointer<Void>, Int32, Int32, Int32);
+typedef _TokenAltId       = int   Function(Pointer<Void>, int, int, int);
+
+typedef _TokenAltPNative = Float  Function(Pointer<Void>, Int32, Int32, Int32);
+typedef _TokenAltP       = double Function(Pointer<Void>, int, int, int);
+
+typedef _WhisperTokenToStrNative = Pointer<Utf8> Function(Pointer<Void>, Int32);
+typedef _WhisperTokenToStr       = Pointer<Utf8> Function(Pointer<Void>, int);
 
 typedef _DetectLangNative = Float Function(
     Pointer<Void>, Pointer<Float>, Int32, Int32, Pointer<Utf8>, Int32);
@@ -958,6 +1006,15 @@ class CrispASR {
   _TokenT0?     _tokenT0;
   _TokenT0?     _tokenT1;
   _TokenP?      _tokenP;
+
+  // 0.5.13 alt-token accessors. Null when loaded dylib is pre-0.5.13
+  // — callers fall back to empty alt lists and the UI hides the
+  // tap-to-pick affordance.
+  _TokenNAlts?       _tokenNAlts;
+  _TokenAltId?       _tokenAltId;
+  _TokenAltP?        _tokenAltP;
+  _WhisperTokenToStr? _whisperTokenToStr;
+  _ParamsSetInt?     _paramsSetAltN;
 
   _DetectLang?  _detectLang;
   _VadSegments? _vadSegments;
@@ -1088,6 +1145,22 @@ class CrispASR {
     if (_lib.providesSymbol('crispasr_token_p')) {
       _tokenP = _lib.lookupFunction<_TokenPNative, _TokenP>('crispasr_token_p');
     }
+    if (_lib.providesSymbol('crispasr_token_n_alts')) {
+      _tokenNAlts = _lib.lookupFunction<_TokenNAltsNative, _TokenNAlts>('crispasr_token_n_alts');
+    }
+    if (_lib.providesSymbol('crispasr_token_alt_id')) {
+      _tokenAltId = _lib.lookupFunction<_TokenAltIdNative, _TokenAltId>('crispasr_token_alt_id');
+    }
+    if (_lib.providesSymbol('crispasr_token_alt_p')) {
+      _tokenAltP = _lib.lookupFunction<_TokenAltPNative, _TokenAltP>('crispasr_token_alt_p');
+    }
+    if (_lib.providesSymbol('whisper_token_to_str')) {
+      _whisperTokenToStr =
+          _lib.lookupFunction<_WhisperTokenToStrNative, _WhisperTokenToStr>('whisper_token_to_str');
+    }
+    if (_lib.providesSymbol('crispasr_params_set_alt_n')) {
+      _paramsSetAltN = _lib.lookupFunction<_ParamsSetIntNative, _ParamsSetInt>('crispasr_params_set_alt_n');
+    }
 
     if (_lib.providesSymbol('crispasr_detect_language')) {
       _detectLang = _lib.lookupFunction<_DetectLangNative, _DetectLang>('crispasr_detect_language');
@@ -1181,6 +1254,9 @@ class CrispASR {
         }
       }
       if (opts.tdrz) _paramsSetTdrz?.call(params, 1);
+      // Alt-token capture (0 = off, default). Pre-0.5.13 dylibs lack
+      // the setter — silently skip so callers stay forward-compatible.
+      if (opts.altN > 0) _paramsSetAltN?.call(params, opts.altN);
 
       final ret = _full(_ctx, params, samples, pcm.length);
       if (ret != 0) throw Exception('Transcription failed (error $ret)');
@@ -1219,11 +1295,35 @@ class CrispASR {
           if (tok.isEmpty) continue;
           // Skip the special-token brackets whisper emits inline.
           if (tok.startsWith('[_') || tok.startsWith('<|')) continue;
+          // Pull alt-token candidates when the loaded dylib supports
+          // them AND alt_n was actually set; n_alts returns 0 in both
+          // unsupported and "not captured" cases so a single guard
+          // covers both branches.
+          var alts = const <AltToken>[];
+          if (_tokenNAlts != null &&
+              _tokenAltId != null &&
+              _tokenAltP != null &&
+              _whisperTokenToStr != null) {
+            final nA = _tokenNAlts!(_ctx, i, k);
+            if (nA > 0) {
+              final list = <AltToken>[];
+              for (var a = 0; a < nA; a++) {
+                final aid = _tokenAltId!(_ctx, i, k, a);
+                final ap = _tokenAltP!(_ctx, i, k, a);
+                final ts = _whisperTokenToStr!(_ctx, aid);
+                final atext = ts == nullptr ? '' : ts.toDartString();
+                if (atext.isEmpty) continue;
+                list.add(AltToken(text: atext, p: ap));
+              }
+              alts = list;
+            }
+          }
           words.add(Word(
             text: tok,
             start: _tokenT0!(_ctx, i, k) / 100.0,
             end:   _tokenT1!(_ctx, i, k) / 100.0,
             p:     _tokenP!(_ctx, i, k),
+            alts: alts,
           ));
         }
       }
@@ -1925,6 +2025,27 @@ class CrispasrSession {
             double Function(Pointer<Void>, int, int)>(
             'crispasr_session_result_word_p')
         : null;
+    // 0.5.13: per-word top-N alternative candidates. All three symbols
+    // landed together so a single guard covers presence; pre-0.5.13
+    // dylibs report no alts and the UI hides the affordance.
+    final wordNAltsFn = _lib.providesSymbol('crispasr_session_result_word_n_alts')
+        ? _lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Int32, Int32),
+            int Function(Pointer<Void>, int, int)>(
+            'crispasr_session_result_word_n_alts')
+        : null;
+    final wordAltTextFn = _lib.providesSymbol('crispasr_session_result_word_alt_text')
+        ? _lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Int32, Int32, Int32),
+            Pointer<Utf8> Function(Pointer<Void>, int, int, int)>(
+            'crispasr_session_result_word_alt_text')
+        : null;
+    final wordAltPFn = _lib.providesSymbol('crispasr_session_result_word_alt_p')
+        ? _lib.lookupFunction<
+            Float Function(Pointer<Void>, Int32, Int32, Int32),
+            double Function(Pointer<Void>, int, int, int)>(
+            'crispasr_session_result_word_alt_p')
+        : null;
 
     final out = <SessionSegment>[];
     for (var i = 0; i < nSegs; i++) {
@@ -1942,11 +2063,26 @@ class CrispasrSession {
         // than treating it as zero confidence.
         var p = wordPFn == null ? 1.0 : wordPFn(res, i, k);
         if (p < 0) p = 1.0;
+        var alts = const <AltToken>[];
+        if (wordNAltsFn != null && wordAltTextFn != null && wordAltPFn != null) {
+          final nA = wordNAltsFn(res, i, k);
+          if (nA > 0) {
+            final list = <AltToken>[];
+            for (var a = 0; a < nA; a++) {
+              final tp2 = wordAltTextFn(res, i, k, a);
+              final atext = tp2 == nullptr ? '' : tp2.toDartString();
+              if (atext.isEmpty) continue;
+              list.add(AltToken(text: atext, p: wordAltPFn(res, i, k, a)));
+            }
+            alts = list;
+          }
+        }
         words.add(Word(
           text: wt,
           start: wordT0(res, i, k) / 100.0,
           end:   wordT1(res, i, k) / 100.0,
           p: p,
+          alts: alts,
         ));
       }
       out.add(SessionSegment(text: text.trim(), start: t0, end: t1, words: words));
@@ -2292,6 +2428,40 @@ class CrispasrSession {
         temperatureInc);
     if (rc != 0) {
       throw Exception('setFallbackThresholds failed (rc=$rc)');
+    }
+  }
+
+  /// Sticky setter for per-token top-N alternative-candidate capture
+  /// (whisper greedy decode only). 0 (default) = off.
+  ///
+  /// When `n > 0`, every greedy-sampled token also retains its top-N
+  /// runner-up candidates, which the session-result accessors surface
+  /// via [Word.alts]. Useful for "tap an ambiguous word in the
+  /// transcript editor and pick a competing token" UIs. The model
+  /// emits these only when it was genuinely uncertain — for confident
+  /// tokens the alternates will all be tiny-probability filler.
+  ///
+  /// Beam search is intentionally excluded: its siblings are
+  /// beam-conditional rather than greedy alternatives, so the
+  /// semantics are different and conflating them would mislead users.
+  ///
+  /// Throws [UnsupportedError] when the loaded dylib predates 0.5.13
+  /// (no `crispasr_session_set_alt_n` symbol). Callers should catch
+  /// and downgrade gracefully — the C side wouldn't have honoured
+  /// the value anyway.
+  void setAltN(int n) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_alt_n')) {
+      throw UnsupportedError(
+          'crispasr_session_set_alt_n not present in this libcrispasr build — '
+          'rebuild against CrispASR 0.5.13+');
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_alt_n');
+    final rc = fn(_handle, n);
+    if (rc != 0) {
+      throw Exception('setAltN failed (rc=$rc)');
     }
   }
 
