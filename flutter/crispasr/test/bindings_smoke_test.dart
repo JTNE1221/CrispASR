@@ -203,6 +203,20 @@ void main() {
         reason: 'rebuild libcrispasr — 0.5.9 grammar setter is missing');
   });
 
+  test('0.5.11 whisper decode-extras setter resolves', () {
+    // crispasr_session_set_whisper_decode_extras writes
+    // wparams.suppress_nst + suppress_regex + carry_initial_prompt
+    // on every whisper transcribe. Pre-0.5.11 dylibs don't have
+    // the symbol; the Dart wrapper raises UnsupportedError so
+    // apps can graceful-degrade.
+    expect(
+        () => lib
+            .lookup('crispasr_session_set_whisper_decode_extras'),
+        returnsNormally,
+        reason: 'rebuild libcrispasr — 0.5.11 whisper decode-extras '
+            'setter is missing');
+  });
+
   test('0.5.10 whisper decoder-fallback thresholds setter resolves', () {
     // crispasr_session_set_fallback_thresholds writes the four
     // wparams.*_thold fields + wparams.temperature_inc on every

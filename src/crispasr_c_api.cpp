@@ -923,6 +923,17 @@ struct crispasr_session {
     // follow-up: "expose per-call beam_size on session-API backends."
     int beam_size = 1;
 
+    // Whisper text-suppression + prompt-carry extras (whisper-only).
+    // Map 1-to-1 onto wparams.suppress_nst / suppress_regex /
+    // carry_initial_prompt on every transcribe dispatch.
+    //
+    // Defaults match whisper_full_default_params: nst off,
+    // regex empty (no suppression), carry off. Set via the
+    // matching C-ABI `crispasr_session_set_whisper_decode_extras`.
+    bool whisper_suppress_nst = false;
+    std::string whisper_suppress_regex;
+    bool whisper_carry_initial_prompt = false;
+
     // Whisper decoder-fallback thresholds (whisper-only — none of
     // these fields exist on the other backends' wparams equivalent).
     //
@@ -2097,6 +2108,16 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         wparams.logprob_thold = s->logprob_thold;
         wparams.no_speech_thold = s->no_speech_thold;
         wparams.temperature_inc = s->temperature_inc;
+        // Whisper text-suppression + prompt-carry extras. All three
+        // map directly onto wparams; an empty regex passes nullptr
+        // (whisper's "no suppression" sentinel) instead of an empty
+        // string so wparams.suppress_regex doesn't end up pointing
+        // at a heap blob with zero length.
+        wparams.suppress_nst = s->whisper_suppress_nst;
+        wparams.carry_initial_prompt = s->whisper_carry_initial_prompt;
+        wparams.suppress_regex = s->whisper_suppress_regex.empty()
+            ? nullptr
+            : s->whisper_suppress_regex.c_str();
         // GBNF grammar-constrained sampling (whisper-only). The
         // `grammar_rules_ptrs` vector and the parsed rules it points
         // into both live on the session struct so they outlive the
@@ -4562,6 +4583,35 @@ CA_EXPORT int crispasr_session_set_fallback_thresholds(crispasr_session* s,
     if (temperature_inc > 1.0f)
         temperature_inc = 1.0f;
     s->temperature_inc = temperature_inc;
+    return 0;
+}
+
+// Whisper text-suppression + prompt-carry extras. All three map
+// onto whisper_full_params fields with no analog on other
+// backends, so this setter is whisper-only at apply time. The
+// session struct holds the values and the transcribe path
+// writes them into wparams on every dispatch.
+//
+// Defaults from whisper_full_default_params:
+//   suppress_nst         = false  ("emit non-speech tokens like
+//                                    [LAUGHTER], [MUSIC] when
+//                                    whisper produces them")
+//   suppress_regex       = ""     (no suppression)
+//   carry_initial_prompt = false  ("only prepend initial_prompt
+//                                    to the FIRST decode window")
+//
+// `suppress_regex` is copied into a std::string on the session;
+// the caller can free their copy after this returns. Empty
+// string clears any prior regex.
+CA_EXPORT int crispasr_session_set_whisper_decode_extras(crispasr_session* s,
+                                                         int suppress_nst,
+                                                         const char* suppress_regex,
+                                                         int carry_initial_prompt) {
+    if (!s)
+        return -1;
+    s->whisper_suppress_nst = suppress_nst != 0;
+    s->whisper_carry_initial_prompt = carry_initial_prompt != 0;
+    s->whisper_suppress_regex = suppress_regex ? suppress_regex : "";
     return 0;
 }
 

@@ -2140,6 +2140,62 @@ class CrispasrSession {
   /// transcribe call decodes unconstrained again.
   void clearGrammar() => setGrammar('');
 
+  /// Whisper text-suppression + prompt-carry extras (whisper-only;
+  /// other backends silently ignore). Effective on CrispASR
+  /// 0.5.11+.
+  ///
+  /// All three map directly onto `whisper_full_params` fields:
+  ///
+  /// * [suppressNonSpeechTokens] — when true, whisper drops
+  ///   `[LAUGHTER]` / `[MUSIC]` / `[NOISE]` markers from the
+  ///   output. Maps to `wparams.suppress_nst`. Default false
+  ///   (= keep the markers, matches stock whisper.cpp).
+  /// * [suppressRegex] — Posix regex; tokens whose text matches
+  ///   are dropped during decoding. Empty string disables.
+  ///   Useful for purging frequent hallucinated tokens or
+  ///   speaker-tag patterns the model leaks. Maps to
+  ///   `wparams.suppress_regex`.
+  /// * [carryInitialPrompt] — when true, whisper prepends the
+  ///   initial prompt to every decode window (not just the
+  ///   first). Useful for vocabulary biasing on long audio at
+  ///   the cost of weakening context conditioning. Maps to
+  ///   `wparams.carry_initial_prompt`. Default false.
+  ///
+  /// Throws [UnsupportedError] when the loaded dylib predates
+  /// 0.5.11 (no `crispasr_session_set_whisper_decode_extras`
+  /// symbol). Callers should catch + graceful-degrade.
+  void setWhisperDecodeExtras({
+    bool suppressNonSpeechTokens = false,
+    String suppressRegex = '',
+    bool carryInitialPrompt = false,
+  }) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol(
+        'crispasr_session_set_whisper_decode_extras')) {
+      throw UnsupportedError(
+          'crispasr_session_set_whisper_decode_extras not present in this libcrispasr build — '
+          'rebuild against CrispASR 0.5.11+');
+    }
+    final fn = _lib.lookupFunction<
+        Int32 Function(Pointer<Void>, Int32, Pointer<Utf8>, Int32),
+        int Function(Pointer<Void>, int, Pointer<Utf8>,
+            int)>('crispasr_session_set_whisper_decode_extras');
+    final regexPtr = suppressRegex.isEmpty
+        ? Pointer<Utf8>.fromAddress(0)
+        : suppressRegex.toNativeUtf8();
+    try {
+      final rc = fn(_handle, suppressNonSpeechTokens ? 1 : 0, regexPtr,
+          carryInitialPrompt ? 1 : 0);
+      if (rc != 0) {
+        throw Exception('setWhisperDecodeExtras failed (rc=$rc)');
+      }
+    } finally {
+      if (regexPtr != Pointer<Utf8>.fromAddress(0)) {
+        calloc.free(regexPtr);
+      }
+    }
+  }
+
   /// Whisper decoder-fallback thresholds (whisper-only). Each
   /// value is written into `whisper_full_params` on every
   /// transcribe dispatch; non-whisper backends silently ignore
