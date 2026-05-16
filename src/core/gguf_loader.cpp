@@ -682,6 +682,20 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
     }
 
     MappedFile mf(path);
+    if (mf.ok) {
+        // Issue #94: the legacy alloc+copy path took 30-60 s for the
+        // 658 MB chatterbox-turbo T3 GGUF on slow disks, because each
+        // ggml_backend_tensor_set hit a synchronous page fault on
+        // its first access to the mmap source region. The zero-copy
+        // mmap path already hints WILLNEED (line 526) for the same
+        // reason; doing it here brings the legacy path's load time
+        // back in line for users who opt out of the zero-copy path
+        // with CRISPASR_GGUF_MMAP=0 (e.g. model files on network
+        // mounts where mmap would SIGBUS on disconnect).
+#if !defined(_WIN32)
+        ::posix_madvise(mf.base, mf.size, POSIX_MADV_WILLNEED);
+#endif
+    }
     if (!mf.ok) {
         // Fallback: read via FILE* pread/fseek. This is the rare path —
         // most systems have working mmap. We implement it inline here so
