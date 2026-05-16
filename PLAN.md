@@ -2564,10 +2564,16 @@ gap is visible:
     mishears.
   - **Widget test for the alt-picker popover** (CrisperWeaver
     side; Riverpod + l10n scaffolding nontrivial).
-  - **Live end-to-end test** with `altN: 3` against a
-    downloaded `ggml-tiny.en.bin`, asserting ≥1 returned word
-    has alts and the chosen word's probability sits above the
-    top alt. Needs a model on CI.
+  - ~~**Live end-to-end test**~~ — **shipped** as
+    `flutter/crispasr/test/alt_tokens_live_test.dart`. Opens a
+    session against `ggml-tiny.en.bin`, sets `altN=3`,
+    transcribes `samples/jfk.wav`, and asserts ≥1 word has
+    alts, p ∈ [0, 1] and descending, chosen token excluded,
+    `setAltN(0)` actually clears on the next decode. Tagged
+    `live` so model-less CI still passes. On the dev box
+    whisper-tiny gives 22/22 words runner-ups on JFK with
+    real morphological alternatives like "Americans →
+    America / americ / American".
 * Whisper decoder fallback knobs (`--word-thold`,
   `--entropy-thold`, `--logprob-thold`, `--no-speech-thold`,
   `--no-fallback`, `--temperature-inc`) — already in the Dart
