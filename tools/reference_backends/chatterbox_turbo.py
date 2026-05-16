@@ -11,7 +11,7 @@ Pipeline stages captured:
   s3gen_enc0_matrix_bd — rel-pos attention scores (post rel_shift) in enc.0
   s3gen_enc0_attn_out — attention output of enc.0 (after output proj)
   s3gen_pos_emb_pre   — positional encoding for pre-upsample blocks
-  s3gen_gen_mel       — CFM denoiser output mel (generation portion only)
+  s3gen_mel       — CFM denoiser output mel (generation portion only)
   hift_pcm            — final 24 kHz waveform
 
 Usage:
@@ -30,6 +30,7 @@ from typing import Dict, Set
 import numpy as np
 
 DEFAULT_STAGES = [
+    "t3_speech_tokens",
     "s3gen_encoder_out",
     "s3gen_enc0_pre_attn",
     "s3gen_enc0_q",
@@ -37,7 +38,7 @@ DEFAULT_STAGES = [
     "s3gen_enc0_attn_out",
     "s3gen_pos_emb_pre",
     "s3gen_init_noise",
-    "s3gen_gen_mel",
+    "s3gen_mel",
     "hift_pcm",
 ]
 
@@ -162,6 +163,11 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
                                    5830, 4372, 3644, 1919, 1676, 1649, 596, 2816, 5088, 5067,
                                    1275, 5400, 732, 2031, 4218, 4218, 4218, 4218]])
 
+    # Issue #94 follow-up: save these tokens so crispasr-diff can chain the
+    # s3gen-only checks (it expects a t3_speech_tokens tensor in the archive).
+    if "t3_speech_tokens" in stages:
+        out["t3_speech_tokens"] = speech_tokens.squeeze(0).cpu().numpy().astype(np.float32)
+
     ref_dict = model.conds.gen
 
     print(f"  running S3Gen with {speech_tokens.size(1)} speech tokens (meanflow, 2 steps)")
@@ -203,9 +209,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             out[k_name] = v_val
 
     # Gen mel
-    if "s3gen_gen_mel" in stages and mel is not None:
+    if "s3gen_mel" in stages and mel is not None:
         # mel shape: (B, 80, T_gen)
-        out["s3gen_gen_mel"] = mel.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
+        out["s3gen_mel"] = mel.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
     if "s3gen_init_noise" in stages and init_noise is not None:
         out["s3gen_init_noise"] = init_noise.detach().squeeze(0).permute(1, 0).contiguous().cpu().float().numpy()
 
