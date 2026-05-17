@@ -72,7 +72,7 @@ DEFAULT_SYN_TEXT = "Hello, this is a test of the VoxCPM2 text to speech system."
 
 def dump(
     model_dir: str,
-    audio: str = "",
+    audio=None,
     audio_path: str = "",
     stages: Set[str] | None = None,
     device: str = "cpu",
@@ -98,7 +98,8 @@ def dump(
     except ImportError:
         raise ImportError("pip install voxcpm  (needed for VoxCPM2 reference backend)")
 
-    audio_path = audio_path or audio or ""
+    if not audio_path:
+        audio_path = ""
     syn_text = os.environ.get("VOXCPM2_SYN_TEXT", DEFAULT_SYN_TEXT)
     print(f"  synth text: {syn_text!r}")
     print(f"  ref audio:  {audio_path}")
