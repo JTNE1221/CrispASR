@@ -963,11 +963,21 @@ static std::vector<float> locenc_forward(voxcpm2_context* ctx, const float* patc
 // ---------------------------------------------------------------------------
 
 static std::vector<float> sinusoidal_time_emb(float t_scalar, int dim) {
+    // Matches Python SinusoidalPosEmb(dim).forward(x, scale=1000):
+    //   half_dim = dim // 2
+    //   emb = log(10000) / (half_dim - 1)
+    //   emb = exp(arange(half_dim) * -emb)
+    //   emb = scale * x * emb
+    //   return cat(sin(emb), cos(emb))    ← [sin_0..sin_hd-1, cos_0..cos_hd-1]
+    int half_dim = dim / 2;
+    float log_base = std::log(10000.0f) / (float)(half_dim - 1);
+    float scale = 1000.0f;
     std::vector<float> emb(dim, 0.0f);
-    for (int i = 0; i < dim / 2; i++) {
-        float freq = std::exp(-std::log(10000.0f) * (float)(2 * i) / (float)dim);
-        emb[2 * i] = std::cos(t_scalar * freq);
-        emb[2 * i + 1] = std::sin(t_scalar * freq);
+    for (int i = 0; i < half_dim; i++) {
+        float freq = std::exp(-(float)i * log_base);
+        float val = scale * t_scalar * freq;
+        emb[i] = std::sin(val);            // first half: sin
+        emb[i + half_dim] = std::cos(val); // second half: cos
     }
     return emb;
 }
