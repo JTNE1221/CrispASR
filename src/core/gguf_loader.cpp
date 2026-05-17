@@ -493,21 +493,46 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
                 return false;
             }
 
+            // Pre-validate tensor bounds before calling ggml_backend_tensor_alloc,
+            // which fires a hard GGML_ASSERT when any tensor's range exceeds
+            // buf_size.  Seen on macOS 26.x Tahoe (issue #94) — likely a
+            // mismatched or truncated GGUF file.  Detect it here and fall back
+            // gracefully to the legacy alloc+copy path instead of crashing.
+            bool bounds_ok = true;
             for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
-                out.tensors[ggml_get_name(t)] = t;
                 const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
                 if (tid < 0)
                     continue;
                 const size_t off = gguf_get_tensor_offset(gctx, tid);
-                ggml_backend_tensor_alloc(out.buf, t, tensor_base + off);
+                if (off + ggml_nbytes(t) > buf_size) {
+                    fprintf(stderr,
+                            "%s: mmap bounds check failed for tensor '%s' "
+                            "(off=%zu + nbytes=%zu > buf_size=%zu) — "
+                            "falling back to legacy loader\n",
+                            tag, ggml_get_name(t), off, ggml_nbytes(t), buf_size);
+                    bounds_ok = false;
+                    break;
+                }
             }
-
-            gguf_free(gctx);
-            return true;
+            if (bounds_ok) {
+                for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
+                    out.tensors[ggml_get_name(t)] = t;
+                    const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
+                    if (tid < 0)
+                        continue;
+                    const size_t off = gguf_get_tensor_offset(gctx, tid);
+                    ggml_backend_tensor_alloc(out.buf, t, tensor_base + off);
+                }
+                gguf_free(gctx);
+                return true;
+            }
+            // Bounds check failed — release the mmap buffer and fall through to
+            // the legacy alloc+copy path below.
+            ggml_backend_buffer_free(out.buf);
+            out.buf = nullptr;
         }
-        // mmap failed — fall through to the legacy alloc + copy path. We
-        // do NOT print a warning here; mmap is best-effort and the legacy
-        // path is functionally equivalent (just with more RSS).
+        // mmap failed or bounds check failed — fall through to the legacy
+        // alloc + copy path. Functionally equivalent, just with more RSS.
     }
 
     // PLAN #51a (Metal variant): zero-copy GPU path via the device's
@@ -570,17 +595,41 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
                     register_gpu_mmap(inner, leaked_base, leaked_size);
                     out.buf = inner;
 
+                    // Pre-validate bounds (same rationale as CPU mmap path).
+                    bool bounds_ok = true;
                     for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
-                        out.tensors[ggml_get_name(t)] = t;
                         const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
                         if (tid < 0)
                             continue;
                         const size_t off = gguf_get_tensor_offset(gctx, tid);
-                        ggml_backend_tensor_alloc(out.buf, t, tensor_base + off);
+                        if (data_off + off + ggml_nbytes(t) > leaked_size) {
+                            fprintf(stderr,
+                                    "%s: GPU mmap bounds check failed for tensor '%s' "
+                                    "(data_off=%zu + off=%zu + nbytes=%zu > file_size=%zu) — "
+                                    "falling back to legacy loader\n",
+                                    tag, ggml_get_name(t), data_off, off, ggml_nbytes(t), leaked_size);
+                            bounds_ok = false;
+                            break;
+                        }
                     }
+                    if (!bounds_ok) {
+                        out.buf = nullptr;
+                        // inner is registered in g_gpu_mmap and deliberately
+                        // leaked (same as the normal teardown path).
+                        // Fall through to legacy path.
+                    } else {
+                        for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
+                            out.tensors[ggml_get_name(t)] = t;
+                            const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
+                            if (tid < 0)
+                                continue;
+                            const size_t off = gguf_get_tensor_offset(gctx, tid);
+                            ggml_backend_tensor_alloc(out.buf, t, tensor_base + off);
+                        }
 
-                    gguf_free(gctx);
-                    return true;
+                        gguf_free(gctx);
+                        return true;
+                    }
                 }
                 // buffer_from_host_ptr returned null — release mmap and fall
                 // through to the legacy path. No warning; same rationale as
