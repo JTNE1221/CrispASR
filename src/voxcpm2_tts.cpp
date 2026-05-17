@@ -410,7 +410,8 @@ static uint32_t mt19937_next(mt19937_state& s) {
         for (int i = 0; i < 624; i++) {
             uint32_t y = (s.mt[i] & 0x80000000u) | (s.mt[(i + 1) % 624] & 0x7FFFFFFFu);
             s.mt[i] = s.mt[(i + 397) % 624] ^ (y >> 1);
-            if (y & 1) s.mt[i] ^= 0x9908B0DFu;
+            if (y & 1)
+                s.mt[i] ^= 0x9908B0DFu;
         }
         s.mti = 0;
     }
@@ -438,11 +439,13 @@ static void torch_normal_fill_16(float* data) {
 }
 
 static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
-    if (n <= 0) return;
+    if (n <= 0)
+        return;
 
     if (n < 16) {
         float tmp[16];
-        for (int i = 0; i < 16; i++) tmp[i] = mt_uniform_torch_float(rng);
+        for (int i = 0; i < 16; i++)
+            tmp[i] = mt_uniform_torch_float(rng);
         torch_normal_fill_16(tmp);
         memcpy(data, tmp, (size_t)n * sizeof(float));
         return;
@@ -457,7 +460,8 @@ static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
 
     if (i < n) {
         float* tail = data + n - 16;
-        for (int j = 0; j < 16; j++) tail[j] = mt_uniform_torch_float(rng);
+        for (int j = 0; j < 16; j++)
+            tail[j] = mt_uniform_torch_float(rng);
         torch_normal_fill_16(tail);
     }
 }
@@ -756,17 +760,15 @@ static std::vector<float> tslm_prefill(voxcpm2_context* ctx, const std::vector<i
 
 struct tslm_prefill_hooks {
     std::vector<float>* all_positions = nullptr;  // [T * d] row-major
-    int layer0_capture = -1;                       // layer index for "layer 0" hook
-    std::vector<float>* layer0_out = nullptr;      // [N * d]
-    int layer_last_capture = -1;                   // layer index for "last layer" hook
-    std::vector<float>* layer_last_out = nullptr;  // [N * d]
-    int max_capture_positions = 8;                 // capture first N positions only
+    int layer0_capture = -1;                      // layer index for "layer 0" hook
+    std::vector<float>* layer0_out = nullptr;     // [N * d]
+    int layer_last_capture = -1;                  // layer index for "last layer" hook
+    std::vector<float>* layer_last_out = nullptr; // [N * d]
+    int max_capture_positions = 8;                // capture first N positions only
 };
 
-static std::vector<float> tslm_prefill_ex(voxcpm2_context* ctx,
-                                            const std::vector<int32_t>& token_ids,
-                                            ggml_backend_t cpu_be,
-                                            const tslm_prefill_hooks& hooks) {
+static std::vector<float> tslm_prefill_ex(voxcpm2_context* ctx, const std::vector<int32_t>& token_ids,
+                                          ggml_backend_t cpu_be, const tslm_prefill_hooks& hooks) {
     const vox_hparams& hp = ctx->hp;
     int d = (int)hp.tslm_d_model;
     int T = (int)token_ids.size();
@@ -777,7 +779,8 @@ static std::vector<float> tslm_prefill_ex(voxcpm2_context* ctx,
 
     for (int t = 0; t < T; t++) {
         int id = token_ids[t];
-        if (id < 0 || id >= (int)hp.n_vocab) id = 0;
+        if (id < 0 || id >= (int)hp.n_vocab)
+            id = 0;
         get_row_f32(ctx->weights.tslm_token_embd, id, hidden.data());
 
         for (int l = 0; l < n_layers; l++) {
@@ -786,12 +789,10 @@ static std::vector<float> tslm_prefill_ex(voxcpm2_context* ctx,
             // Per-layer hooks (capture first N positions)
             if (t < hooks.max_capture_positions) {
                 if (l == hooks.layer0_capture && hooks.layer0_out) {
-                    hooks.layer0_out->insert(hooks.layer0_out->end(),
-                                              hidden.data(), hidden.data() + d);
+                    hooks.layer0_out->insert(hooks.layer0_out->end(), hidden.data(), hidden.data() + d);
                 }
                 if (l == hooks.layer_last_capture && hooks.layer_last_out) {
-                    hooks.layer_last_out->insert(hooks.layer_last_out->end(),
-                                                  hidden.data(), hidden.data() + d);
+                    hooks.layer_last_out->insert(hooks.layer_last_out->end(), hidden.data(), hidden.data() + d);
                 }
             }
         }
@@ -799,8 +800,7 @@ static std::vector<float> tslm_prefill_ex(voxcpm2_context* ctx,
 
         // Save all-positions output (after all layers, before output norm)
         if (hooks.all_positions && t < hooks.max_capture_positions) {
-            hooks.all_positions->insert(hooks.all_positions->end(),
-                                         hidden.data(), hidden.data() + d);
+            hooks.all_positions->insert(hooks.all_positions->end(), hidden.data(), hidden.data() + d);
         }
     }
 
@@ -833,9 +833,7 @@ static std::vector<float> ralm_prefill(voxcpm2_context* ctx, const std::vector<f
 // Multi-position RALM prefill — processes T tokens sequentially with causal attention.
 // Input: [T * d] row-major (T vectors of d dimensions).
 // Returns: [T * d] row-major output hidden states (pre-output-norm).
-static std::vector<float> ralm_prefill_multi(voxcpm2_context* ctx,
-                                              const float* input, int T,
-                                              ggml_backend_t cpu_be) {
+static std::vector<float> ralm_prefill_multi(voxcpm2_context* ctx, const float* input, int T, ggml_backend_t cpu_be) {
     const vox_hparams& hp = ctx->hp;
     int d = (int)hp.ralm_d_model;
     ctx->ralm_kv.reset();
@@ -1147,8 +1145,7 @@ static std::vector<float> locdit_forward(voxcpm2_context* ctx, const float* x_ra
 // ---------------------------------------------------------------------------
 
 static std::vector<float> cfm_euler_solve(voxcpm2_context* ctx, const float* mu, const float* cond_raw, int steps,
-                                          float cfg, ggml_backend_t cpu_be,
-                                          const float* initial_noise = nullptr) {
+                                          float cfg, ggml_backend_t cpu_be, const float* initial_noise = nullptr) {
     int feat_dim = 64;
     int P = (int)ctx->hp.patch_frames; // 4
     int state_size = feat_dim * P;     // 256
@@ -1262,21 +1259,25 @@ static float stop_score(voxcpm2_context* ctx, const float* lm_hidden, ggml_backe
 // ---------------------------------------------------------------------------
 static std::vector<float> wn_reconstruct(const float* weight_g, const float* weight_v, int out_ch, int in_ch,
                                          int ksize) {
+    // PyTorch weight_norm (dim=0 for Conv1d): g has shape [out_ch].
+    // Norm is computed per out_ch across all (in_ch * ksize) elements.
     // weight_v GGUF layout: v[ki + ic*ksize + oc*ksize*in_ch]
+    // Output layout: w[ki + ic*ksize + oc*in_ch*ksize] = [out_ch, in_ch, k]
     int total = out_ch * in_ch * ksize;
     std::vector<float> w(total);
     for (int oc = 0; oc < out_ch; oc++) {
         float g = weight_g[oc];
+        // Compute L2 norm across ALL (in_ch * ksize) elements for this oc
+        float norm_sq = 0.0f;
         for (int ic = 0; ic < in_ch; ic++) {
-            // Compute L2 norm across k dimension for this (ic, oc) pair
-            float norm_sq = 0.0f;
             for (int ki = 0; ki < ksize; ki++) {
                 float val = weight_v[ki + (size_t)ic * ksize + (size_t)oc * ksize * in_ch];
                 norm_sq += val * val;
             }
-            float inv_norm = 1.0f / std::sqrt(norm_sq + 1e-12f);
-            float scale = g * inv_norm;
-            // Write out in [out_ch, in_ch, k] order for causal_conv1d
+        }
+        float inv_norm = 1.0f / std::sqrt(norm_sq + 1e-12f);
+        float scale = g * inv_norm;
+        for (int ic = 0; ic < in_ch; ic++) {
             for (int ki = 0; ki < ksize; ki++) {
                 float vval = weight_v[ki + (size_t)ic * ksize + (size_t)oc * ksize * in_ch];
                 w[ki + (size_t)ic * ksize + (size_t)oc * in_ch * ksize] = vval * scale;
@@ -1426,14 +1427,16 @@ static void vae_residual_unit(const std::map<std::string, ggml_tensor*>& tensors
     }
 
     // dilated causal conv: .1.{weight_g, weight_v, bias}  k=7, dil=dilation
+    // This is DEPTHWISE (groups=C): weight_v shape [k, 1, C] in GGUF
     int k1 = 7;
     std::vector<float> h2((size_t)C * T, 0.0f);
     const float* g1 = vae_tensor_f32(tensors, prefix + ".1.weight_g");
     const float* v1 = vae_tensor_f32(tensors, prefix + ".1.weight_v");
     const float* b1 = vae_tensor_f32(tensors, prefix + ".1.bias");
     if (g1 && v1) {
-        auto w1 = wn_reconstruct(g1, v1, C, C, k1);
-        causal_conv1d(w1.data(), b1, h1.data(), h2.data(), C, C, k1, T, 1, dilation, 1);
+        // Depthwise: out_ch=C, in_per_grp=1, groups=C
+        auto w1 = wn_reconstruct(g1, v1, C, 1, k1);
+        causal_conv1d(w1.data(), b1, h1.data(), h2.data(), C, C, k1, T, 1, dilation, C);
     } else {
         std::memcpy(h2.data(), h1.data(), (size_t)C * T * sizeof(float));
     }
@@ -1515,6 +1518,8 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
     }
 
     // --- Build latent tensor [feat_dim=64, T_lat] ---
+    // Patches are [P * feat_dim] row-major = P frames of feat_dim each.
+    // Latent tensor is [feat_dim, T_lat] = channels-first (C, T).
     std::vector<float> latents((size_t)feat_dim * T_lat, 0.0f);
     for (int n = 0; n < n_patches; n++) {
         const auto& patch = patches[n];
@@ -1529,6 +1534,11 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
                 latents[(size_t)c * T_lat + t] = src[c];
             }
         }
+    }
+
+    if (ctx->verbosity >= 2) {
+        float mx = 0; for (auto v : latents) { float a = v < 0 ? -v : v; if (a > mx) mx = a; }
+        fprintf(stderr, "voxcpm2 VAE: latent [%d, %d] max=%.4f\n", feat_dim, T_lat, mx);
     }
 
     // SR conditioning bucket for 48kHz
@@ -1554,6 +1564,10 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             h = latents;
         }
     }
+    if (ctx->verbosity >= 2) {
+        float mx = 0; for (auto v : h) { float a = v < 0 ? -v : v; if (a > mx) mx = a; }
+        fprintf(stderr, "voxcpm2 VAE: after layer0 (depthwise k=7): Cc=%d Tc=%d max=%.4f\n", Cc, Tc, mx);
+    }
 
     // --- Layer 1: pointwise in-conv (k=1, 64->2048) ---
     {
@@ -1561,16 +1575,20 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
         const float* v1 = vae_tensor_f32(T, "vae.dec.layer.1.weight_v");
         const float* b1 = vae_tensor_f32(T, "vae.dec.layer.1.bias");
         if (g1 && v1) {
-            // weight_g shape [out_ch]; get out_ch from its ne[0]
-            int out_ch1 = vae_tensor_dim(T, "vae.dec.layer.1.weight_g", 0);
-            if (out_ch1 <= 0)
-                out_ch1 = 2048;
+            // weight_g is [out_ch] stored with varying GGUF shapes.
+            // Total elements = out_ch regardless of ne[] layout.
+            auto it_g1 = T.find("vae.dec.layer.1.weight_g");
+            int out_ch1 = it_g1 != T.end() ? (int)ggml_nelements(it_g1->second) : 2048;
             auto w1 = wn_reconstruct(g1, v1, out_ch1, feat_dim, 1);
             std::vector<float> h1((size_t)out_ch1 * Tc, 0.0f);
             causal_conv1d(w1.data(), b1, h.data(), h1.data(), out_ch1, feat_dim, 1, Tc, 1, 1, 1);
             h = std::move(h1);
             Cc = out_ch1;
         }
+    }
+    if (ctx->verbosity >= 2) {
+        float mx = 0; for (auto v : h) { float a = v < 0 ? -v : v; if (a > mx) mx = a; }
+        fprintf(stderr, "voxcpm2 VAE: after layer1 (1x1 64->%d): Tc=%d max=%.4f\n", Cc, Tc, mx);
     }
 
     // --- Layers 2-7: upsample blocks ---
@@ -1644,6 +1662,11 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
         Cc = out_ch_b;
         h = std::move(h_up);
 
+        if (ctx->verbosity >= 2) {
+            float mx = 0; for (size_t i = 0; i < (size_t)Cc*Tc; i++) { float a = h[i]<0?-h[i]:h[i]; if(a>mx)mx=a; }
+            fprintf(stderr, "voxcpm2 VAE: block %d upsample(%d): Cc=%d Tc=%d max=%.4f\n", b, up, Cc, Tc, mx);
+        }
+
         // 3x CausalResidualUnit: .block.{2,3,4} with dilations 1, 3, 9
         for (int r = 0; r < 3; r++) {
             int dil = (r == 0) ? 1 : (r == 1) ? 3 : 9;
@@ -1652,6 +1675,11 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             vae_residual_unit(T, rp, h.data(), h_res.data(), Cc, Tc, dil);
             h = std::move(h_res);
         }
+    }
+
+    if (ctx->verbosity >= 2) {
+        float mx = 0; for (size_t i = 0; i < (size_t)Cc*Tc; i++) { float a = h[i] < 0 ? -h[i] : h[i]; if (a > mx) mx = a; }
+        fprintf(stderr, "voxcpm2 VAE: after upsample blocks: Cc=%d Tc=%d max=%.4f\n", Cc, Tc, mx);
     }
 
     // --- Layer 8: final Snake1d ---
@@ -2053,8 +2081,8 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
             uint32_t inferred = kv_dim / hp.locenc_head_dim;
             if (inferred > 0 && inferred != hp.locenc_n_kv) {
                 if (ctx->verbosity >= 1)
-                    fprintf(stderr, "voxcpm2: locenc n_kv inferred from K weight: %u (was %u)\n",
-                            inferred, hp.locenc_n_kv);
+                    fprintf(stderr, "voxcpm2: locenc n_kv inferred from K weight: %u (was %u)\n", inferred,
+                            hp.locenc_n_kv);
                 hp.locenc_n_kv = inferred;
             }
         }
@@ -2066,8 +2094,8 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
             uint32_t inferred = kv_dim / hp.locdit_head_dim;
             if (inferred > 0 && inferred != hp.locdit_n_kv) {
                 if (ctx->verbosity >= 1)
-                    fprintf(stderr, "voxcpm2: locdit n_kv inferred from K weight: %u (was %u)\n",
-                            inferred, hp.locdit_n_kv);
+                    fprintf(stderr, "voxcpm2: locdit n_kv inferred from K weight: %u (was %u)\n", inferred,
+                            hp.locdit_n_kv);
                 hp.locdit_n_kv = inferred;
             }
         }
@@ -2387,9 +2415,8 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         // Generate Gaussian noise as initial state for diffusion
         std::vector<float> noise(feat_dim_vae * P_frames);
         fill_gaussian_noise(noise.data(), (int)noise.size(), ctx->rng);
-        std::vector<float> patch =
-            cfm_euler_solve(ctx, mu.data(), prev_patch_raw.data(), ctx->inference_steps, ctx->cfg_value, cpu_be,
-                            noise.data());
+        std::vector<float> patch = cfm_euler_solve(ctx, mu.data(), prev_patch_raw.data(), ctx->inference_steps,
+                                                   ctx->cfg_value, cpu_be, noise.data());
         patches.push_back(patch);
 
         // Update previous patch for next step
@@ -2673,8 +2700,7 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
             int N = (int)(all_pos.size() / d);
             std::vector<float> normed((size_t)N * d);
             for (int i = 0; i < N; i++) {
-                rms_norm_cpu(all_pos.data() + (size_t)i * d,
-                             tensor_data_f32(ctx->weights.tslm_output_norm),
+                rms_norm_cpu(all_pos.data() + (size_t)i * d, tensor_data_f32(ctx->weights.tslm_output_norm),
                              normed.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
             }
             *out_n = N * d;
@@ -2683,13 +2709,15 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
             return out;
         } else if (stage == "tslm_layer_0_out") {
             *out_n = (int)layer0_buf.size();
-            if (*out_n == 0) return nullptr;
+            if (*out_n == 0)
+                return nullptr;
             float* out = (float*)std::malloc(layer0_buf.size() * sizeof(float));
             std::memcpy(out, layer0_buf.data(), layer0_buf.size() * sizeof(float));
             return out;
         } else { // tslm_layer_27_out
             *out_n = (int)layer_last_buf.size();
-            if (*out_n == 0) return nullptr;
+            if (*out_n == 0)
+                return nullptr;
             float* out = (float*)std::malloc(layer_last_buf.size() * sizeof(float));
             std::memcpy(out, layer_last_buf.data(), layer_last_buf.size() * sizeof(float));
             return out;
@@ -2718,8 +2746,7 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         // Apply output norm to each position
         std::vector<float> normed((size_t)N * d);
         for (int i = 0; i < N; i++) {
-            rms_norm_cpu(all_pos.data() + (size_t)i * d,
-                         tensor_data_f32(ctx->weights.tslm_output_norm),
+            rms_norm_cpu(all_pos.data() + (size_t)i * d, tensor_data_f32(ctx->weights.tslm_output_norm),
                          normed.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
         }
 
@@ -2734,8 +2761,8 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
             std::vector<float> cat_buf(in_dim, 0.0f);
             std::memcpy(cat_buf.data(), normed.data() + (size_t)i * d, (size_t)d * sizeof(float));
             // Second half stays zero (no audio feat for text-only zero-shot)
-            matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b,
-                           cat_buf.data(), in_dim, ralm_input.data() + (size_t)i * d, d);
+            matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b, cat_buf.data(), in_dim,
+                           ralm_input.data() + (size_t)i * d, d);
         }
 
         // Run multi-position RALM prefill (returns pre-norm hidden states)
@@ -2743,8 +2770,7 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
 
         // Apply RALM output norm (Python's model.residual_lm() includes final norm)
         for (int i = 0; i < N; i++) {
-            rms_norm_cpu(ralm_out.data() + (size_t)i * d,
-                         tensor_data_f32(ctx->weights.ralm_output_norm),
+            rms_norm_cpu(ralm_out.data() + (size_t)i * d, tensor_data_f32(ctx->weights.ralm_output_norm),
                          ralm_out.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
         }
 
@@ -2765,8 +2791,8 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         std::vector<float> tslm_h = tslm_prefill(ctx, token_ids, cpu_be);
         {
             std::vector<float> normed(d);
-            rms_norm_cpu(tslm_h.data(), tensor_data_f32(ctx->weights.tslm_output_norm),
-                         normed.data(), d, ctx->hp.rms_norm_eps);
+            rms_norm_cpu(tslm_h.data(), tensor_data_f32(ctx->weights.tslm_output_norm), normed.data(), d,
+                         ctx->hp.rms_norm_eps);
             tslm_h = normed;
         }
 
@@ -2776,27 +2802,27 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         std::vector<float> cat_buf(in_dim, 0.0f);
         std::memcpy(cat_buf.data(), tslm_h.data(), (size_t)d * sizeof(float));
         std::vector<float> ralm_input(d);
-        matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b,
-                       cat_buf.data(), in_dim, ralm_input.data(), d);
+        matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b, cat_buf.data(), in_dim, ralm_input.data(),
+                       d);
 
         // 4. RALM prefill (single token)
         std::vector<float> ralm_h = ralm_prefill(ctx, ralm_input, cpu_be);
         {
             std::vector<float> normed(d_ralm);
-            rms_norm_cpu(ralm_h.data(), tensor_data_f32(ctx->weights.ralm_output_norm),
-                         normed.data(), d_ralm, ctx->hp.rms_norm_eps);
+            rms_norm_cpu(ralm_h.data(), tensor_data_f32(ctx->weights.ralm_output_norm), normed.data(), d_ralm,
+                         ctx->hp.rms_norm_eps);
             ralm_h = normed;
         }
 
         // 5. Build mu = cat(lm_to_dit(tslm_h), res_to_dit(ralm_h))
         std::vector<float> mu(2 * d_dit, 0.0f);
         if (ctx->weights.lm_to_dit_w && ctx->weights.lm_to_dit_b) {
-            matmul_mv_bias(cpu_be, ctx->weights.lm_to_dit_w, ctx->weights.lm_to_dit_b,
-                           tslm_h.data(), d, mu.data(), d_dit);
+            matmul_mv_bias(cpu_be, ctx->weights.lm_to_dit_w, ctx->weights.lm_to_dit_b, tslm_h.data(), d, mu.data(),
+                           d_dit);
         }
         if (ctx->weights.res_to_dit_w && ctx->weights.res_to_dit_b) {
-            matmul_mv_bias(cpu_be, ctx->weights.res_to_dit_w, ctx->weights.res_to_dit_b,
-                           ralm_h.data(), d_ralm, mu.data() + d_dit, d_dit);
+            matmul_mv_bias(cpu_be, ctx->weights.res_to_dit_w, ctx->weights.res_to_dit_b, ralm_h.data(), d_ralm,
+                           mu.data() + d_dit, d_dit);
         }
 
         // 6. CFM Euler solve (10 steps, seeded noise)
@@ -2805,8 +2831,8 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         std::vector<float> zero_cond(state_size, 0.0f);
         std::vector<float> noise(state_size);
         fill_gaussian_noise(noise.data(), state_size, 42);
-        std::vector<float> patch = cfm_euler_solve(ctx, mu.data(), zero_cond.data(),
-                                                    10, ctx->cfg_value, cpu_be, noise.data());
+        std::vector<float> patch =
+            cfm_euler_solve(ctx, mu.data(), zero_cond.data(), 10, ctx->cfg_value, cpu_be, noise.data());
         *out_n = (int)patch.size();
         float* out = (float*)std::malloc(patch.size() * sizeof(float));
         std::memcpy(out, patch.data(), patch.size() * sizeof(float));
@@ -2817,7 +2843,7 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         // Python: feat_embed = model.feat_encoder(audio_feat) → [B, T, d_enc]
         // For zero-shot: audio_feat is zeros [T, P, 64]. LocEnc processes each
         // patch independently. Output first 8 positions [8, d_enc].
-        int d_enc = (int)ctx->hp.locenc_d_model;  // 1024
+        int d_enc = (int)ctx->hp.locenc_d_model; // 1024
         int P_fr = (int)ctx->hp.patch_frames;
         const int N_CAP = 8;
         std::vector<float> zero_patch(64 * P_fr, 0.0f);
@@ -2836,10 +2862,10 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
     if (stage == "locenc_in") {
         // LocEnc input: audio_feat[0, :8] = [8, patch_frames, feat_dim] = [8, 4, 64]
         // For zero-shot synthesis, audio features are zeros (no reference audio).
-        int P_fr = (int)ctx->hp.patch_frames;  // 4
+        int P_fr = (int)ctx->hp.patch_frames; // 4
         int feat_dim = 64;
         int N_CAP = 8;
-        int total = N_CAP * P_fr * feat_dim;  // 8 * 4 * 64 = 2048
+        int total = N_CAP * P_fr * feat_dim; // 8 * 4 * 64 = 2048
         *out_n = total;
         float* out = (float*)std::calloc(total, sizeof(float));
         return out;
@@ -2965,9 +2991,9 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         // exact matching non-trivial. For now, output seeded F32 Gaussian noise
         // (matching the MT19937 F32 path used in vibevoice/chatterbox).
         // TODO: implement PyTorch's BF16 randn path for exact match.
-        int P_fr = (int)ctx->hp.patch_frames;  // 4
+        int P_fr = (int)ctx->hp.patch_frames; // 4
         int in_ch = 64;
-        int state_size = in_ch * P_fr;  // 256
+        int state_size = in_ch * P_fr; // 256
         *out_n = state_size;
         float* out = (float*)std::malloc((size_t)state_size * sizeof(float));
         fill_gaussian_noise(out, state_size, 42);
