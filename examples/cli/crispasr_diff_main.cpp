@@ -59,6 +59,8 @@
 #include "lid_fasttext.h"
 #include "moonshine.h"
 #include "moonshine_streaming.h"
+#include "glm_asr.h"
+#include "firered_asr.h"
 
 #include "common-crispasr.h"
 
@@ -2682,12 +2684,115 @@ int main(int argc, char** argv) {
             n_fail++;
         }
         lid_cld3_free(ctx);
+    } else if (backend_name == "glm-asr") {
+        auto cp = glm_asr_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        glm_asr_context* ctx = glm_asr_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load glm-asr model\n");
+            return 4;
+        }
+
+        // ---- mel_spectrogram ----
+        {
+            int n_mels = 0, T_mel = 0;
+            float* mel = glm_asr_compute_mel(ctx, samples.data(), (int)samples.size(), &n_mels, &T_mel);
+            if (mel) {
+                std::vector<float> mv(mel, mel + (size_t)n_mels * T_mel);
+                free(mel);
+                auto rep = ref.compare("mel_spectrogram", mv.data(), mv.size());
+                print_row("mel_spectrogram", rep, COS_THRESHOLD);
+                record(rep);
+            } else {
+                printf("[ERR ] mel_spectrogram         glm_asr_compute_mel returned null\n");
+                n_fail++;
+            }
+        }
+
+        // ---- encoder_output ----
+        {
+            int n_mels = 0, T_mel = 0;
+            float* mel = glm_asr_compute_mel(ctx, samples.data(), (int)samples.size(), &n_mels, &T_mel);
+            if (!mel) {
+                printf("[ERR ] encoder_output          glm_asr_compute_mel returned null\n");
+                n_fail++;
+            } else {
+                int N = 0, dim = 0;
+                float* enc = glm_asr_run_encoder(ctx, mel, n_mels, T_mel, &N, &dim);
+                free(mel);
+                if (enc) {
+                    std::vector<float> ev(enc, enc + (size_t)N * dim);
+                    free(enc);
+                    auto rep = ref.compare("encoder_output", ev.data(), ev.size());
+                    print_row("encoder_output", rep, COS_THRESHOLD);
+                    record(rep);
+                } else {
+                    printf("[ERR ] encoder_output          glm_asr_run_encoder returned null\n");
+                    n_fail++;
+                }
+            }
+        }
+
+        glm_asr_free(ctx);
+    } else if (backend_name == "firered-asr") {
+        auto cp = firered_asr_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        firered_asr_context* ctx = firered_asr_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load firered-asr model\n");
+            return 4;
+        }
+
+        // ---- fbank (mel_spectrogram) ----
+        {
+            int n_frames = 0;
+            float* fb = firered_asr_compute_fbank(ctx, samples.data(), (int)samples.size(), &n_frames);
+            if (fb) {
+                // Features are (n_frames, 80) row-major. Compare as flat vector.
+                std::vector<float> fv(fb, fb + (size_t)n_frames * 80);
+                free(fb);
+                auto rep = ref.compare("mel_spectrogram", fv.data(), fv.size());
+                print_row("mel_spectrogram", rep, COS_THRESHOLD);
+                record(rep);
+            } else {
+                printf("[ERR ] mel_spectrogram         firered_asr_compute_fbank returned null\n");
+                n_fail++;
+            }
+        }
+
+        // ---- encoder_output ----
+        {
+            int n_frames = 0;
+            float* fb = firered_asr_compute_fbank(ctx, samples.data(), (int)samples.size(), &n_frames);
+            if (!fb) {
+                printf("[ERR ] encoder_output          firered_asr_compute_fbank returned null\n");
+                n_fail++;
+            } else {
+                int T_enc = 0, d_model = 0;
+                float* enc = firered_asr_run_encoder(ctx, fb, n_frames, &T_enc, &d_model);
+                free(fb);
+                if (enc) {
+                    std::vector<float> ev(enc, enc + (size_t)T_enc * d_model);
+                    free(enc);
+                    auto rep = ref.compare("encoder_output", ev.data(), ev.size());
+                    print_row("encoder_output", rep, COS_THRESHOLD);
+                    record(rep);
+                } else {
+                    printf("[ERR ] encoder_output          firered_asr_run_encoder returned null\n");
+                    n_fail++;
+                }
+            }
+        }
+
+        firered_asr_free(ctx);
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
                 "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, "
-                "moonshine-streaming, lid-cld3.\n",
+                "moonshine-streaming, lid-cld3, glm-asr, firered-asr.\n",
                 backend_name.c_str());
         return 5;
     }

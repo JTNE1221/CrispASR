@@ -104,7 +104,8 @@
       "name": "parakeet-tdt-0.6b-en",
       "backend_id": "parakeet",
       "skip_diff": true,
-      "_skip_diff_note": "Awaiting Kaggle rebake. English v3 GGUF; different from the existing ja-GGUF full-diff entry.",
+      "_skip_diff_note": "Encoder diverges from NeMo v3 reference (cos_min=0.596 even with reference mel). All intermediate layers [FAIL] in per-layer diff. V3 may use a different conformer variant or positional encoding; needs further investigation.",
+      "source_model": "nvidia/parakeet-tdt-0.6b-v3",
       "gguf": {
         "repo": "cstr/parakeet-tdt-0.6b-v3-GGUF",
         "revision": "815cc1bcb5cfb92f9cd0bbd22c7bc2f6e2d4ec13",

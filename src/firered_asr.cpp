@@ -2562,3 +2562,78 @@ extern "C" const char* firered_asr_token_text(struct firered_asr_context* ctx, i
         return nullptr;
     return ctx->model.vocab[id].c_str();
 }
+
+// ---------------------------------------------------------------------------
+// Stage API implementations
+// ---------------------------------------------------------------------------
+
+extern "C" float* firered_asr_compute_fbank(struct firered_asr_context* ctx, const float* samples, int n_samples,
+                                            int* out_n_frames) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    const auto& m = ctx->model;
+    const auto& hp = m.hp;
+
+    std::vector<float> features;
+    int n_frames = 0;
+    compute_fbank(samples, n_samples, features, n_frames);
+    if (n_frames <= 0)
+        return nullptr;
+
+    // Apply CMVN
+    if (m.cmvn_mean && m.cmvn_std) {
+        std::vector<float> mean_v(hp.idim), std_v(hp.idim);
+        ggml_backend_tensor_get(m.cmvn_mean, mean_v.data(), 0, hp.idim * sizeof(float));
+        ggml_backend_tensor_get(m.cmvn_std, std_v.data(), 0, hp.idim * sizeof(float));
+        for (int t_idx = 0; t_idx < n_frames; t_idx++)
+            for (int f = 0; f < hp.idim; f++)
+                features[t_idx * hp.idim + f] = (features[t_idx * hp.idim + f] - mean_v[f]) / std_v[f];
+    }
+
+    float* result = (float*)malloc(features.size() * sizeof(float));
+    if (!result)
+        return nullptr;
+    memcpy(result, features.data(), features.size() * sizeof(float));
+    if (out_n_frames)
+        *out_n_frames = n_frames;
+    return result;
+}
+
+extern "C" float* firered_asr_run_encoder(struct firered_asr_context* ctx, const float* features, int n_frames,
+                                          int* out_T_enc, int* out_d_model) {
+    if (!ctx || !features || n_frames <= 0)
+        return nullptr;
+    const auto& m = ctx->model;
+    const auto& hp = m.hp;
+
+    // Context padding (same as transcribe_impl)
+    int context = 7;
+    int n_frames_padded = n_frames + context - 1;
+    std::vector<float> features_padded(n_frames_padded * hp.idim, 0.0f);
+    memcpy(features_padded.data(), features, (size_t)n_frames * hp.idim * sizeof(float));
+
+    // Conv2d subsampling
+    std::vector<float> subsampled;
+    int T_sub = 0;
+    conv2d_subsample_cpu(features_padded.data(), n_frames_padded, hp.idim, m, subsampled, T_sub);
+    if (T_sub <= 0)
+        return nullptr;
+
+    // Hybrid encoder
+    int flat_dim = 608; // 32 * 19
+    std::vector<float> enc_output;
+    hybrid_encoder(subsampled.data(), T_sub, flat_dim, ctx, enc_output);
+    if (enc_output.empty())
+        return nullptr;
+
+    const int d_model = (int)hp.d_model;
+    float* result = (float*)malloc(enc_output.size() * sizeof(float));
+    if (!result)
+        return nullptr;
+    memcpy(result, enc_output.data(), enc_output.size() * sizeof(float));
+    if (out_T_enc)
+        *out_T_enc = T_sub;
+    if (out_d_model)
+        *out_d_model = d_model;
+    return result;
+}

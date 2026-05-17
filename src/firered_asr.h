@@ -63,6 +63,25 @@ struct firered_asr_result* firered_asr_transcribe_with_probs(struct firered_asr_
 
 void firered_asr_result_free(struct firered_asr_result* r);
 
+// ---------------------------------------------------------------------------
+// Stage API for diff regression (crispasr-diff)
+// ---------------------------------------------------------------------------
+
+// Compute Kaldi-compatible 80-dim log-mel fbank features + CMVN normalisation
+// from raw 16 kHz mono PCM. Returns a malloc'd (n_frames, 80) F32 buffer in
+// row-major order, or null on failure. Caller frees with free().
+// *out_n_frames is set to the number of output frames.
+float* firered_asr_compute_fbank(struct firered_asr_context* ctx, const float* samples, int n_samples,
+                                 int* out_n_frames);
+
+// Run the full encoder (Conv2d subsampling + Conformer hybrid_encoder) on
+// pre-computed fbank+CMVN features. features: (n_frames, 80) row-major F32
+// (e.g. from firered_asr_compute_fbank). Returns malloc'd (T_enc, d_model)
+// F32 buffer, or null on failure. Caller frees with free().
+// *out_T_enc and *out_d_model are set on success.
+float* firered_asr_run_encoder(struct firered_asr_context* ctx, const float* features, int n_frames, int* out_T_enc,
+                               int* out_d_model);
+
 #ifdef __cplusplus
 }
 #endif

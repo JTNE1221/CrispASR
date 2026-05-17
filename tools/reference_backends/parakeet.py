@@ -51,7 +51,54 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     produces — no manual reconstruction. All captures are transposed
     to (T, d_model) row-major to match crispasr's flat layout.
     """
-    import torch
+    import sys, torch
+
+    # overrides 7.x enforces two things that break nv_one_logger (which is a
+    # transitive NeMo dependency):
+    #
+    #  1. The @override decorator checks covariance / signature compatibility.
+    #  2. EnforceOverridesMeta.__new__ raises TypeError when a subclass method
+    #     shadows a base-class method without @override.
+    #
+    # nv_one_logger.exporter.exporter.BaseExporter(Exporter) uses
+    # EnforceOverridesMeta as its metaclass and defines `initialize` without
+    # decorating it, which triggers (2) at class-body execution time — before
+    # our swap of sys.modules["overrides"] has any effect, because
+    # overrides.enforce is already imported separately as
+    # sys.modules["overrides.enforce"].
+    #
+    # Fix: also replace EnforceOverridesMeta with a plain ABCMeta subclass
+    # (no strict checking) inside overrides.enforce, and restore both after
+    # the NeMo import is complete.
+    import overrides as _real_overrides
+    import overrides.enforce as _real_enforce
+    from abc import ABCMeta
+
+    # Lenient decorator: just sets __override__ and returns the function.
+    _lenient_override = lambda f=None, **kw: (f if callable(f) else lambda fn: fn)
+
+    # Lenient metaclass: skips the "must have @override" check entirely.
+    class _LenientEnforcesMeta(ABCMeta):
+        pass
+
+    class _LenientEnforceOverrides(metaclass=_LenientEnforcesMeta):
+        pass
+
+    # Patch the top-level overrides module.
+    _lenient_mod = type(sys)("overrides")
+    _lenient_mod.__dict__.update(_real_overrides.__dict__)
+    _lenient_mod.override = _lenient_override
+    _lenient_mod.overrides = _lenient_override
+    _lenient_mod.EnforceOverrides = _LenientEnforceOverrides
+
+    # Patch the enforce sub-module so that any code that does
+    #   from overrides.enforce import EnforceOverridesMeta
+    # or uses the already-imported metaclass also gets the lenient version.
+    _real_meta = _real_enforce.EnforceOverridesMeta
+    _real_enforce.EnforceOverridesMeta = _LenientEnforcesMeta
+
+    sys.modules["overrides"] = _lenient_mod
+    sys.modules["overrides.enforce"] = _real_enforce  # keep sub-module entry, patched
     try:
         import nemo.collections.asr as nemo_asr
     except ImportError as e:
@@ -59,6 +106,11 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             "NeMo toolkit required.\n"
             "Install: pip install 'nemo_toolkit[asr]'\n"
             f"(import error: {e})")
+    finally:
+        # Restore originals.
+        sys.modules["overrides"] = _real_overrides
+        sys.modules["overrides.enforce"] = _real_enforce
+        _real_enforce.EnforceOverridesMeta = _real_meta
 
     pretrained = str(model_dir)
     print(f"  loading NeMo Parakeet-TDT model from {pretrained}")

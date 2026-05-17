@@ -74,6 +74,7 @@ struct glm_enc_block {
     ggml_tensor* attn_q_b = nullptr;
     ggml_tensor* attn_k_w = nullptr;
     ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_v_b = nullptr;
     ggml_tensor* attn_out_w = nullptr;
     ggml_tensor* attn_out_b = nullptr;
     ggml_tensor* ffn_norm_w = nullptr;
@@ -353,6 +354,8 @@ extern "C" struct glm_asr_context* glm_asr_init_from_file(const char* path_model
         b.attn_k_w = get(buf);
         snprintf(buf, sizeof(buf), "audio.blk.%d.attn_v.weight", i);
         b.attn_v_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_v.bias", i);
+        b.attn_v_b = try_get(buf);
         snprintf(buf, sizeof(buf), "audio.blk.%d.attn_out.weight", i);
         b.attn_out_w = get(buf);
         snprintf(buf, sizeof(buf), "audio.blk.%d.attn_out.bias", i);
@@ -812,6 +815,7 @@ extern "C" float* glm_asr_compute_mel(struct glm_asr_context* ctx, const float* 
     p.hop_length = 160;
     p.win_length = 400;
     p.center_pad = true;
+    p.center_pad_reflect = true; // torchaudio default pad_mode="reflect"
     p.log_base = core_mel::LogBase::Log10;
     p.log_guard = core_mel::LogGuard::MaxClip;
     p.log_eps = 1e-10f;
@@ -1007,6 +1011,9 @@ static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
     // ggml_conv_1d with k=3, s=2, p=1 produces floor(T/2) frames for odd
     // lengths in the unbatched (T, C) path used here. Using ceil(T/2) causes
     // the first post-conv reshape to overrun by one frame on odd T_mel.
+    // ggml_conv_1d output has non-unit strides; ggml_reshape_2d requires
+    // contiguous input, so we materialise the buffer first.
+    cur = ggml_cont(ctx0, cur);
     const int T_enc = glm_asr_encoder_frames_from_mel_frames(T_mel);
     cur = ggml_reshape_2d(ctx0, cur, T_enc, d);
     cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur)); // (d, T_enc)
@@ -1039,6 +1046,8 @@ static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
                 Q = ggml_add(ctx0, Q, b.attn_q_b);
             ggml_tensor* K = ggml_mul_mat(ctx0, b.attn_k_w, x);
             ggml_tensor* V = ggml_mul_mat(ctx0, b.attn_v_w, x);
+            if (b.attn_v_b)
+                V = ggml_add(ctx0, V, b.attn_v_b);
 
             // Reshape to (hd, n_heads, T)
             Q = ggml_reshape_3d(ctx0, Q, hd, n_heads, T_enc);
@@ -1071,6 +1080,10 @@ static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
 
             // Flash attention (bidirectional, no mask)
             ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+            // ggml_flash_attn_ext output shape: {v->ne[0], q->ne[2], q->ne[1], q->ne[3]}
+            //   = (hd=64, n_heads=20, T_enc=551). Flat layout: ih + hd*inh + hd*n_heads*it.
+            // reshape_2d(n_heads*hd, T_enc): element (j=ih+hd*inh, t) → ✓ (no extra permute needed).
+            attn = ggml_cont(ctx0, attn);
             attn = ggml_reshape_2d(ctx0, attn, n_heads * hd, T_enc);
 
             // Output projection
@@ -1104,11 +1117,15 @@ static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel) {
 
     // Projector: 4-frame stacking → linear1(5120→4096,GELU) → linear2(4096→2048)
     // Stack 4 consecutive frames: (d, T_enc) → (4*d, T_enc/4)
+    // cur is (d, T_enc) — ne[0]=d, ne[1]=T_enc.
+    // Slice first T_pack columns: keep ne[0]=d, ne[1]=T_pack.
+    // Note: ne0=T_pack, ne1=d would transpose d and T_pack, scrambling the stack.
     const int T_proj = T_enc / 4;
     const int T_pack = T_proj * 4;
     const int proj_in = 4 * d; // 5120
     if (T_pack != T_enc)
-        cur = ggml_view_2d(ctx0, cur, T_pack, d, cur->nb[1], 0);
+        cur = ggml_view_2d(ctx0, cur, d, T_pack, cur->nb[1], 0);
+    cur = ggml_cont(ctx0, cur);
     cur = ggml_reshape_2d(ctx0, cur, proj_in, T_proj);
 
     cur = ggml_mul_mat(ctx0, m.proj.linear1_w, cur);

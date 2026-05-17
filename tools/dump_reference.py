@@ -182,6 +182,15 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # model_dir = root of the cloned repo (onnx/tiny/{preprocess,encode}.onnx).
     # Captures encoder_output (T, 288) matching moonshine_encode() streaming path.
     "moonshine-streaming": "reference_backends.moonshine_streaming",
+    # GLM-ASR (GGUF-direct, no PyTorch). model_dir = path to an F32 GLM-ASR GGUF
+    # (e.g. cstr/glm-asr-nano-GGUF / glm-asr-nano.gguf) or a directory containing
+    # it. Captures mel_spectrogram (128, T_mel) and encoder_output (T_proj, 2048).
+    "glm-asr": "reference_backends.glm_asr",
+    # FireRedASR-AED. model_dir = "FireRedTeam/FireRedASR2-AED" (HF id) or a local
+    # directory containing model.pth.tar + cmvn.ark. Requires `fireredasr` and
+    # `kaldi_native_fbank`. Captures mel_spectrogram (T, 80) Kaldi fbank+CMVN
+    # and encoder_output (T_enc, 1280) Conformer encoder.
+    "firered-asr": "reference_backends.firered_asr",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

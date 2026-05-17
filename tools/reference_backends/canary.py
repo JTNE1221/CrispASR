@@ -52,7 +52,25 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     `model_dir` may be either a local path to an extracted .nemo or a
     HuggingFace pretrained name (e.g. "nvidia/canary-1b-v2").
     """
-    import torch
+    import sys, torch
+
+    # overrides 7.x enforces covariance + EnforceOverridesMeta at class-definition
+    # time, which breaks nv_one_logger (transitive NeMo dep). Swap in lenient
+    # versions for the duration of the NeMo import, then restore originals.
+    import overrides as _real_overrides
+    import overrides.enforce as _real_enforce
+    from abc import ABCMeta
+    _lenient_override = lambda f=None, **kw: (f if callable(f) else lambda fn: fn)
+    class _LenientMeta(ABCMeta): pass
+    class _LenientEnforceOverrides(metaclass=_LenientMeta): pass
+    _lenient_mod = type(sys)("overrides")
+    _lenient_mod.__dict__.update(_real_overrides.__dict__)
+    _lenient_mod.override = _lenient_override
+    _lenient_mod.overrides = _lenient_override
+    _lenient_mod.EnforceOverrides = _LenientEnforceOverrides
+    _real_meta = _real_enforce.EnforceOverridesMeta
+    _real_enforce.EnforceOverridesMeta = _LenientMeta
+    sys.modules["overrides"] = _lenient_mod
     try:
         import nemo.collections.asr as nemo_asr
     except ImportError as e:
@@ -60,6 +78,10 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
             "NeMo toolkit required.\n"
             "Install: pip install 'nemo_toolkit[asr]'\n"
             f"(import error: {e})")
+    finally:
+        sys.modules["overrides"] = _real_overrides
+        sys.modules["overrides.enforce"] = _real_enforce
+        _real_enforce.EnforceOverridesMeta = _real_meta
 
     pretrained = str(model_dir)
     print(f"  loading NeMo Canary model from {pretrained}")
@@ -68,6 +90,19 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     else:
         model = nemo_asr.models.ASRModel.restore_from(pretrained)
     model.eval()
+
+    # Free sub-models and caches that are not needed for encoder-only
+    # inference to reduce peak RAM. Canary loads an auxiliary CTC model
+    # during restoration; we can drop it after loading.
+    import gc
+    for attr in ("ctc_decoder", "ctc", "decoding", "wer", "loss"):
+        if hasattr(model, attr):
+            try:
+                setattr(model, attr, None)
+            except Exception:
+                pass
+    gc.collect()
+
     dev = next(model.parameters()).device
 
     sig = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0).to(dev)
