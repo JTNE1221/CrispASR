@@ -915,6 +915,16 @@ int main(int argc, char** argv) {
         cp.n_threads = 4;
         cp.verbosity = 0;
         cp.use_gpu = false;
+        // CRISPASR_DIFF_USE_GPU=1 flips the chatterbox C++ side onto the GPU
+        // backend so the per-stage diff can isolate CPU vs GPU divergence
+        // against the python reference archive. Default is CPU (matches the
+        // committed reference dumps and existing behaviour).
+        if (const char* env_gpu = std::getenv("CRISPASR_DIFF_USE_GPU")) {
+            if (env_gpu[0] == '1' || env_gpu[0] == 't' || env_gpu[0] == 'T' || env_gpu[0] == 'y' || env_gpu[0] == 'Y') {
+                cp.use_gpu = true;
+                fprintf(stderr, "[crispasr-diff] CRISPASR_DIFF_USE_GPU=1 -> chatterbox use_gpu=true\n");
+            }
+        }
         chatterbox_context* ctx = chatterbox_init_from_file(model_path.c_str(), cp);
         if (!ctx) {
             fprintf(stderr, "failed to load chatterbox model\n");
@@ -1176,6 +1186,34 @@ int main(int argc, char** argv) {
             printf("[SKIP] t3_speech_tokens       exact upstream T3 path is stochastic; comparing S3Gen/HiFT using "
                    "reference tokens from the official path\n");
             n_skip++;
+
+            // Conformer encoder output (Module 5 phase 1). Splits a
+            // `s3gen_mel` drop into "Conformer encoder breaks on GPU"
+            // (encoder_out also drops) vs "CFM denoiser breaks on GPU"
+            // (encoder_out matches, denoiser amplifies into s3gen_mel).
+            if (!ref.shape("s3gen_encoder_out").empty()) {
+                int T_enc = 0;
+                float* enc_cf =
+                    chatterbox_dump_s3gen_encoder_out(ctx, ref_tokens.data(), (int)ref_tokens.size(), &T_enc);
+                if (enc_cf && T_enc > 0) {
+                    // C++ returns (80, T_enc) channel-first; transpose
+                    // to (T_enc, 80) row-major to match the python ref.
+                    std::vector<float> enc_rm((size_t)T_enc * 80);
+                    for (int t = 0; t < T_enc; ++t) {
+                        for (int c = 0; c < 80; ++c) {
+                            enc_rm[(size_t)t * 80 + (size_t)c] = enc_cf[(size_t)c * T_enc + (size_t)t];
+                        }
+                    }
+                    auto rep_enc = compare_with_row_width(ref, "s3gen_encoder_out", enc_rm.data(), enc_rm.size(), 80);
+                    print_row_mean("s3gen_encoder_out", rep_enc, CHATTERBOX_MEAN_THRESHOLD,
+                                   "criterion=cos_mean>=0.95  Conformer encoder + encoder_proj");
+                    record_mean(rep_enc, CHATTERBOX_MEAN_THRESHOLD);
+                    free(enc_cf);
+                } else {
+                    printf("[ERR ] s3gen_encoder_out      chatterbox_dump_s3gen_encoder_out returned null\n");
+                    n_fail++;
+                }
+            }
 
             auto ref_noise_pair = ref.get_f32("s3gen_init_noise");
             auto ref_noise_shape = ref.shape("s3gen_init_noise");

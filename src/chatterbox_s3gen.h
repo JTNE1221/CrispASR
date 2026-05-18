@@ -119,6 +119,17 @@ float* chatterbox_s3gen_dump_campplus_fbank(struct chatterbox_s3gen_context* ctx
 float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen_context* ctx, const float* pcm_16k,
                                               int n_samples);
 
+// Conformer encoder output (Module 5 phase 1). Runs `flow.encoder` then
+// `flow.encoder_proj` over [prompt_tokens | speech_tokens], returning
+// the (80, T_mel) f32 channel-first pre-CFM-denoiser hidden states.
+// T_mel = 2 * (n_prompt + n_speech_tokens). Writes T_mel into
+// *out_T_mel. Caller frees with `free()`. Used by crispasr-diff to
+// split "Conformer encoder breaks on GPU" from "CFM denoiser breaks
+// on GPU" when the downstream `s3gen_mel` cos drops.
+float* chatterbox_s3gen_dump_encoder_out(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
+                                         int n_speech_tokens, const int32_t* prompt_tokens, int n_prompt_tokens,
+                                         int* out_T_mel);
+
 // 24 kHz Matcha-TTS prompt mel (Module 4 phase 3). Computes the
 // (T_mel, 80) row-major mel spectrogram for the 24 kHz mono ref audio
 // — the `gen.prompt_feat` cond S3Gen's CFM denoiser consumes. Truncates

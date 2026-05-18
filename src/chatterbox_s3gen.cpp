@@ -286,6 +286,79 @@ struct chatterbox_s3gen_context {
     }
 };
 
+// ── Per-sub-graph CPU-override helper ────────────────────────────
+//
+// Diagnostic env knobs to localize which S3Gen sub-graph breaks on GPU:
+//   CRISPASR_S3GEN_ENCODER_CPU=1   — Conformer encoder
+//   CRISPASR_S3GEN_UNET_CPU=1      — UNet1D CFM denoiser
+//   CRISPASR_S3GEN_VOCODER_CPU=1   — HiFT vocoder
+//
+// Implementation strategy: ggml_backend_sched requires the CPU backend
+// to be LAST in the backend list, so we can't swap to a "CPU-only"
+// scheduler. Instead, we keep using c->sched ([GPU, CPU]) and, when the
+// env knob is set, walk every compute node in the built graph and pin
+// it to the CPU backend via ggml_backend_sched_set_tensor_backend. The
+// scheduler then routes those compute ops to CPU; only the GPU-resident
+// weight tensors stay on GPU and get copied over as needed.
+enum class s3gen_subgraph { encoder, unet, vocoder };
+static bool s3gen_env_force_cpu(s3gen_subgraph which) {
+    const char* envname = nullptr;
+    switch (which) {
+    case s3gen_subgraph::encoder:
+        envname = "CRISPASR_S3GEN_ENCODER_CPU";
+        break;
+    case s3gen_subgraph::unet:
+        envname = "CRISPASR_S3GEN_UNET_CPU";
+        break;
+    case s3gen_subgraph::vocoder:
+        envname = "CRISPASR_S3GEN_VOCODER_CPU";
+        break;
+    }
+    const char* env = envname ? std::getenv(envname) : nullptr;
+    return env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
+}
+static void s3gen_maybe_pin_graph_to_cpu(chatterbox_s3gen_context* c, ggml_cgraph* gf, s3gen_subgraph which) {
+    if (c->backend == c->backend_cpu)
+        return; // already on CPU — no-op
+    if (!s3gen_env_force_cpu(which))
+        return;
+    if (c->verbosity >= 1) {
+        const char* tag = which == s3gen_subgraph::encoder ? "ENCODER"
+                          : which == s3gen_subgraph::unet  ? "UNET"
+                                                           : "VOCODER";
+        static int log_seen[3] = {0, 0, 0};
+        int idx = which == s3gen_subgraph::encoder ? 0 : which == s3gen_subgraph::unet ? 1 : 2;
+        if (!log_seen[idx]) {
+            fprintf(stderr, "s3gen: CRISPASR_S3GEN_%s_CPU=1 — pinning all compute nodes to CPU backend\n", tag);
+            log_seen[idx] = 1;
+        }
+    }
+    const int n_nodes = ggml_graph_n_nodes(gf);
+    int n_pinned = 0;
+    for (int i = 0; i < n_nodes; i++) {
+        ggml_tensor* node = ggml_graph_node(gf, i);
+        if (!node)
+            continue;
+        // Skip leaf weight tensors (op == NONE) — they live on the GPU
+        // buffer and shouldn't be reassigned. Only pin compute ops.
+        if (node->op == GGML_OP_NONE)
+            continue;
+        ggml_backend_sched_set_tensor_backend(c->sched, node, c->backend_cpu);
+        n_pinned++;
+    }
+    if (c->verbosity >= 1) {
+        const char* tag = which == s3gen_subgraph::encoder ? "ENCODER"
+                          : which == s3gen_subgraph::unet  ? "UNET"
+                                                           : "VOCODER";
+        static int logged_count[3] = {0, 0, 0};
+        int idx = which == s3gen_subgraph::encoder ? 0 : which == s3gen_subgraph::unet ? 1 : 2;
+        if (logged_count[idx] < 1) {
+            fprintf(stderr, "s3gen: [%s] pinned %d/%d compute nodes to CPU\n", tag, n_pinned, n_nodes);
+            logged_count[idx]++;
+        }
+    }
+}
+
 // ── Tensor lookup helper ─────────────────────────────────────────
 
 static ggml_tensor* T(chatterbox_s3gen_context* c, const char* name) {
@@ -1057,9 +1130,19 @@ static std::vector<float> run_conformer_encoder(chatterbox_s3gen_context* c, con
     // Build and run graph
     ggml_cgraph* gf = build_graph_conformer_encoder(c, total);
     ggml_backend_sched_reset(c->sched);
+    s3gen_maybe_pin_graph_to_cpu(c, gf, s3gen_subgraph::encoder);
     if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
         fprintf(stderr, "s3gen: failed to alloc conformer graph\n");
         return {};
+    }
+    if (c->verbosity >= 2 || s3gen_env_force_cpu(s3gen_subgraph::encoder)) {
+        // Diagnostic for the GPU-bisect. NOTE: when *_CPU=1 we expect a high
+        // n_splits; in practice the ggml sched's "upgrade to higher-prio
+        // backend" pass undoes many of our user-set CPU assignments, so the
+        // pin approach is not equivalent to running on CPU. See the
+        // chatterbox-gpu-bug-is-s3gen handover-prompts/ note (2026-05-19).
+        fprintf(stderr, "s3gen: [encoder post-alloc] n_splits=%d (pin=%d)\n", ggml_backend_sched_get_n_splits(c->sched),
+                s3gen_env_force_cpu(s3gen_subgraph::encoder) ? 1 : 0);
     }
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "token_ids"), all_tokens.data(), 0, total * sizeof(int32_t));
@@ -1664,9 +1747,16 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
         // Helper: run denoiser with given input, return velocity
         auto run_denoiser = [&](const std::vector<float>& input) -> std::vector<float> {
             ggml_backend_sched_reset(c->sched);
+            s3gen_maybe_pin_graph_to_cpu(c, gf, s3gen_subgraph::unet);
             if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
                 fprintf(stderr, "s3gen: failed to alloc UNet1D graph\n");
                 return {};
+            }
+            static int unet_diag_seen = 0;
+            if (!unet_diag_seen && (c->verbosity >= 2 || s3gen_env_force_cpu(s3gen_subgraph::unet))) {
+                fprintf(stderr, "s3gen: [unet post-alloc] n_splits=%d (pin=%d)\n",
+                        ggml_backend_sched_get_n_splits(c->sched), s3gen_env_force_cpu(s3gen_subgraph::unet) ? 1 : 0);
+                unet_diag_seen = 1;
             }
             ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "unet_input"), input.data(), 0,
                                     input.size() * sizeof(float));
@@ -2234,10 +2324,15 @@ static std::vector<float> hift_vocoder_cpu(chatterbox_s3gen_context* c,
 
     // Execute graph
     ggml_backend_sched_reset(c->sched);
+    s3gen_maybe_pin_graph_to_cpu(c, gf, s3gen_subgraph::vocoder);
     if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
         fprintf(stderr, "s3gen: failed to alloc vocoder graph\n");
         // Fallback to noise
         return std::vector<float>(T_mel * 480, 0.0f);
+    }
+    if (c->verbosity >= 2 || s3gen_env_force_cpu(s3gen_subgraph::vocoder)) {
+        fprintf(stderr, "s3gen: [vocoder post-alloc] n_splits=%d (pin=%d)\n", ggml_backend_sched_get_n_splits(c->sched),
+                s3gen_env_force_cpu(s3gen_subgraph::vocoder) ? 1 : 0);
     }
 
     // Set mel input: ggml tensor ne[0]=T, ne[1]=80 → data stored as
@@ -3010,6 +3105,28 @@ extern "C" float* chatterbox_s3gen_dump_campplus_xvector(struct chatterbox_s3gen
         return nullptr;
     std::memcpy(r, emb.data(), 192 * sizeof(float));
     return r;
+}
+
+extern "C" float* chatterbox_s3gen_dump_encoder_out(struct chatterbox_s3gen_context* ctx, const int32_t* speech_tokens,
+                                                    int n_speech_tokens, const int32_t* prompt_tokens,
+                                                    int n_prompt_tokens, int* out_T_mel) {
+    if (out_T_mel)
+        *out_T_mel = 0;
+    if (!ctx || !speech_tokens || n_speech_tokens <= 0)
+        return nullptr;
+    const int32_t* pt = (n_prompt_tokens > 0) ? prompt_tokens : nullptr;
+    const int npt = (n_prompt_tokens > 0) ? n_prompt_tokens : 0;
+    std::vector<float> h_cf = run_conformer_encoder(ctx, speech_tokens, n_speech_tokens, pt, npt);
+    if (h_cf.empty())
+        return nullptr;
+    const int T_mel = (n_prompt_tokens + n_speech_tokens) * 2;
+    if (out_T_mel)
+        *out_T_mel = T_mel;
+    auto* buf = (float*)std::malloc(h_cf.size() * sizeof(float));
+    if (!buf)
+        return nullptr;
+    std::memcpy(buf, h_cf.data(), h_cf.size() * sizeof(float));
+    return buf;
 }
 
 extern "C" float* chatterbox_s3gen_dump_prompt_feat_24k(struct chatterbox_s3gen_context* ctx, const float* pcm_24k,

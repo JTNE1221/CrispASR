@@ -3755,6 +3755,25 @@ extern "C" float* chatterbox_dump_prompt_feat_24k(struct chatterbox_context* ctx
     return chatterbox_s3gen_dump_prompt_feat_24k(ctx->s3gen_ctx, pcm_24k, n_samples, max_samples, out_T_mel);
 }
 
+extern "C" float* chatterbox_dump_s3gen_encoder_out(struct chatterbox_context* ctx, const int32_t* speech_tokens,
+                                                    int n_speech_tokens, int* out_T_mel) {
+    if (out_T_mel)
+        *out_T_mel = 0;
+    if (!ctx || !ctx->s3gen_ctx || !speech_tokens || n_speech_tokens <= 0)
+        return nullptr;
+    std::vector<int32_t> pt_buf;
+    const int32_t* prompt_tokens = nullptr;
+    int n_prompt = 0;
+    if (ctx->conds.gen_prompt_token) {
+        n_prompt = (int)ctx->conds.gen_prompt_token->ne[0];
+        pt_buf.resize(n_prompt);
+        ggml_backend_tensor_get(ctx->conds.gen_prompt_token, pt_buf.data(), 0, n_prompt * sizeof(int32_t));
+        prompt_tokens = pt_buf.data();
+    }
+    return chatterbox_s3gen_dump_encoder_out(ctx->s3gen_ctx, speech_tokens, n_speech_tokens, prompt_tokens, n_prompt,
+                                             out_T_mel);
+}
+
 extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx, const char* text, int* out_T,
                                                  int* out_D, int* out_cond_T) {
     if (!ctx || !text || !out_T || !out_D || !out_cond_T)

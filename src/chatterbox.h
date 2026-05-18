@@ -177,6 +177,16 @@ float* chatterbox_dump_campplus_xvector(struct chatterbox_context* ctx, const fl
 float* chatterbox_dump_prompt_feat_24k(struct chatterbox_context* ctx, const float* pcm_24k, int n_samples,
                                        int max_samples, int* out_T_mel);
 
+// Diff/debug: Conformer encoder output (Module 5 phase 1). Forwarder
+// to the s3gen sub-context's `chatterbox_s3gen_dump_encoder_out`,
+// supplying the voice's `gen.prompt_token` from the loaded conds.
+// Returns a malloc'd (80 * T_mel) f32 channel-first buffer; T_mel
+// written into *out_T_mel. Caller frees with `free()`. Used by
+// crispasr-diff to split "Conformer encoder breaks on GPU" from
+// "CFM denoiser breaks on GPU" when downstream `s3gen_mel` cos drops.
+float* chatterbox_dump_s3gen_encoder_out(struct chatterbox_context* ctx, const int32_t* speech_tokens,
+                                         int n_speech_tokens, int* out_T_mel);
+
 // Diff/debug: return the T3 prefill embeddings for the given text (output of
 // build_prefill_embeds, excluding the extra BOS). Shape: (*out_T, *out_D).
 // Also sets *out_cond_T to the number of conditioning tokens (cond_len).
