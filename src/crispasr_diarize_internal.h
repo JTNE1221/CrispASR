@@ -13,6 +13,19 @@
 
 namespace crispasr_diarize_internal {
 
+// Score the dominant speaker over a half-open frame range derived from
+// the buffer-relative cs range [start_cs, end_cs). Returns 0/1/2 for
+// the highest-activity speaker, or -1 when the range is empty / pure
+// silence / all-classes-below-floor.
+//
+// `log_probs` is the same shape and semantics as for
+// assign_speakers_from_log_posteriors (row-major [T,7] log-softmax).
+// `start_cs`/`end_cs` are RELATIVE to log_probs frame 0 (the caller
+// must subtract any slice / cache offset). Used by both
+// assign_speakers_from_log_posteriors (per ASR segment) and the
+// segment-splitting helper (per ASR word).
+int score_speaker_for_range(const float* log_probs, int T, double frame_dur_s, int64_t start_cs, int64_t end_cs);
+
 // Assign speaker indices (0/1/2) to each ASR segment given per-frame
 // pyannote-seg posteriors.
 //

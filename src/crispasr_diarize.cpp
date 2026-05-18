@@ -227,59 +227,65 @@ static const float SPK_MASK[3][7] = {
     {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f}, // spk2 active: classes 4, 5, 6
 };
 
+int score_speaker_for_range(const float* log_probs, int T, double frame_dur_s, int64_t start_cs, int64_t end_cs) {
+    if (!log_probs || T <= 0 || frame_dur_s <= 0.0)
+        return -1;
+    const double a0 = (double)start_cs / 100.0;
+    const double a1 = (double)end_cs / 100.0;
+    const int f0 = std::max(0, (int)(a0 / frame_dur_s));
+    const int f1 = std::min(T, (int)(a1 / frame_dur_s) + 1);
+    if (f0 >= f1)
+        return -1;
+
+    // Posterior-weighted per-speaker activity sum. For each non-
+    // silence-dominated frame: exp the 7 log-probs once, then add to
+    // each speaker's accumulator the sum of class probs covering that
+    // speaker (via SPK_MASK).
+    //
+    // Silence gating: when p[silence] > 0.5 the frame is dropped
+    // entirely (no speaker gets credit). This is what makes a pure-
+    // silence range return -1 rather than picking spk0 from residual
+    // non-silence mass. Without the gate, a 200-frame silence range
+    // with p[0]≈0.99 and the other six classes each at ~3e-4 still
+    // tallies ~0.12 per speaker.
+    double act[3] = {0.0, 0.0, 0.0};
+    int n_speech_frames = 0;
+    for (int f = f0; f < f1; f++) {
+        const float* lv = log_probs + f * 7;
+        float p[7];
+        for (int c = 0; c < 7; c++)
+            p[c] = std::exp(lv[c]);
+        if (p[0] > 0.5f)
+            continue;
+        for (int s = 0; s < 3; s++) {
+            double sum = 0.0;
+            for (int c = 0; c < 7; c++)
+                sum += SPK_MASK[s][c] * p[c];
+            act[s] += sum;
+        }
+        n_speech_frames++;
+    }
+    if (n_speech_frames == 0)
+        return -1;
+
+    int best_spk = 0;
+    for (int s = 1; s < 3; s++)
+        if (act[s] > act[best_spk])
+            best_spk = s;
+    // Tiny floor so an early-exit "speech_frames == 1 but no speaker
+    // class fired" can't pick spk0 by index tie-break.
+    return (act[best_spk] > 0.05) ? best_spk : -1;
+}
+
 void assign_speakers_from_log_posteriors(const float* log_probs, int T, double frame_dur_s, int64_t slice_t0_cs,
                                          std::vector<CrispasrDiarizeSegment>& segs) {
     if (!log_probs || T <= 0 || frame_dur_s <= 0.0)
         return;
-
     for (auto& seg : segs) {
-        const double a0 = (double)(seg.t0_cs - slice_t0_cs) / 100.0;
-        const double a1 = (double)(seg.t1_cs - slice_t0_cs) / 100.0;
-        const int f0 = std::max(0, (int)(a0 / frame_dur_s));
-        const int f1 = std::min(T, (int)(a1 / frame_dur_s) + 1);
-        if (f0 >= f1)
-            continue;
-
-        // Posterior-weighted per-speaker activity sum.
-        // For each non-silence-dominated frame: exp the 7 log-probs
-        // once, then add to each speaker's accumulator the sum of class
-        // probs covering that speaker (via SPK_MASK).
-        //
-        // Silence gating: when p[silence] > 0.5 the frame is dropped
-        // entirely (no speaker gets credit). This is what makes a
-        // pure-silence ASR segment end up with speaker == -1 rather
-        // than spuriously picking spk0 from residual non-silence mass.
-        // Without this gate, a 200-frame silence segment with p[0]≈0.99
-        // and the other six classes each at ~3e-4 still tallies
-        // ~0.12 per speaker.
-        double act[3] = {0.0, 0.0, 0.0};
-        int n_speech_frames = 0;
-        for (int f = f0; f < f1; f++) {
-            const float* lv = log_probs + f * 7;
-            float p[7];
-            for (int c = 0; c < 7; c++)
-                p[c] = std::exp(lv[c]);
-            if (p[0] > 0.5f)
-                continue; // silence-dominated frame
-            for (int s = 0; s < 3; s++) {
-                double sum = 0.0;
-                for (int c = 0; c < 7; c++)
-                    sum += SPK_MASK[s][c] * p[c];
-                act[s] += sum;
-            }
-            n_speech_frames++;
-        }
-        if (n_speech_frames == 0)
-            continue; // segment is pure silence per the seg net — leave speaker = -1
-
-        int best_spk = 0;
-        for (int s = 1; s < 3; s++)
-            if (act[s] > act[best_spk])
-                best_spk = s;
-        // Tiny floor so an early-exit "speech_frames == 1 but no speaker
-        // class fired" can't pick spk0 by index tie-break.
-        if (act[best_spk] > 0.05)
-            seg.speaker = best_spk;
+        const int spk =
+            score_speaker_for_range(log_probs, T, frame_dur_s, seg.t0_cs - slice_t0_cs, seg.t1_cs - slice_t0_cs);
+        if (spk >= 0)
+            seg.speaker = spk;
     }
 }
 

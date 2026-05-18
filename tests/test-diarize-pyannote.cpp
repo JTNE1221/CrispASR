@@ -20,6 +20,7 @@
 #include <vector>
 
 using crispasr_diarize_internal::assign_speakers_from_log_posteriors;
+using crispasr_diarize_internal::score_speaker_for_range;
 
 namespace {
 
@@ -221,4 +222,54 @@ TEST_CASE("apply_pyannote: posterior weight beats one-hot count when overlap is 
     assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
 
     REQUIRE(segs[0].speaker == 1);
+}
+
+// -----------------------------------------------------------------------
+// score_speaker_for_range — the per-range scoring used by both
+// segment-level assignment (above) and word-level splitting (#107 P2e).
+// -----------------------------------------------------------------------
+
+TEST_CASE("score_speaker_for_range: picks the dominant speaker within an arbitrary subrange",
+          "[unit][diarize][pyannote]") {
+    // Frame 0..49 = spk0, 50..99 = spk1, 100..149 = spk2.
+    std::vector<float> probs;
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 1);
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 2);
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 4);
+    const int T = 150;
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 0, frames_to_cs(50)) == 0);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(50), frames_to_cs(100)) == 1);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(100), frames_to_cs(150)) == 2);
+    // A sub-range fully inside spk1's block -> spk1.
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(60), frames_to_cs(80)) == 1);
+}
+
+TEST_CASE("score_speaker_for_range: silence range -> -1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 50;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 0);
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 0, frames_to_cs(T)) == -1);
+}
+
+TEST_CASE("score_speaker_for_range: empty / out-of-range -> -1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 50;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 1);
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 200, 100) == -1);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 10000, 20000) == -1);
+}
+
+TEST_CASE("score_speaker_for_range: invalid inputs -> -1", "[unit][diarize][pyannote]") {
+    float p = -0.001f;
+    REQUIRE(score_speaker_for_range(nullptr, 10, kFrameDurS, 0, 100) == -1);
+    REQUIRE(score_speaker_for_range(&p, 0, kFrameDurS, 0, 100) == -1);
+    REQUIRE(score_speaker_for_range(&p, 1, 0.0, 0, 100) == -1);
 }

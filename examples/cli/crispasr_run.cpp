@@ -472,6 +472,38 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     // Process VAD slices — parallel when multiple slices AND n_processors > 1
     std::vector<std::vector<crispasr_segment>> per_slice(slices.size());
 
+    // Pyannote cross-slice fix (issue #107): pre-compute the
+    // segmentation posteriors once over the FULL mono audio, then have
+    // each per-slice diarize call score against the cached buffer. Per-
+    // slice pyannote runs would reset local track indices (spk0/1/2
+    // mean different physical speakers in each forward pass), which is
+    // why the bug-report podcast saw speakers swapping across slices.
+    //
+    // Only allocated when the user actually picked --diarize-method
+    // pyannote — otherwise we incur no extra cost. Stereo input is
+    // downmixed to mono for pyannote (matches what apply_pyannote does
+    // when called per-slice today).
+    CrispasrPyannoteCache pyannote_cache;
+    if (params.diarize && params.diarize_method == "pyannote" && !samples.empty()) {
+        const float* full = samples.data();
+        std::vector<float> mono_buf;
+        if (have_stereo && !stereo[0].empty() && !stereo[1].empty()) {
+            const size_t n = std::min(stereo[0].size(), stereo[1].size());
+            mono_buf.resize(n);
+            for (size_t i = 0; i < n; i++)
+                mono_buf[i] = 0.5f * (stereo[0][i] + stereo[1][i]);
+            full = mono_buf.data();
+        }
+        const int n_samples_full = (int)samples.size();
+        if (!crispasr_compute_pyannote_cache(full, n_samples_full, params, pyannote_cache)) {
+            // Cache build failed (model missing, etc.). Fall back to
+            // per-slice apply_pyannote — same code path as before P2a.
+            // crispasr_apply_diarize handles the missing-cache case by
+            // running the model per slice.
+            pyannote_cache = {};
+        }
+    }
+
     // Each slice is transcribed with its own audio only. Boundaries are placed
     // by audio_chunking::split_at_energy_minima at the quietest 100 ms within
     // each chunk window, so chunk seams already fall in pauses; we don't need
@@ -494,14 +526,15 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
             be.transcribe(samples.data() + sl.start, sl.end - sl.start, sl.t0_cs, params);
 
         if (params.diarize && !segs.empty()) {
+            const CrispasrPyannoteCache* cache_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
             if (have_stereo) {
                 std::vector<float> sl_l(stereo[0].begin() + sl.start, stereo[0].begin() + sl.end);
                 std::vector<float> sl_r(stereo[1].begin() + sl.start, stereo[1].begin() + sl.end);
-                crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, segs, params);
+                crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, segs, params, cache_ptr);
             } else {
                 std::vector<float> mono_slice(samples.begin() + sl.start, samples.begin() + sl.end);
                 crispasr_apply_diarize(mono_slice, mono_slice,
-                                       /*is_stereo=*/false, sl.t0_cs, segs, params);
+                                       /*is_stereo=*/false, sl.t0_cs, segs, params, cache_ptr);
             }
         }
 

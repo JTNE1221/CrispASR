@@ -21,6 +21,31 @@
 
 struct whisper_params; // fwd decl
 
+/// Cached pyannote-seg posteriors over a full audio buffer. Built once
+/// at the start of a run (issue #107 — avoids per-slice pyannote runs
+/// that reset local track indices across slices and produce
+/// inconsistent speaker labels).
+///
+/// `log_probs` is row-major [T, 7] log-softmax over the seven
+/// pyannote-seg classes (silence, spk0, spk1, spk0+1, spk2, spk0+2,
+/// spk1+2). `frame_dur_s` is the audio duration of one frame
+/// (270 / 16000 = 16.875 ms for pyannote-seg-3.0). The cache implicitly
+/// covers absolute time [0, T*frame_dur_s); pass `slice_t0_cs` when
+/// applying it to translate segment cs into frame indices.
+struct CrispasrPyannoteCache {
+    std::vector<float> log_probs;
+    int T = 0;
+    double frame_dur_s = 0.0;
+    bool valid() const { return T > 0 && (int)log_probs.size() == T * 7 && frame_dur_s > 0.0; }
+};
+
+/// Compute pyannote-seg posteriors over `full_audio` (mono, 16 kHz) so
+/// the same buffer can be reused for every per-slice diarize call.
+/// `params.sherpa_segment_model` selects (or auto-downloads) the GGUF.
+/// Returns true on success; `out` is populated with shape [T, 7].
+bool crispasr_compute_pyannote_cache(const float* full_audio, int n_samples, const whisper_params& params,
+                                     CrispasrPyannoteCache& out);
+
 /// Top-level CLI diarize post-step.
 ///
 /// Routes `params.diarize_method` to either the shared library methods
@@ -34,5 +59,11 @@ struct whisper_params; // fwd decl
 /// available. For mono input, both vectors point at the same data and
 /// `is_stereo` is false; the dispatcher should call this anyway so the
 /// mono-friendly methods (vad-turns, pyannote, sherpa) can still run.
+///
+/// `pyannote_cache` is optional. When non-null and valid AND the method
+/// is `pyannote`, the cached posteriors are used instead of running
+/// pyannote-seg again on this slice — required for cross-slice speaker
+/// ID consistency (#107).
 bool crispasr_apply_diarize(const std::vector<float>& left, const std::vector<float>& right, bool is_stereo,
-                            int64_t slice_t0_cs, std::vector<crispasr_segment>& segs, const whisper_params& params);
+                            int64_t slice_t0_cs, std::vector<crispasr_segment>& segs, const whisper_params& params,
+                            const CrispasrPyannoteCache* pyannote_cache = nullptr);
