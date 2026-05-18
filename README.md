@@ -207,8 +207,8 @@ The matrix above covers ASR backends. **TTS-only backends** (`kokoro`, `qwen3-tt
 
 **Speaker diarization** is available for all backends as a post-processing step via `--diarize`:
 - `--diarize-method energy` / `xcorr` — stereo-only, no extra deps
-- `--diarize-method pyannote` — native GGUF runtime (no Python, no sherpa-onnx). Pass `--sherpa-segment-model pyannote-v3-seg.gguf` for the pyannote v3 segmentation model. Falls back to sherpa subprocess for `.onnx` models.
-- `--diarize-method sherpa` / `ecapa` — calls an externally-installed [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) subprocess with speaker embedding models.
+- `--diarize-method pyannote` — **experimental, segmentation only.** Native GGUF runtime (no Python, no sherpa-onnx). Pass `--sherpa-segment-model pyannote-v3-seg.gguf` for the pyannote v3 segmentation model. Falls back to sherpa subprocess for `.onnx` models. *Note:* the native path currently runs the pyannote segmentation net only — there is **no speaker embedding or clustering step**, so speaker IDs are not stable across long files and long ASR segments that contain a speaker turn are assigned a single dominant speaker. For reliable multi-speaker diarization on long-form audio, prefer `--diarize-method sherpa`/`ecapa` (see issue [#107](https://github.com/CrispStrobe/CrispASR/issues/107)).
+- `--diarize-method sherpa` / `ecapa` — calls an externally-installed [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) subprocess with speaker embedding models. Recommended for podcasts and other multi-speaker long-form audio.
 - `--diarize-method vad-turns` — mono-friendly, assigns speaker labels at gap boundaries
 
 **Language identification** for backends without native LID: `--lid-backend whisper` (default, 75 MB ggml-tiny.bin), `--lid-backend silero` (native GGUF, 16 MB, 95 languages), or `--lid-backend firered` (FireRedLID, 1.7 GB, 120 languages — Conformer encoder + Transformer decoder).

@@ -140,12 +140,29 @@ void apply_vad_turns(std::vector<CrispasrDiarizeSegment>& segs) {
 // Method 4: native pyannote segmentation (no subprocess)
 // -----------------------------------------------------------------------
 //
+// EXPERIMENTAL — segmentation only, NOT full diarization. See issue #107.
+//
 // Runs the GGUF-packed pyannote segmentation net from src/pyannote_seg.*
 // over the mono buffer. Output is 7 class posteriors per frame:
 //   0 = silence, 1 = spk0, 2 = spk1, 3 = spk0+1,
 //   4 = spk2,    5 = spk0+2, 6 = spk1+2
 // For each ASR segment, count the dominant speaker across its frames
 // and assign the most-frequent one.
+//
+// Known limitations of this path (intentional, tracked in #107):
+//   * The pyannote-seg model emits LOCAL speaker activity tracks
+//     (spk0/spk1/spk2 within each forward pass). There is no speaker
+//     embedding or clustering step, so the track indices are NOT
+//     globally stable speaker identities. On long-form multi-speaker
+//     audio, labels will swap.
+//   * Overlap classes (3,5,6) are collapsed to a single speaker by the
+//     class_to_speaker[] LUT below — concurrent activity on the other
+//     speaker is dropped, which biases the dominant-count vote.
+//   * Each ASR segment is assigned ONE speaker. If a speaker change
+//     occurs inside a long ASR span, the minority speaker is lost
+//     rather than splitting the segment at the turn boundary.
+// For reliable multi-speaker diarization, use --diarize-method sherpa
+// (full segmentation + embedding + clustering pipeline).
 bool apply_pyannote(const float* mono, int n_samples, int64_t slice_t0_cs, std::vector<CrispasrDiarizeSegment>& segs,
                     const std::string& model_path, int n_threads) {
     if (model_path.empty())

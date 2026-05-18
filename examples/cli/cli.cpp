@@ -803,9 +803,15 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr,
             "  --diarize-method NAME             [%-7s] diarize method: energy|xcorr|vad-turns|sherpa|pyannote|ecapa\n",
             params.diarize_method.c_str());
-    fprintf(
-        stderr,
-        "                                             (sherpa/pyannote/ecapa all use the sherpa-onnx subprocess)\n");
+    fprintf(stderr,
+            "                                             energy/xcorr: stereo channel split; vad-turns: gap-based "
+            "turn proxy (mono)\n");
+    fprintf(stderr,
+            "                                             pyannote: native GGUF segmentation only (experimental — "
+            "no speaker embeddings or clustering, IDs are not stable across long files; for reliable diarization "
+            "use sherpa/ecapa)\n");
+    fprintf(stderr, "                                             sherpa/ecapa: external sherpa-onnx subprocess with "
+                    "segmentation + speaker embedding + clustering\n");
     fprintf(stderr,
             "  --sherpa-bin PATH                 [%-7s] sherpa-onnx-offline-speaker-diarization binary (default: in "
             "PATH)\n",
