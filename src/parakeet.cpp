@@ -1635,6 +1635,77 @@ static std::string spiece_to_text(const std::string& piece) {
     return piece;
 }
 
+// ---------------------------------------------------------------------------
+// Split encode / decode API
+// ---------------------------------------------------------------------------
+
+extern "C" float* parakeet_encode(struct parakeet_context* ctx, const float* samples, int n_samples,
+                                   int* out_T_enc, int* out_d_model) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    int T_mel = 0;
+    auto mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    if (mel.empty())
+        return nullptr;
+    int T_enc = 0;
+    auto enc = parakeet_encode_mel(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, &T_enc);
+    if (enc.empty())
+        return nullptr;
+    const int d = (int)ctx->model.hparams.d_model;
+    float* out = (float*)malloc(enc.size() * sizeof(float));
+    memcpy(out, enc.data(), enc.size() * sizeof(float));
+    if (out_T_enc) *out_T_enc = T_enc;
+    if (out_d_model) *out_d_model = d;
+    return out;
+}
+
+extern "C" struct parakeet_result* parakeet_decode_frames(struct parakeet_context* ctx, const float* enc_frames,
+                                                          int T_enc, int d_model, int64_t t_offset_cs) {
+    if (!ctx || !enc_frames || T_enc <= 0)
+        return nullptr;
+
+    const bool use_ctc = ctx->decode_ctc && ctx->model.has_ctc;
+    auto emitted = use_ctc ? parakeet_ctc_decode(ctx, enc_frames, T_enc, d_model)
+                           : parakeet_tdt_decode(ctx, enc_frames, T_enc, d_model);
+
+    // Build result (same as the tail of parakeet_transcribe_ex)
+    auto* r = (parakeet_result*)calloc(1, sizeof(parakeet_result));
+    r->n_tokens = (int)emitted.size();
+    r->tokens = (parakeet_token_data*)calloc(r->n_tokens > 0 ? r->n_tokens : 1, sizeof(parakeet_token_data));
+    std::string text;
+    const int frame_dur_cs = (int)ctx->model.hparams.frame_dur_cs;
+    for (int i = 0; i < r->n_tokens; i++) {
+        const auto& e = emitted[i];
+        const std::string& piece =
+            (e.id >= 0 && e.id < (int)ctx->vocab.id_to_token.size()) ? ctx->vocab.id_to_token[e.id] : std::string("");
+        std::string vis = spiece_to_text(piece);
+        parakeet_token_data& td = r->tokens[i];
+        td.id = e.id;
+        td.t0 = t_offset_cs + (int64_t)e.t_start * frame_dur_cs;
+        td.t1 = t_offset_cs + (int64_t)e.t_end * frame_dur_cs;
+        td.p = e.p;
+        size_t n = std::min(vis.size(), sizeof(td.text) - 1);
+        memcpy(td.text, vis.data(), n);
+        td.text[n] = '\0';
+        text += vis;
+    }
+    if (!text.empty() && text[0] == ' ')
+        text = text.substr(1);
+    r->text = strdup(text.c_str());
+
+    // Word grouping — reuse the logic from parakeet_transcribe_ex.
+    // (Simplified: delegate to the existing result builder by calling
+    // parakeet_transcribe_ex's word-grouping code. For now, skip word
+    // grouping in the split path — the backend adapter builds words
+    // from tokens anyway.)
+    r->words = nullptr;
+    r->n_words = 0;
+
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+
 extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_context* ctx, const float* samples,
                                                           int n_samples, int64_t t_offset_cs) {
     if (!ctx || !samples || n_samples <= 0)
