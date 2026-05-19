@@ -32,7 +32,7 @@ public:
     uint32_t capabilities() const override {
         return CAP_TIMESTAMPS_NATIVE | CAP_TIMESTAMPS_CTC | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE |
                CAP_SRC_TGT_LANGUAGE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_TEMPERATURE | CAP_DIARIZE |
-               CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD;
+               CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_UNBOUNDED_INPUT;
     }
 
     bool init(const whisper_params& p) override {

@@ -357,16 +357,24 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     // the ASR backend allocates its own model + KV cache (#35 OOM fix).
     crispasr_lid_free_cache();
 
-    // Issue #89: non-whisper backends (parakeet, canary, moonshine, …) use
-    // bidirectional encoders that lose context at fixed chunk boundaries,
-    // causing text loss at the start of each chunk. Whisper needs 30 s
-    // chunks because its positional-encoding encoder is trained on exactly
-    // 30 s windows; every other backend can handle arbitrary-length input.
+    // Issue #89: backends with CAP_UNBOUNDED_INPUT (parakeet, canary,
+    // wav2vec2, firered-asr, fastconformer-ctc, granite-nar) use
+    // non-autoregressive encoders (FastConformer, CTC) that handle
+    // arbitrary-length audio without chunking. Fixed 30 s chunk
+    // boundaries cause text loss at chunk starts because bidirectional
+    // encoders lose context at the cut points.
+    //
+    // Backends WITHOUT CAP_UNBOUNDED_INPUT (whisper, cohere, moonshine,
+    // voxtral, granite, qwen3, glm-asr, kyutai-stt, mimo-asr, gemma4,
+    // omniasr) use either fixed-window encoders (whisper) or
+    // autoregressive decoders with KV cache that grow with input
+    // length — these need chunking to avoid OOM on long audio.
+    //
     // When the user didn't explicitly pass --chunk-seconds, disable
-    // chunking for non-whisper backends so the full audio is processed in
-    // one encoder pass.
+    // chunking for unbounded-input backends so the full audio is
+    // processed in one encoder pass.
     int effective_chunk_seconds = params.chunk_seconds;
-    if (!params.chunk_seconds_explicit && !(backend.capabilities() & CAP_VAD_INTERNAL)) {
+    if (!params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
         effective_chunk_seconds = 0;
         if (!params.no_prints && (int)samples.size() > params.chunk_seconds * SR) {
             fprintf(stderr, "crispasr: %s backend — processing full audio without chunking "

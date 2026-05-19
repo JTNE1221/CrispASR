@@ -31,7 +31,8 @@ public:
         // get nothing. With the cap absent, `-dl` correctly routes
         // through the whisper-tiny pre-step.
         return CAP_TIMESTAMPS_NATIVE | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE | CAP_FLASH_ATTN |
-               CAP_PUNCTUATION_TOGGLE | CAP_TEMPERATURE | CAP_DIARIZE | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD;
+               CAP_PUNCTUATION_TOGGLE | CAP_TEMPERATURE | CAP_DIARIZE | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD |
+               CAP_UNBOUNDED_INPUT;
     }
 
     bool init(const whisper_params& p) override {

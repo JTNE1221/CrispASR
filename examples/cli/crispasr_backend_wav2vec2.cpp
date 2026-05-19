@@ -24,7 +24,8 @@ public:
     const char* name() const override { return "wav2vec2"; }
 
     uint32_t capabilities() const override {
-        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_DIARIZE;
+        return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_DIARIZE |
+               CAP_UNBOUNDED_INPUT;
     }
 
     bool init(const whisper_params& p) override {

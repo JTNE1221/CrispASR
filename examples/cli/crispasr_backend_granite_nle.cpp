@@ -26,7 +26,8 @@ public:
         // granite-4.1-nar produces text segments → framework -am + --diarize
         // post-steps work even though the runtime is encoder+projector only
         // with no LLM decode features.
-        return CAP_AUTO_DOWNLOAD | CAP_FLASH_ATTN | CAP_TIMESTAMPS_CTC | CAP_DIARIZE | CAP_PUNCTUATION_NATIVE;
+        return CAP_AUTO_DOWNLOAD | CAP_FLASH_ATTN | CAP_TIMESTAMPS_CTC | CAP_DIARIZE | CAP_PUNCTUATION_NATIVE |
+               CAP_UNBOUNDED_INPUT;
     }
 
     bool init(const whisper_params& params) override {
