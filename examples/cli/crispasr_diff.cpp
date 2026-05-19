@@ -159,16 +159,31 @@ static const std::vector<float>& cache_f32(Ref::Impl* impl, const std::string& n
     ggml_tensor* t = tt->second;
     const size_t nb = ggml_nbytes(t);
     std::vector<float> buf;
-    // Only handle F32 for now — dump_reference.py writes every activation
-    // as F32 by default. Adding I32 handling when we need argmax-only refs.
+    // dump_reference.py emits activations as F32; token-id stages like
+    // `text_input_ids` come through as I32. Promote either to F32 here so
+    // the diff harness can compare integer-valued tensors elementwise.
     if (t->type == GGML_TYPE_F32) {
         buf.resize(nb / sizeof(float));
         ggml_backend_tensor_get(t, buf.data(), 0, nb);
+    } else if (t->type == GGML_TYPE_I32) {
+        const size_t n = nb / sizeof(int32_t);
+        std::vector<int32_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, nb);
+        buf.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            buf[i] = (float)tmp[i];
+        }
+    } else if (t->type == GGML_TYPE_F16) {
+        const size_t n = nb / sizeof(uint16_t);
+        std::vector<uint16_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, nb);
+        buf.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            buf[i] = ggml_fp16_to_fp32((ggml_fp16_t)tmp[i]);
+        }
     } else {
-        fprintf(stderr,
-                "crispasr_diff: tensor '%s' has type %s, only F32 is "
-                "currently supported in the Ref loader\n",
-                name.c_str(), ggml_type_name(t->type));
+        fprintf(stderr, "crispasr_diff: tensor '%s' has type %s — Ref loader supports F32/F16/I32 only\n", name.c_str(),
+                ggml_type_name(t->type));
     }
     auto ins = impl->f32_cache.emplace(name, std::move(buf));
     return ins.first->second;

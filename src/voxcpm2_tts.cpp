@@ -1427,27 +1427,27 @@ static void causal_conv1d(const float* weight, const float* bias, const float* x
     int in_per_grp = in_ch / groups;
     int out_per_grp = out_ch / groups;
 
-    for (int g = 0; g < groups; g++) {
-        for (int oc = 0; oc < out_per_grp; oc++) {
-            int oc_abs = g * out_per_grp + oc;
+#if defined(_OPENMP)
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+    for (int oc_abs = 0; oc_abs < out_ch; oc_abs++) {
+        for (int ot = 0; ot < T_out; ot++) {
+            int g = oc_abs / out_per_grp;
             float b_val = bias ? bias[oc_abs] : 0.0f;
-            for (int ot = 0; ot < T_out; ot++) {
-                float acc = b_val;
-                int it_center = ot * stride;
-                for (int k = 0; k < ksize; k++) {
-                    int it = it_center - pad + k * dilation;
-                    if (it < 0 || it >= T_in)
-                        continue;
-                    const float* w_row = weight + ((size_t)oc_abs * in_per_grp * ksize + (size_t)0 * ksize + k);
-                    for (int ic = 0; ic < in_per_grp; ic++) {
-                        int ic_abs = g * in_per_grp + ic;
-                        float x_val = x_in[(size_t)ic_abs * T_in + it];
-                        float w_val = weight[(size_t)oc_abs * in_per_grp * ksize + (size_t)ic * ksize + k];
-                        acc += x_val * w_val;
-                    }
+            float acc = b_val;
+            int it_center = ot * stride;
+            for (int k = 0; k < ksize; k++) {
+                int it = it_center - pad + k * dilation;
+                if (it < 0 || it >= T_in)
+                    continue;
+                for (int ic = 0; ic < in_per_grp; ic++) {
+                    int ic_abs = g * in_per_grp + ic;
+                    float x_val = x_in[(size_t)ic_abs * T_in + it];
+                    float w_val = weight[(size_t)oc_abs * in_per_grp * ksize + (size_t)ic * ksize + k];
+                    acc += x_val * w_val;
                 }
-                x_out[(size_t)oc_abs * T_out + ot] = acc;
             }
+            x_out[(size_t)oc_abs * T_out + ot] = acc;
         }
     }
 }
@@ -1871,9 +1871,12 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
 static void vae_strided_conv1d(const float* weight, const float* bias, const float* x_in, float* x_out, int in_ch,
                                int out_ch, int ksize, int T_in, int stride, int left_pad) {
     int T_out = (T_in + left_pad - ksize) / stride + 1;
+#if defined(_OPENMP)
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
     for (int oc = 0; oc < out_ch; oc++) {
-        float b_val = bias ? bias[oc] : 0.0f;
         for (int ot = 0; ot < T_out; ot++) {
+            float b_val = bias ? bias[oc] : 0.0f;
             float acc = b_val;
             int it_start = ot * stride - left_pad;
             for (int k = 0; k < ksize; k++) {
@@ -1941,7 +1944,44 @@ static int vae_enc_block(const std::map<std::string, ggml_tensor*>& T, int blk_i
 // (matching Python `feat.view(D, -1, P).permute(1, 2, 0)`).
 // On failure (encoder weights missing) returns an empty vector and sets
 // *out_T_patches = 0.
+// Process-wide VAE encode cache. The diff harness calls extract_stage once per
+// stage and several stages need ref_feat — the encoder takes ~30 s on CPU so
+// re-running it 5-10 times serialises into multiple minutes. Cache keyed on
+// (ctx, ref pointer, ref length).
+struct vox_vae_cache_key {
+    voxcpm2_context* ctx;
+    const float* pcm;
+    int n_samples;
+    bool operator==(const vox_vae_cache_key& o) const {
+        return ctx == o.ctx && pcm == o.pcm && n_samples == o.n_samples;
+    }
+};
+
+static std::vector<float> vae_encode_uncached(voxcpm2_context* ctx, const float* pcm, int n_samples,
+                                              int* out_T_patches);
+
+static const std::vector<float>& vae_encode_cached(voxcpm2_context* ctx, const float* pcm, int n_samples,
+                                                   int* out_T_patches) {
+    static vox_vae_cache_key cached_key{nullptr, nullptr, -1};
+    static std::vector<float> cached;
+    static int cached_T = 0;
+    vox_vae_cache_key key{ctx, pcm, n_samples};
+    if (!(key == cached_key)) {
+        cached = vae_encode_uncached(ctx, pcm, n_samples, &cached_T);
+        cached_key = key;
+    }
+    if (out_T_patches) {
+        *out_T_patches = cached_T;
+    }
+    return cached;
+}
+
 static std::vector<float> vae_encode(voxcpm2_context* ctx, const float* pcm, int n_samples, int* out_T_patches) {
+    return vae_encode_uncached(ctx, pcm, n_samples, out_T_patches);
+}
+
+static std::vector<float> vae_encode_uncached(voxcpm2_context* ctx, const float* pcm, int n_samples,
+                                              int* out_T_patches) {
     const auto& T = ctx->tensors;
     const auto& hp = ctx->hp;
 
@@ -2642,6 +2682,143 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared prefill input builder — used by both `vox_synthesize_internal` and
+// the cloning-aware diff stage handlers. Encapsulates `_make_ref_prefix` +
+// per-position embed construction so the two call sites can't drift.
+//
+//   text         : synth text (UTF-8); will be tokenised + audio_start appended.
+//   ref_samples  : 16 kHz mono float32 PCM, or nullptr for zero-shot.
+//   ref_n_samples: length of `ref_samples` (samples, not bytes).
+//
+// Result fields are unset/empty on failure (e.g. empty text).
+// ---------------------------------------------------------------------------
+struct vox_prefill_inputs {
+    std::vector<int32_t> all_tokens;
+    std::vector<uint8_t> audio_mask_pos; // 1 = ref-audio position, 0 = text position
+    std::vector<float> combined_embed;   // [N_pos * d_tslm]
+    std::vector<float> feat_embed_pos;   // [N_pos * d_tslm]; nonzero only at audio positions
+    std::vector<float> ref_feat;         // [T_ref * P * D] from VAE encoder (kept for AR-loop access)
+    int T_ref = 0;
+    int N_pos = 0;
+    bool have_ref = false;
+};
+
+// Process-wide cache so that the diff harness (which calls extract_stage
+// once per stage) doesn't recompute the 69-patch LocEnc / 82-position TSLM
+// prefill 6× per invocation. Keyed on (ctx, text, ref_n_samples) — that's
+// enough to distinguish reasonable use; same-text/same-ref repeated calls
+// reuse the cached inputs. The cache lifetime is the process — single-call
+// CLI use never hits a second lookup.
+struct vox_prefill_cache_key {
+    voxcpm2_context* ctx;
+    std::string text;
+    int ref_n_samples;
+    bool operator==(const vox_prefill_cache_key& o) const {
+        return ctx == o.ctx && ref_n_samples == o.ref_n_samples && text == o.text;
+    }
+};
+
+static vox_prefill_inputs build_prefill_inputs_impl(voxcpm2_context* ctx, const std::string& text,
+                                                    const float* ref_samples, int ref_n_samples, ggml_backend_t cpu_be);
+
+static const vox_prefill_inputs& build_prefill_inputs_cached(voxcpm2_context* ctx, const std::string& text,
+                                                             const float* ref_samples, int ref_n_samples,
+                                                             ggml_backend_t cpu_be) {
+    static vox_prefill_cache_key cached_key{nullptr, std::string(), -1};
+    static vox_prefill_inputs cached;
+    vox_prefill_cache_key key{ctx, text, ref_n_samples};
+    if (!(key == cached_key) || cached.N_pos == 0) {
+        cached = build_prefill_inputs_impl(ctx, text, ref_samples, ref_n_samples, cpu_be);
+        cached_key = key;
+    }
+    return cached;
+}
+
+static vox_prefill_inputs build_prefill_inputs(voxcpm2_context* ctx, const std::string& text, const float* ref_samples,
+                                               int ref_n_samples, ggml_backend_t cpu_be) {
+    return build_prefill_inputs_impl(ctx, text, ref_samples, ref_n_samples, cpu_be);
+}
+
+static vox_prefill_inputs build_prefill_inputs_impl(voxcpm2_context* ctx, const std::string& text,
+                                                    const float* ref_samples, int ref_n_samples,
+                                                    ggml_backend_t cpu_be) {
+    vox_prefill_inputs out;
+    const auto& hp = ctx->hp;
+    int d_tslm = (int)hp.tslm_d_model;
+    int d_dit = (int)hp.locdit_d_model;
+    int P_frames = (int)hp.patch_frames;
+    int feat_dim_vae = 64;
+
+    // 1. Tokenise (vox_tokenize already appends audio_start_token).
+    std::vector<int32_t> text_tokens = vox_tokenize(ctx->tokenizer, text);
+    if (text_tokens.empty()) {
+        return out;
+    }
+
+    // 2. VAE-encode the reference WAV if provided.
+    out.have_ref =
+        (ref_samples != nullptr && ref_n_samples > 0 && hp.ref_audio_start_token != 0 && hp.ref_audio_end_token != 0);
+    if (out.have_ref) {
+        out.ref_feat = vae_encode(ctx, ref_samples, ref_n_samples, &out.T_ref);
+        if (out.T_ref <= 0) {
+            fprintf(stderr, "voxcpm2: VAE encoder produced 0 patches — falling back to zero-shot\n");
+            out.have_ref = false;
+            out.ref_feat.clear();
+        }
+    }
+
+    // 3. Build `_make_ref_prefix` + concat with text tokens.
+    if (out.have_ref) {
+        out.all_tokens.reserve((size_t)out.T_ref + 2 + text_tokens.size());
+        out.audio_mask_pos.reserve((size_t)out.T_ref + 2 + text_tokens.size());
+        out.all_tokens.push_back((int32_t)hp.ref_audio_start_token);
+        out.audio_mask_pos.push_back(0);
+        for (int i = 0; i < out.T_ref; i++) {
+            out.all_tokens.push_back(0);
+            out.audio_mask_pos.push_back(1);
+        }
+        out.all_tokens.push_back((int32_t)hp.ref_audio_end_token);
+        out.audio_mask_pos.push_back(0);
+        for (int32_t tok : text_tokens) {
+            out.all_tokens.push_back(tok);
+            out.audio_mask_pos.push_back(0);
+        }
+    } else {
+        out.all_tokens = text_tokens;
+        out.audio_mask_pos.assign(text_tokens.size(), 0);
+    }
+    out.N_pos = (int)out.all_tokens.size();
+
+    // 4. Per-position embed: combined_embed[t] = text_mask*embed_tokens + audio_mask*enc_to_lm(locenc(audio_feat[t])).
+    out.combined_embed.assign((size_t)out.N_pos * d_tslm, 0.0f);
+    out.feat_embed_pos.assign((size_t)out.N_pos * d_tslm, 0.0f);
+    for (int t = 0; t < out.N_pos; t++) {
+        if (out.audio_mask_pos[t]) {
+            int patch_idx = t - 1;
+            const float* patch = out.ref_feat.data() + (size_t)patch_idx * P_frames * feat_dim_vae;
+            std::vector<float> enc_out = locenc_forward(ctx, patch, cpu_be);
+            if (ctx->weights.enc_to_lm_w && ctx->weights.enc_to_lm_b) {
+                matmul_mv_bias(cpu_be, ctx->weights.enc_to_lm_w, ctx->weights.enc_to_lm_b, enc_out.data(), d_dit,
+                               out.feat_embed_pos.data() + (size_t)t * d_tslm, d_tslm);
+            } else {
+                int copy_d = std::min(d_dit, d_tslm);
+                std::memcpy(out.feat_embed_pos.data() + (size_t)t * d_tslm, enc_out.data(),
+                            (size_t)copy_d * sizeof(float));
+            }
+            std::memcpy(out.combined_embed.data() + (size_t)t * d_tslm, out.feat_embed_pos.data() + (size_t)t * d_tslm,
+                        (size_t)d_tslm * sizeof(float));
+        } else {
+            int id = out.all_tokens[t];
+            if (id < 0 || id >= (int)hp.n_vocab) {
+                id = 0;
+            }
+            get_row_f32(ctx->weights.tslm_token_embd, id, out.combined_embed.data() + (size_t)t * d_tslm);
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Core synthesis pipeline
 // ---------------------------------------------------------------------------
 
@@ -2664,103 +2841,28 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     int P_frames = (int)hp.patch_frames;
     int feat_dim_vae = 64;
 
-    // 1. Tokenize the synth text (vox_tokenize already appends audio_start_token).
-    std::vector<int32_t> text_tokens = vox_tokenize(ctx->tokenizer, std::string(text));
-    if (ctx->verbosity >= 1) {
-        fprintf(stderr, "voxcpm2: tokenized '%s' -> %zu tokens\n", text, text_tokens.size());
-    }
-    if (text_tokens.empty()) {
+    // 1. Build prefill inputs (tokens + masks + combined embeds + ref feats).
+    vox_prefill_inputs pi = build_prefill_inputs(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+    if (pi.N_pos == 0) {
         fprintf(stderr, "voxcpm2: empty token sequence\n");
         return nullptr;
     }
-
-    // 2. Voice cloning: if a 16 kHz mono reference is provided, VAE-encode it
-    //    and build the ref prefix per voxcpm.model.voxcpm2 `_make_ref_prefix`:
-    //      tokens     = [ref_audio_start, 0×T_ref, ref_audio_end] + text_tokens
-    //      audio_mask = [0, 1×T_ref, 0] + 0×T_text
-    //      text_mask  = [1, 0×T_ref, 1] + 1×T_text
-    //      audio_feat = [zeros(P,D), ref_feat (T_ref×P×D), zeros(P,D)] + zeros(T_text,P,D)
-    //    For text-only (ref_samples == nullptr), this collapses to the zero-shot
-    //    path: tokens = text_tokens, audio_mask = 0, text_mask = 1, audio_feat = 0.
-    int T_ref = 0;
-    std::vector<float> ref_feat;
-    bool have_ref =
-        (ref_samples != nullptr && ref_n_samples > 0 && hp.ref_audio_start_token != 0 && hp.ref_audio_end_token != 0);
-    if (have_ref) {
-        ref_feat = vae_encode(ctx, ref_samples, ref_n_samples, &T_ref);
-        if (T_ref <= 0) {
-            fprintf(stderr, "voxcpm2: VAE encoder produced 0 patches — falling back to zero-shot\n");
-            have_ref = false;
-        }
+    if (ctx->verbosity >= 1) {
+        fprintf(stderr, "voxcpm2: tokenized '%s' -> %d positions%s\n", text, pi.N_pos,
+                pi.have_ref ? " (incl ref)" : "");
     }
+    int N_pos = pi.N_pos;
+    bool have_ref = pi.have_ref;
+    const auto& audio_mask_pos = pi.audio_mask_pos;
+    const auto& feat_embed_pos = pi.feat_embed_pos;
 
-    std::vector<int32_t> all_tokens;
-    std::vector<uint8_t> audio_mask_pos; // 1 byte per position; 1 = audio, 0 = text
-    if (have_ref) {
-        all_tokens.reserve((size_t)T_ref + 2 + text_tokens.size());
-        audio_mask_pos.reserve((size_t)T_ref + 2 + text_tokens.size());
-        all_tokens.push_back((int32_t)hp.ref_audio_start_token);
-        audio_mask_pos.push_back(0);
-        for (int i = 0; i < T_ref; i++) {
-            all_tokens.push_back(0);
-            audio_mask_pos.push_back(1);
-        }
-        all_tokens.push_back((int32_t)hp.ref_audio_end_token);
-        audio_mask_pos.push_back(0);
-        for (int32_t tok : text_tokens) {
-            all_tokens.push_back(tok);
-            audio_mask_pos.push_back(0);
-        }
-    } else {
-        all_tokens = text_tokens;
-        audio_mask_pos.assign(text_tokens.size(), 0);
-    }
-    int N_pos = (int)all_tokens.size();
-
-    // 3. Build per-position embeddings:
-    //      embed[t] = text_mask[t] * embed_tokens(all_tokens[t]) * scale_emb
-    //               + audio_mask[t] * enc_to_lm_proj(locenc(audio_feat[t]))
-    //    For audio positions (only present when have_ref), we run LocEnc + enc_to_lm
-    //    on the corresponding ref patch. For text positions we just embed the token id.
-    //    Note: model has use_mup=False in the HF release so scale_emb = 1.0 — no mul needed.
-    std::vector<float> combined_embed((size_t)N_pos * d_tslm, 0.0f);
-    // Per-position feat_embed (LocEnc output → enc_to_lm), only populated for audio
-    // positions. Kept around because RALM prefill consumes it again in the fusion
-    // concat (Python: cat(enc_outputs, audio_mask * feat_embed)).
-    std::vector<float> feat_embed_pos((size_t)N_pos * d_tslm, 0.0f);
-
-    for (int t = 0; t < N_pos; t++) {
-        if (audio_mask_pos[t]) {
-            // Position is a real ref patch — patch index = t - 1 (we put start at pos 0).
-            int patch_idx = t - 1;
-            const float* patch = ref_feat.data() + (size_t)patch_idx * P_frames * feat_dim_vae;
-            std::vector<float> enc_out = locenc_forward(ctx, patch, cpu_be);
-            // enc_to_lm projection: [d_dit → d_tslm]
-            if (ctx->weights.enc_to_lm_w && ctx->weights.enc_to_lm_b) {
-                matmul_mv_bias(cpu_be, ctx->weights.enc_to_lm_w, ctx->weights.enc_to_lm_b, enc_out.data(), d_dit,
-                               feat_embed_pos.data() + (size_t)t * d_tslm, d_tslm);
-            } else {
-                int copy_d = std::min(d_dit, d_tslm);
-                std::memcpy(feat_embed_pos.data() + (size_t)t * d_tslm, enc_out.data(), (size_t)copy_d * sizeof(float));
-            }
-            std::memcpy(combined_embed.data() + (size_t)t * d_tslm, feat_embed_pos.data() + (size_t)t * d_tslm,
-                        (size_t)d_tslm * sizeof(float));
-        } else {
-            int id = all_tokens[t];
-            if (id < 0 || id >= (int)hp.n_vocab) {
-                id = 0;
-            }
-            get_row_f32(ctx->weights.tslm_token_embd, id, combined_embed.data() + (size_t)t * d_tslm);
-        }
-    }
-
-    // 4. TSLM prefill from the combined embeds (capture all positions for RALM).
+    // 2. TSLM prefill from the combined embeds (capture all positions for RALM).
     double t0_prefill = vox_now_ms();
     std::vector<float> all_pos;
     tslm_prefill_hooks hooks;
     hooks.max_capture_positions = N_pos;
     hooks.all_positions = &all_pos;
-    tslm_prefill_from_embeds(ctx, combined_embed.data(), N_pos, cpu_be, hooks);
+    tslm_prefill_from_embeds(ctx, pi.combined_embed.data(), N_pos, cpu_be, hooks);
 
     // 5. Apply TSLM output norm per position.
     std::vector<float> normed_all((size_t)N_pos * d_tslm);
@@ -3122,15 +3224,26 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
     std::vector<int32_t> token_ids = vox_tokenize(ctx->tokenizer, std::string(text));
 
     if (stage == "text_input_ids") {
-        *out_n = (int)token_ids.size();
+        // Python's dump captures `model.text_tokenizer(syn_text)` — text-only,
+        // without the audio_start_token that `vox_tokenize` appends. Strip the
+        // trailing audio_start so the count matches.
+        std::vector<int32_t> text_only = token_ids;
+        if (!text_only.empty() && text_only.back() == (int32_t)ctx->hp.audio_start_token) {
+            text_only.pop_back();
+        }
+        *out_n = (int)text_only.size();
         float* out = (float*)std::malloc((size_t)*out_n * sizeof(float));
-        for (int i = 0; i < *out_n; i++)
-            out[i] = (float)token_ids[i];
+        for (int i = 0; i < *out_n; i++) {
+            out[i] = (float)text_only[i];
+        }
         return out;
     }
 
     if (stage == "tslm_prefill_out" || stage == "tslm_layer_0_out" || stage == "tslm_layer_27_out") {
-        // Instrumented prefill: capture per-position + per-layer outputs
+        // Instrumented prefill: capture per-position + per-layer outputs.
+        // When VOXCPM2_USE_REF=1 and ref_samples is a 16 kHz mono PCM WAV, we
+        // run the cloning prefill (ref prefix + text) to match the Python
+        // dumper's `_run_prefill` with `use_ref=True`. Otherwise zero-shot.
         int d = (int)ctx->hp.tslm_d_model;
         int n_layers = (int)ctx->hp.tslm_n_layers;
         const int N_CAP = 8; // first 8 positions (matching Python reference)
@@ -3146,15 +3259,39 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         hooks.layer_last_capture = n_layers - 1;
         hooks.layer_last_out = &layer_last_buf;
 
-        tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+
+        std::vector<uint8_t> audio_mask_ref;
+        if (use_ref) {
+            const vox_prefill_inputs& pi =
+                build_prefill_inputs_cached(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+            if (pi.N_pos == 0) {
+                return nullptr;
+            }
+            audio_mask_ref = pi.audio_mask_pos;
+            tslm_prefill_from_embeds(ctx, pi.combined_embed.data(), pi.N_pos, cpu_be, hooks);
+        } else {
+            tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+        }
 
         if (stage == "tslm_prefill_out") {
-            // Apply output norm to each captured position
+            // Apply output norm to each captured position; under cloning, also
+            // apply FSQ to audio positions (Python:
+            //   enc_outputs = fsq(enc_outputs) * audio_mask + enc_outputs * text_mask).
             int N = (int)(all_pos.size() / d);
             std::vector<float> normed((size_t)N * d);
             for (int i = 0; i < N; i++) {
                 rms_norm_cpu(all_pos.data() + (size_t)i * d, tensor_data_f32(ctx->weights.tslm_output_norm),
                              normed.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
+            }
+            if (use_ref) {
+                for (int i = 0; i < N; i++) {
+                    if (i < (int)audio_mask_ref.size() && audio_mask_ref[i]) {
+                        std::vector<float> fsq_pos = fsq_forward(ctx, normed.data() + (size_t)i * d, cpu_be);
+                        std::memcpy(normed.data() + (size_t)i * d, fsq_pos.data(), (size_t)d * sizeof(float));
+                    }
+                }
             }
             *out_n = N * d;
             float* out = (float*)std::malloc((size_t)*out_n * sizeof(float));
@@ -3179,49 +3316,66 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
 
     if (stage == "ralm_prefill_out") {
         // Multi-position RALM prefill matching Python:
-        // 1. TSLM prefill → normed output for all positions
-        // 2. FSQ masking (text_mask selects raw TSLM out for text tokens)
+        // 1. (TSLM prefill | combined-embed prefill for cloning) → normed
+        // 2. FSQ masking: audio positions get FSQ-quantised output
         // 3. fusion_concat_proj(cat(enc_out, audio_mask * feat_embed))
-        //    For zero-shot: audio_mask=0, so second half is zeros
-        // 4. RALM prefill (causal, all T positions)
+        // 4. RALM prefill (causal, all positions)
         // 5. Capture first 8 positions
         const int N_CAP = 8;
         int d = (int)ctx->hp.tslm_d_model;
 
-        // Run instrumented TSLM to get first N_CAP positions
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+
         std::vector<float> all_pos;
+        std::vector<uint8_t> audio_mask_ref;
+        std::vector<float> feat_embed_ref;
         tslm_prefill_hooks hooks;
         hooks.max_capture_positions = N_CAP;
         hooks.all_positions = &all_pos;
-        tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+
+        if (use_ref) {
+            const vox_prefill_inputs& pi =
+                build_prefill_inputs_cached(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+            if (pi.N_pos == 0) {
+                return nullptr;
+            }
+            audio_mask_ref = pi.audio_mask_pos;
+            feat_embed_ref = pi.feat_embed_pos;
+            tslm_prefill_from_embeds(ctx, pi.combined_embed.data(), pi.N_pos, cpu_be, hooks);
+        } else {
+            tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+        }
 
         int N = (int)(all_pos.size() / d);
-        // Apply output norm to each position
         std::vector<float> normed((size_t)N * d);
         for (int i = 0; i < N; i++) {
             rms_norm_cpu(all_pos.data() + (size_t)i * d, tensor_data_f32(ctx->weights.tslm_output_norm),
                          normed.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
         }
+        if (use_ref) {
+            for (int i = 0; i < N; i++) {
+                if (i < (int)audio_mask_ref.size() && audio_mask_ref[i]) {
+                    std::vector<float> fsq_pos = fsq_forward(ctx, normed.data() + (size_t)i * d, cpu_be);
+                    std::memcpy(normed.data() + (size_t)i * d, fsq_pos.data(), (size_t)d * sizeof(float));
+                }
+            }
+        }
 
-        // For zero-shot, all positions are text (text_mask=1, audio_mask=0).
-        // FSQ masking: text positions use raw TSLM output (no FSQ).
-        // So normed output IS the FSQ-masked enc_outputs for text tokens.
-
-        // fusion_concat_proj: input is cat(enc_outputs_t, zeros) for each position
-        int in_dim = 2 * d; // 4096
+        // fusion_concat_proj: cat(enc_out, audio_mask * feat_embed) per position
+        int in_dim = 2 * d;
         std::vector<float> ralm_input((size_t)N * d);
         for (int i = 0; i < N; i++) {
             std::vector<float> cat_buf(in_dim, 0.0f);
             std::memcpy(cat_buf.data(), normed.data() + (size_t)i * d, (size_t)d * sizeof(float));
-            // Second half stays zero (no audio feat for text-only zero-shot)
+            if (use_ref && i < (int)audio_mask_ref.size() && audio_mask_ref[i]) {
+                std::memcpy(cat_buf.data() + d, feat_embed_ref.data() + (size_t)i * d, (size_t)d * sizeof(float));
+            }
             matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b, cat_buf.data(), in_dim,
                            ralm_input.data() + (size_t)i * d, d);
         }
 
-        // Run multi-position RALM prefill (returns pre-norm hidden states)
         std::vector<float> ralm_out = ralm_prefill_multi(ctx, ralm_input.data(), N, cpu_be);
-
-        // Apply RALM output norm (Python's model.residual_lm() includes final norm)
         for (int i = 0; i < N; i++) {
             rms_norm_cpu(ralm_out.data() + (size_t)i * d, tensor_data_f32(ctx->weights.ralm_output_norm),
                          ralm_out.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
@@ -3399,52 +3553,114 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
 
     if (stage == "locenc_out") {
         // Python: feat_embed = model.feat_encoder(audio_feat) → [B, T, d_enc]
-        // For zero-shot: audio_feat is zeros [T, P, 64]. LocEnc processes each
-        // patch independently. Output first 8 positions [8, d_enc].
+        // For zero-shot: audio_feat is zeros [T, P, 64] → all positions identical
+        //   (compute LocEnc(0) once, replicate).
+        // For cloning (VOXCPM2_USE_REF=1): audio_feat = [z1, ref_feat..., z1, 0..].
+        //   Run LocEnc per-position for the first N_CAP positions.
         int d_enc = (int)ctx->hp.locenc_d_model; // 1024
         int P_fr = (int)ctx->hp.patch_frames;
+        int feat_dim = 64;
         const int N_CAP = 8;
-        std::vector<float> zero_patch(64 * P_fr, 0.0f);
-
-        // All patches are zero → all outputs are identical. Compute once, replicate.
-        std::vector<float> one_out = locenc_forward(ctx, zero_patch.data(), cpu_be);
         int total = N_CAP * d_enc;
         *out_n = total;
         float* out = (float*)std::malloc((size_t)total * sizeof(float));
-        for (int i = 0; i < N_CAP; i++) {
-            std::memcpy(out + (size_t)i * d_enc, one_out.data(), (size_t)d_enc * sizeof(float));
+
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+
+        if (use_ref) {
+            // Direct VAE encode — locenc_out only needs the ref patches, not the
+            // full TSLM prefill state.
+            int T_ref = 0;
+            const std::vector<float>& ref_feat = vae_encode_cached(ctx, ref_samples, ref_n_samples, &T_ref);
+            std::vector<float> z_patch((size_t)feat_dim * P_fr, 0.0f);
+            for (int i = 0; i < N_CAP; i++) {
+                const float* patch_ptr = z_patch.data();
+                if (i >= 1 && i <= T_ref) {
+                    patch_ptr = ref_feat.data() + (size_t)(i - 1) * P_fr * feat_dim;
+                }
+                std::vector<float> enc = locenc_forward(ctx, patch_ptr, cpu_be);
+                std::memcpy(out + (size_t)i * d_enc, enc.data(), (size_t)d_enc * sizeof(float));
+            }
+        } else {
+            std::vector<float> zero_patch((size_t)feat_dim * P_fr, 0.0f);
+            std::vector<float> one_out = locenc_forward(ctx, zero_patch.data(), cpu_be);
+            for (int i = 0; i < N_CAP; i++) {
+                std::memcpy(out + (size_t)i * d_enc, one_out.data(), (size_t)d_enc * sizeof(float));
+            }
         }
         return out;
     }
 
     if (stage == "locenc_in") {
-        // LocEnc input: audio_feat[0, :8] = [8, patch_frames, feat_dim] = [8, 4, 64]
-        // For zero-shot synthesis, audio features are zeros (no reference audio).
-        int P_fr = (int)ctx->hp.patch_frames; // 4
+        // LocEnc input: audio_feat[0, :8] = [8, patch_frames, feat_dim] = [8, 4, 64].
+        // Zero-shot: all zeros. Cloning: positions 1..T_ref hold encoded ref_feat,
+        // positions 0 and T_ref+1 are z1 zeros, rest are text_pad zeros.
+        int P_fr = (int)ctx->hp.patch_frames;
         int feat_dim = 64;
         int N_CAP = 8;
-        int total = N_CAP * P_fr * feat_dim; // 8 * 4 * 64 = 2048
+        int total = N_CAP * P_fr * feat_dim;
         *out_n = total;
         float* out = (float*)std::calloc(total, sizeof(float));
+
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+        if (use_ref) {
+            // Direct VAE encode — no need for full prefill state for locenc_in.
+            int T_ref = 0;
+            const std::vector<float>& ref_feat = vae_encode_cached(ctx, ref_samples, ref_n_samples, &T_ref);
+            for (int i = 0; i < N_CAP; i++) {
+                if (i >= 1 && i <= T_ref) {
+                    std::memcpy(out + (size_t)i * P_fr * feat_dim, ref_feat.data() + (size_t)(i - 1) * P_fr * feat_dim,
+                                (size_t)P_fr * feat_dim * sizeof(float));
+                }
+            }
+        }
         return out;
     }
 
     if (stage == "enc_to_lm") {
-        // Python: feat_embed = enc_to_lm_proj(feat_encoder(audio_feat)) → [B, T, d_lm]
-        // Capture first 8 positions. For zero-shot, all patches are zeros → identical.
+        // Python: feat_embed = enc_to_lm_proj(feat_encoder(audio_feat)) → [B, T, d_lm].
+        // Same per-position semantics as locenc_out.
         int d_enc = (int)ctx->hp.locenc_d_model; // 1024
         int d_lm = (int)ctx->hp.tslm_d_model;    // 2048
         int P_fr = (int)ctx->hp.patch_frames;
+        int feat_dim = 64;
         const int N_CAP = 8;
-        std::vector<float> zero_patch(64 * P_fr, 0.0f);
-        std::vector<float> enc_out = locenc_forward(ctx, zero_patch.data(), cpu_be);
-        if (ctx->weights.enc_to_lm_w && ctx->weights.enc_to_lm_b) {
+        int total = N_CAP * d_lm;
+        if (!ctx->weights.enc_to_lm_w || !ctx->weights.enc_to_lm_b) {
+            return nullptr;
+        }
+        *out_n = total;
+        float* out = (float*)std::malloc((size_t)total * sizeof(float));
+
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+
+        if (use_ref) {
+            // Direct VAE encode + LocEnc + enc_to_lm per position. Same input
+            // dependency as locenc_out; no need for full TSLM prefill state.
+            int T_ref = 0;
+            const std::vector<float>& ref_feat = vae_encode_cached(ctx, ref_samples, ref_n_samples, &T_ref);
+            std::vector<float> z_patch((size_t)feat_dim * P_fr, 0.0f);
+            std::vector<float> proj(d_lm);
+            for (int i = 0; i < N_CAP; i++) {
+                const float* patch_ptr = z_patch.data();
+                if (i >= 1 && i <= T_ref) {
+                    patch_ptr = ref_feat.data() + (size_t)(i - 1) * P_fr * feat_dim;
+                }
+                std::vector<float> enc = locenc_forward(ctx, patch_ptr, cpu_be);
+                matmul_mv_bias(cpu_be, ctx->weights.enc_to_lm_w, ctx->weights.enc_to_lm_b, enc.data(), d_enc,
+                               proj.data(), d_lm);
+                std::memcpy(out + (size_t)i * d_lm, proj.data(), (size_t)d_lm * sizeof(float));
+            }
+            return out;
+        } else {
+            std::vector<float> zero_patch((size_t)feat_dim * P_fr, 0.0f);
+            std::vector<float> enc_out = locenc_forward(ctx, zero_patch.data(), cpu_be);
             std::vector<float> proj_one(d_lm);
             matmul_mv_bias(cpu_be, ctx->weights.enc_to_lm_w, ctx->weights.enc_to_lm_b, enc_out.data(), d_enc,
                            proj_one.data(), d_lm);
-            int total = N_CAP * d_lm;
-            *out_n = total;
-            float* out = (float*)std::malloc((size_t)total * sizeof(float));
             for (int i = 0; i < N_CAP; i++) {
                 std::memcpy(out + (size_t)i * d_lm, proj_one.data(), (size_t)d_lm * sizeof(float));
             }
@@ -3466,18 +3682,37 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
     }
 
     if (stage == "lm_to_dit_hidden" || stage == "res_to_dit_hidden") {
-        // Run full pipeline: TSLM (all positions) → norm → FSQ → fusion → RALM (multi) → project
-        // Must use multi-position RALM because the last position's output depends on all previous KV.
+        // Run full pipeline: prefill (TSLM all positions) → norm → FSQ → fusion → RALM (multi) → project.
+        // Under VOXCPM2_USE_REF=1 the prefill uses the cloning combined-embed (ref
+        // prefix + text), FSQ at ref-audio positions, and feat_embed in the fusion
+        // concat — matching Python `_inference` with use_ref=True. Otherwise zero-shot.
         int d = (int)ctx->hp.tslm_d_model;
         int d_dit = (int)ctx->hp.locdit_d_model;
         int T_tok = (int)token_ids.size();
 
-        // Full TSLM prefill capturing all positions
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        bool use_ref = (use_ref_env && std::atoi(use_ref_env) != 0 && ref_samples && ref_n_samples > 0);
+
         std::vector<float> all_pos;
+        std::vector<uint8_t> audio_mask_ref;
+        std::vector<float> feat_embed_ref;
         tslm_prefill_hooks hooks;
-        hooks.max_capture_positions = T_tok;
+        hooks.max_capture_positions = use_ref ? 0 : T_tok;
         hooks.all_positions = &all_pos;
-        tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+
+        if (use_ref) {
+            const vox_prefill_inputs& pi =
+                build_prefill_inputs_cached(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+            if (pi.N_pos == 0) {
+                return nullptr;
+            }
+            hooks.max_capture_positions = pi.N_pos;
+            audio_mask_ref = pi.audio_mask_pos;
+            feat_embed_ref = pi.feat_embed_pos;
+            tslm_prefill_from_embeds(ctx, pi.combined_embed.data(), pi.N_pos, cpu_be, hooks);
+        } else {
+            tslm_prefill_ex(ctx, token_ids, cpu_be, hooks);
+        }
         int N = (int)(all_pos.size() / d);
 
         // Apply output norm to each position
@@ -3486,18 +3721,31 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
             rms_norm_cpu(all_pos.data() + (size_t)i * d, tensor_data_f32(ctx->weights.tslm_output_norm),
                          normed_all.data() + (size_t)i * d, d, ctx->hp.rms_norm_eps);
         }
+
+        // FSQ masking at ref-audio positions (Python:
+        //   enc_outputs = fsq(enc) * audio_mask + enc * text_mask).
+        if (use_ref) {
+            for (int i = 0; i < N; i++) {
+                if (i < (int)audio_mask_ref.size() && audio_mask_ref[i]) {
+                    std::vector<float> fsq_pos = fsq_forward(ctx, normed_all.data() + (size_t)i * d, cpu_be);
+                    std::memcpy(normed_all.data() + (size_t)i * d, fsq_pos.data(), (size_t)d * sizeof(float));
+                }
+            }
+        }
+
         // Last-token TSLM output (for lm_to_dit)
         std::vector<float> tslm_out(normed_all.data() + (size_t)(N - 1) * d, normed_all.data() + (size_t)N * d);
 
-        // FSQ masking: for zero-shot text-only, all positions are text (text_mask=1, audio_mask=0)
-        // → FSQ is NOT applied (text_mask * raw + audio_mask * FSQ = raw)
-
-        // fusion_concat_proj for each position (cat(enc_out, zeros) since audio_mask=0)
+        // fusion_concat_proj: cat(enc_out, audio_mask * feat_embed). For zero-shot
+        // every audio_mask is 0 so the second half is all zeros.
         int in_dim = 2 * d;
         std::vector<float> ralm_input((size_t)N * d);
         for (int i = 0; i < N; i++) {
             std::vector<float> cat_buf(in_dim, 0.0f);
             std::memcpy(cat_buf.data(), normed_all.data() + (size_t)i * d, (size_t)d * sizeof(float));
+            if (use_ref && i < (int)audio_mask_ref.size() && audio_mask_ref[i]) {
+                std::memcpy(cat_buf.data() + d, feat_embed_ref.data() + (size_t)i * d, (size_t)d * sizeof(float));
+            }
             matmul_mv_bias(cpu_be, ctx->weights.fusion_w, ctx->weights.fusion_b, cat_buf.data(), in_dim,
                            ralm_input.data() + (size_t)i * d, d);
         }

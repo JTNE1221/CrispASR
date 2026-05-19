@@ -3092,9 +3092,12 @@ int main(int argc, char** argv) {
             syn_text = "Hello, this is a test of the VoxCPM2 text to speech system.";
 
         // VoxCPM2 is a TTS model — the audio arg is only used for voice cloning.
-        // For zero-shot diff, ref_samples=nullptr.
-        const float* ref_audio = nullptr;
-        int ref_n_audio = 0;
+        // When VOXCPM2_USE_REF=1 we pass the loaded WAV through as the cloning
+        // reference; otherwise we run zero-shot (ref_samples=nullptr).
+        const char* use_ref_env = std::getenv("VOXCPM2_USE_REF");
+        const bool use_ref_clone = (use_ref_env && std::atoi(use_ref_env) != 0);
+        const float* ref_audio = use_ref_clone ? samples.data() : nullptr;
+        int ref_n_audio = use_ref_clone ? (int)samples.size() : 0;
 
         // Use a lower threshold for VAE-decoded audio (lossy reconstruction).
         const float COS_TTS_AUDIO = 0.99f;
