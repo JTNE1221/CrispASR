@@ -6,29 +6,38 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
-## 2026-05-19 Issue #89 — disable default 30s chunking for non-whisper backends
+## 2026-05-19 Issue #89 — chunking, overlap-save, CTC decode path
 
 **Problem:** parakeet-tdt-0.6b-ja (and other non-whisper backends with
 bidirectional FastConformer encoders) lost text at fixed 30-second chunk
-boundaries. The default `--chunk-seconds 30` was a whisper-era default —
-whisper's positional-encoding encoder is trained on exactly 30 s windows,
-but parakeet/canary/moonshine/etc. can handle arbitrary-length input.
-Chunking these backends threw away the bidirectional context at each
-boundary, causing tokens near the cut point to decode as blanks.
+boundaries. The default `--chunk-seconds 30` was a whisper-era default.
 
-**Fix (`68b4b3e`):**
-- Added `chunk_seconds_explicit` flag to `whisper_params`. When the user
-  doesn't pass `--chunk-seconds`, non-whisper backends (detected via
-  `!(CAP_VAD_INTERNAL)`) now process the full audio in one encoder pass.
-  Users can still force chunking with `--chunk-seconds N` for very long
-  audio where memory is a concern.
-- Also fixed streaming-mode VAD timestamp offsets: `sl.t0_cs` (relative
-  to rolling window) was passed as absolute `t_offset_cs` to
-  `backend->transcribe()` in 4 call sites. Corrected to
-  `window_start_cs + sl.t0_cs`.
+**Four commits:**
 
-**Files:** `whisper_params.h`, `cli.cpp`, `crispasr_run.cpp`,
-`docs/cli.md`.
+1. **`68b4b3e` — disable default chunking for non-whisper backends.**
+   Added `chunk_seconds_explicit` flag. Non-whisper backends process
+   full audio in one encoder pass unless `--chunk-seconds` is explicit.
+   Also fixed streaming VAD timestamp offsets (4 call sites).
+
+2. **`992a533` — scope to `CAP_UNBOUNDED_INPUT` only.** LLM-based
+   backends (voxtral, granite, qwen3, glm-asr, kyutai-stt, mimo-asr,
+   gemma4, cohere, moonshine) use autoregressive decoders with KV cache
+   that grow with input length — they need chunking to avoid OOM. Added
+   `CAP_UNBOUNDED_INPUT` capability flag, set only on non-autoregressive
+   backends: parakeet, canary, wav2vec2, firered-asr, fastconformer-ctc,
+   granite-nar.
+
+3. **`cad4c28` — overlap-save chunking.** When chunking is active,
+   extend each chunk by `--chunk-overlap` seconds (default 3.0) on each
+   side. Word-level filtering keeps only the original slice region with
+   200 ms tolerance for TDT frame shift. Text rebuilt by direct
+   concatenation (no space insertion — fixes JA kana-spacing bug from
+   617cd02).
+
+4. **`22ba4bc` — CTC decode path for hybrid TDT+CTC models.** Converter
+   exports CTC head; runtime adds `parakeet_ctc_decode()` with F16
+   tensor support. CLI: `--parakeet-decoder ctc`. CTC is frame-
+   synchronous and avoids TDT boundary artifacts entirely.
 
 ---
 
