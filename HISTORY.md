@@ -38,6 +38,217 @@ boundaries. The default `--chunk-seconds 30` was a whisper-era default.
    exports CTC head; runtime adds `parakeet_ctc_decode()` with F16
    tensor support. CLI: `--parakeet-decoder ctc`. CTC is frame-
    synchronous and avoids TDT boundary artifacts entirely.
+---
+
+## 2026-05-19 IndexTTS-1.5: drop magic-constant speaker-emb clamp + add greedy beam knob (issue #75)
+
+User #75 reported "abnormal-sounding voice" and "very slow" on their
+RTX 5060 Ti (RTF=8.57 for a 6 s Chinese sentence). Root-causes:
+
+1. **Speaker-embedding clamp was the "abnormal voice".** The original
+   code in `src/indextts.cpp` rescaled the ECAPA output to L2 norm =
+   0.9 with a comment claiming it "matches Python's typical magnitude".
+   Upstream BigVGAN consumes the unnormalized ECAPA output directly —
+   the clamp shrank `cond_layer(spk_emb)` and `conds[i](spk_emb)`
+   projections 2.84× and left the BigVGAN underconditioned. ASR
+   roundtrip on "Hello world. This is a test of speech synthesis."
+   went from "...test of **the index piece since its** system."
+   (~25% CER) to "...test of **speech synthesis**." (clean). Audio
+   peak amplitude went 0.06 → 0.21. New env knob
+   `INDEXTTS_SPK_NORM=<float|"raw">` defaults to `raw`; pass `0.9`
+   to reproduce the old behaviour.
+
+2. **Beam search KV snapshots round-trip through host.** The B=3 beam
+   decode `ggml_backend_tensor_get/set`s the full 158 MiB KV cache per
+   beam per step. For the issue-75 test (158 mel codes × B=3) that's
+   ~146 GB of host transfers — and on GPU it's the wall-time
+   bottleneck. New env knob `INDEXTTS_BEAM_SIZE=1` skips snapshots
+   entirely (greedy keeps one KV slot resident on device). Measured
+   on M1: 75.8 s → 34.4 s (2.2× faster) with ASR still clean. Default
+   stays B=3 to keep parity with the Python reference; proper fix
+   (B resident slots + `ggml_backend_tensor_copy` device-to-device)
+   tracked as follow-up.
+
+Also tried-and-discarded during investigation: parallel audit agents
+flagged Conformer `ff_scale=0.5` (macaron) missing and FFN activation
+ReLU-vs-SiLU mismatches. Both were false positives — IndexTTS-1.5 has
+`macaron_style=False` (config-default) so `ff_scale=1.0`, and the
+upstream activation IS SiLU (line 480 of `conformer_encoder.py`
+overrides the `PositionwiseFeedForward` default). Lesson: when an
+audit agent cites a line in a generic library file, verify how the
+specific subclass instantiates it.
+
+Chinese ASR roundtrip remained degraded ("而在曲電韓宿中飛..." for
+"而在获取电压函数中...") at the close of the spk-emb / beam fix —
+diagnosed and fixed in a follow-up later the same day; see the next
+section.
+
+### Files
+- `src/indextts.cpp` — replaced `target_norm = 0.9f` clamp with env-
+  knob `INDEXTTS_SPK_NORM` (default raw); replaced `const int B = 3`
+  with `INDEXTTS_BEAM_SIZE` (default 3, range 1–16).
+- `LEARNINGS.md` — two new sub-sections under "IndexTTS-1.5 TTS
+  backend".
+
+---
+
+## 2026-05-19 IndexTTS-1.5: CJK char tokenization for Chinese roundtrip (issue #75 follow-up)
+
+The "Chinese ASR roundtrip remains degraded" follow-up from the spk-emb
+fix above. The C++ text path called SentencePiece directly on the raw
+input; upstream Python runs `TextNormalizer.char_rep_map` (CJK punct →
+ASCII) **then** `tokenize_by_CJK_char` (insert space around every CJK
+codepoint) **then** SentencePiece. With CJK chars glued together the
+BPE Viterbi produced 29 tokens that the model translated into
+unintelligible Chinese; the correct pipeline produces 54 tokens with
+`▁` (id 10201) between every CJK character, and the model produces
+fluent Mandarin.
+
+Two passes were needed:
+
+1. **Port `tokenize_by_CJK_char`** — UTF-8 codepoint helpers + the
+   upstream CJK Unicode range (`U+1100-11FF`, `U+2E80-A4CF`,
+   `U+A840-D7AF`, `U+F900-FAFF`, `U+FE30-4F`, `U+FF65-FFDC`,
+   `U+20000-2FFFF`). Plus a subset of `char_rep_map` for the common
+   CJK punctuation (`，：；、！？` → ASCII; quotes / brackets → `'`).
+   Got Chinese ASR roundtrip to ~7% CER (Qwen3-ASR-0.6B reference),
+   with a single trailing `位` syllable hallucinated.
+
+2. **Map `。` (U+3002) → `.` in the punct table** — full-width period
+   sits inside the CJK Unicode range, so without an explicit punct
+   mapping it was being split as a CJK character (`▁` + `。` instead
+   of the single `▁.` piece). Upstream order is char_rep_map first,
+   then CJK split — so `。` lands as ASCII `.` and the model sees its
+   trained sentence-end token. Fix removed the trailing `位` and got
+   CER to **3.6% raw / 0.0% punct-stripped** on the test prompt — every
+   Chinese character matches the input exactly. The only residual is a
+   comma the TTS naturally inserts as a pause after `空指针`.
+
+Verified bit-equality of token IDs C++ ↔ Python `sp.Encode` on the
+preprocessed text (54 tokens for the issue-75 Chinese prompt).
+English path is byte-identical to its pre-fix tokens (no codepoint
+hits the punct table). Mixed CN+EN `他用Python写了一个程序。`
+roundtrips perfectly — CJK chars get split, `PYTHON` stays a single
+upper-cased word, `。` lands as ASCII.
+
+ASR reality check, important: **whisper-base is not a reliable Chinese
+ASR for measuring TTS quality**. The first-pass fix looked like 21% CER
+under whisper-base; switching to Qwen3-ASR-0.6B exposed the actual
+3.8% (a single hallucinated syllable) — and the second-pass `。` fix
+dropped that to 0% punct-stripped. Whisper-base alone over-counts
+errors by ~5×.
+
+Skipped intentionally: the full wetext `zh_normalizer` (numbers→hanzi,
+pinyin tones, English contractions) needs a real rule engine; not
+blocking for plain Chinese text and out of scope for this fix.
+
+### Files
+- `src/indextts.cpp` — new `preprocess_indextts_text()` (UTF-8 +
+  CJK char split + punct-map upper) wired into both prefill and
+  latent re-tokenization paths; opt-in `text_ids[...]` dump at
+  verbosity ≥ 2 for future BPE diffs without a debug rebuild.
+- `LEARNINGS.md` — new sub-section on the CJK pipeline and the
+  `。`-in-CJK-range trap.
+
+---
+
+## 2026-05-19 Chatterbox GPU bug localised to S3Gen + Metal default flipped
+
+Round 6 + 7 of the PLAN #57 / #83 GPU chase. The round-4 patches
+(`kernel_mul_mv_q4_K_q8_K`, `kernel_quantize_q8_K_f32`, `mul_mm_*_hp`,
+PREC_F32 tagging) had cleaned up the T3 mul_mat drift that round 3
+diagnosed, leaving a remaining "FORCE_GPU=1 → garbled audio" that the
+prior narrative still attributed to T3. Re-bisect with `crispasr-diff`
+showed `s3gen_encoder_out cos=0.999950` (encoder on GPU is fine) while
+`s3gen_mel cos_min=0.923` collapses — the bug is downstream of T3, in
+the S3Gen UNet1D CFM denoiser.
+
+### Code changes (`src/chatterbox_s3gen.cpp` + `src/chatterbox.cpp`)
+
+- `ggml_mish` rewritten from the hand-rolled `x * tanh(log(exp(x) +
+  exp(x)/exp(x)))` to `x * tanh(ggml_softplus(x))` using ggml's
+  native softplus (single fused kernel, identical clamp at x>20 on
+  Metal and CPU). The hand-roll fabricates `+1` via `exp(x)/exp(x)`
+  which produces NaN whenever exp(x) overflows to inf or underflows
+  to 0. Slight CPU correctness gain (s3gen_mel cos_min 0.999971 →
+  0.999980) but the GPU divergence is unrelated to mish.
+- Added two diagnostic env knobs in `s3gen_maybe_pin_graph_to_cpu`:
+  `CRISPASR_S3GEN_UNET_PIN_CPU_OP=<op>` (pin only the named op type
+  to CPU under FORCE_GPU) and `CRISPASR_S3GEN_UNET_KEEP_GPU_OP=<op>`
+  (pin everything except the named op). Names follow `ggml_op_name()`
+  lowercase minus the `OP_` prefix, or `unary_<lowercase>` for
+  `GGML_OP_UNARY`.
+- Default backend split now branches on `GGML_USE_METAL`:
+  - **Metal:** default is full CPU (was T3 GPU + S3Gen CPU). T3's
+    batch-1 AR loop is dominated by Metal kernel-launch overhead on
+    M1 — measured 50 s full CPU vs 75 s T3-GPU + S3Gen-CPU on the
+    JFK sentence, warm cache, M1. New override
+    `CRISPASR_CHATTERBOX_T3_GPU=1` opts T3 back onto GPU on Metal.
+  - **Non-Metal (CUDA / Vulkan):** default keeps T3 on GPU + S3Gen
+    on CPU. The compound-drift bisect was Metal-only; the same
+    class of F16-intermediate compound rounding likely applies to
+    other GPU backends but isn't verified, so the safer S3Gen-CPU
+    default ships everywhere.
+
+### Op-bisect finding (the actual diagnosis)
+
+Pinning *any* of `{mul_mat, flash_attn_ext, norm, add, concat,
+unary_gelu, unary_tanh, unary_softplus}` to CPU restores s3gen_mel
+`cos_min=1.000` (diff harness with `replay=exact_init_noise`).
+Pinning `conv_1d` / `scale` / `unary_mish` has no effect (low/zero op
+count in the graph). So the drift is **not in any single op** — it's
+~1e-7 per-op precision drift across multiple Metal kernels that the
+10-step CFM Euler solver amplifies ~1000× into the observed mel
+collapse. Re-applying `GGML_PREC_F32` to every UNet mul_mat dispatches
+the `_hp` simdgroup_float8x8 kernel correctly on M1 (`has_tensor=false`)
+but doesn't break the chain because the surrounding ops keep
+compounding. Tags were reverted as graph clutter.
+
+### Auto-pin attempt: works in diff harness, fails end-to-end
+
+Wired an `unet_force_cpu` flag plus an auto-pin under FORCE_GPU.
+`crispasr-diff` shows `s3gen_mel cos=1.000`, but the full TTS path
+produces NaN/Inf mel going into the vocoder (`rms=nan min=1e30
+max=-1e30`) → saturated audio → empty parakeet transcript. Pinning
+encoder + vocoder + UNet all to CPU under a GPU-init sched still
+gives `rms ≈ 11089` vs the ~3900 a true CPU sched produces — some
+interaction between the GPU-backed scheduler and random-noise inputs
+through CPU-pinned compute that the diff harness's pre-recorded
+reference noise masked. Reverted the auto-pin. The vocoder is **not**
+the bug; it's just amplifying upstream UNet1D garbage.
+
+### Doc + comment cleanups
+
+- `docs/tts.md` — "Known issues" rewritten to reflect the new Metal
+  default, the actual root cause (S3Gen UNet compound drift, not T3
+  quant-mat drift), and the new env knobs.
+- `src/crispasr_model_registry.cpp` chatterbox entry comment — dropped
+  the "crispasr CLI adapter is still pending" line (shipped long ago)
+  and documented the `--model-quant` / `--tts-codec-quant`
+  substitution surface.
+- `LEARNINGS.md` — appended round 6 (mish) and round 7 (op-bisect +
+  Metal default) sections to the existing chatterbox GPU narrative.
+
+### Verification
+
+- `crispasr-diff chatterbox` with the new code: default config gives
+  `s3gen_mel cos_min=0.999980` (slight gain from the mish fix);
+  FORCE_GPU=1 alone still shows the documented `cos_min=0.923003`
+  (broken state preserved as diagnostic); `FORCE_GPU=1 +
+  UNET_PIN_CPU_OP=mul_mat` gives `cos_min=1.000` (bisect tool works).
+- ASR roundtrip via parakeet-tdt: full CPU and default both transcribe
+  "Ask not what your country can do for you, ask what you can do for
+  your country." exactly. FORCE_GPU output remains garbled (empty
+  transcript), documented as diagnostic-only.
+
+### Files touched
+
+- `src/chatterbox.cpp` — Metal default flip + new `T3_GPU` opt-in.
+- `src/chatterbox_s3gen.cpp` — `ggml_mish` rewrite + bisect env vars
+  in `s3gen_maybe_pin_graph_to_cpu`.
+- `src/crispasr_model_registry.cpp` — comment refresh.
+- `docs/tts.md` — Known-issues paragraph.
+- `LEARNINGS.md` — rounds 6 / 7 / 7b appendix.
 
 5. **`a069018` — split encode/decode API.** Added `parakeet_encode()` +
    `parakeet_decode_frames()` public API for future full-encode +

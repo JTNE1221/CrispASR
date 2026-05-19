@@ -247,11 +247,13 @@ constexpr Entry k_registry[] = {
     // Chatterbox family — ResembleAI MIT TTS. Two-GGUF runtime:
     //   primary  = T3 (text → speech tokens) — also carries baked conds
     //   companion = S3Gen (tokens → 24 kHz waveform via CFM + HiFTGenerator)
-    // The runtime is exposed only through the C ABI today
-    // (`chatterbox_init_from_file` + `chatterbox_load_s3gen`); the
-    // crispasr CLI adapter is still pending — see PLAN. Auto-download
-    // via `-m auto --backend chatterbox` populates both files into the
-    // cache so the C-API caller can resolve them.
+    // CLI adapter (`crispasr_backend_chatterbox.cpp`) is shipped — surfaces
+    // as `--backend chatterbox|chatterbox-turbo|kartoffelbox-turbo|
+    // lahgtna-chatterbox` with CAP_TTS + AUTO_DOWNLOAD + TEMPERATURE +
+    // FLASH_ATTN + VOICE_CLONING. `--model-quant Q` substitutes the T3
+    // filename + URL (Q4_K / Q5_K / Q8_0 / F16); `--tts-codec-quant Q`
+    // substitutes the S3Gen companion; both repos publish F16 / Q8_0 /
+    // Q4_K for both halves.
     {"chatterbox", "chatterbox-t3-q8_0.gguf",
      "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-t3-q8_0.gguf",
      "~880 MB",

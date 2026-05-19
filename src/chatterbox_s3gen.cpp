@@ -317,10 +317,58 @@ static bool s3gen_env_force_cpu(s3gen_subgraph which) {
     const char* env = envname ? std::getenv(envname) : nullptr;
     return env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
 }
+// Per-op-type "keep on GPU" filter for the UNet1D bisect (PLAN #83 r7).
+// When CRISPASR_S3GEN_UNET_KEEP_GPU_OP=<name> is set, the pin function still
+// pins everything to CPU EXCEPT the named op type. Pin is forced ON when the
+// keep-op env is set so the bisect works without also setting UNET_CPU=1.
+// Accepted names: ggml_op_name() lowercase ("conv_1d", "mul_mat", "norm",
+// "add", "flash_attn_ext", "concat", "scale", "view", "cont", "reshape",
+// "transpose", "permute") OR ggml_unary_op_name() lowercase with a "unary_"
+// prefix ("unary_mish", "unary_gelu", "unary_tanh", "unary_softplus",
+// "unary_exp", "unary_log", "unary_silu").
+static bool s3gen_match_keep_op(const ggml_tensor* node, const char* keep) {
+    if (!keep || !*keep)
+        return false;
+    auto eq_icase = [](const char* a, const char* b) {
+        if (!a || !b)
+            return false;
+        while (*a && *b) {
+            char ca = (char)std::tolower((unsigned char)*a++);
+            char cb = (char)std::tolower((unsigned char)*b++);
+            if (ca != cb)
+                return false;
+        }
+        return *a == 0 && *b == 0;
+    };
+    const char* opname = ggml_op_name(node->op);
+    // ggml_op_name returns "OP_<UPPER>" — strip the "OP_" prefix for the match.
+    if (opname && std::strncmp(opname, "OP_", 3) == 0)
+        opname += 3;
+    if (eq_icase(opname, keep))
+        return true;
+    if (node->op == GGML_OP_UNARY) {
+        const char* uname = ggml_unary_op_name(ggml_get_unary_op(node));
+        if (uname && std::strncmp(uname, "UNARY_OP_", 9) == 0)
+            uname += 9;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "unary_%s", uname ? uname : "");
+        if (eq_icase(buf, keep))
+            return true;
+        if (eq_icase(uname, keep))
+            return true;
+    }
+    return false;
+}
+
 static void s3gen_maybe_pin_graph_to_cpu(chatterbox_s3gen_context* c, ggml_cgraph* gf, s3gen_subgraph which) {
     if (c->backend == c->backend_cpu)
         return; // already on CPU — no-op
-    if (!s3gen_env_force_cpu(which))
+    const char* keep_env = (which == s3gen_subgraph::unet) ? std::getenv("CRISPASR_S3GEN_UNET_KEEP_GPU_OP") : nullptr;
+    const char* pin_only_env =
+        (which == s3gen_subgraph::unet) ? std::getenv("CRISPASR_S3GEN_UNET_PIN_CPU_OP") : nullptr;
+    const bool keep_mode = keep_env && *keep_env;
+    const bool pin_only_mode = pin_only_env && *pin_only_env;
+    if (!s3gen_env_force_cpu(which) && !keep_mode && !pin_only_mode)
         return;
     if (c->verbosity >= 1) {
         const char* tag = which == s3gen_subgraph::encoder ? "ENCODER"
@@ -329,20 +377,40 @@ static void s3gen_maybe_pin_graph_to_cpu(chatterbox_s3gen_context* c, ggml_cgrap
         static int log_seen[3] = {0, 0, 0};
         int idx = which == s3gen_subgraph::encoder ? 0 : which == s3gen_subgraph::unet ? 1 : 2;
         if (!log_seen[idx]) {
-            fprintf(stderr, "s3gen: CRISPASR_S3GEN_%s_CPU=1 — pinning all compute nodes to CPU backend\n", tag);
+            if (keep_mode) {
+                fprintf(stderr, "s3gen: [%s] keeping op type \"%s\" on GPU; pinning all other compute nodes to CPU\n",
+                        tag, keep_env);
+            } else {
+                fprintf(stderr, "s3gen: CRISPASR_S3GEN_%s_CPU=1 — pinning all compute nodes to CPU backend\n", tag);
+            }
             log_seen[idx] = 1;
         }
     }
     const int n_nodes = ggml_graph_n_nodes(gf);
     int n_pinned = 0;
+    int n_kept_gpu = 0;
     for (int i = 0; i < n_nodes; i++) {
         ggml_tensor* node = ggml_graph_node(gf, i);
         if (!node)
             continue;
-        // Skip leaf weight tensors (op == NONE) — they live on the GPU
-        // buffer and shouldn't be reassigned. Only pin compute ops.
         if (node->op == GGML_OP_NONE)
             continue;
+        if (pin_only_mode) {
+            // Inverse bisect: pin only the named op type to CPU; leave
+            // everything else on GPU (default backend). Identifies the
+            // op whose Metal vs CPU divergence is responsible.
+            if (s3gen_match_keep_op(node, pin_only_env)) {
+                ggml_backend_sched_set_tensor_backend(c->sched, node, c->backend_cpu);
+                n_pinned++;
+            } else {
+                n_kept_gpu++;
+            }
+            continue;
+        }
+        if (keep_mode && s3gen_match_keep_op(node, keep_env)) {
+            n_kept_gpu++;
+            continue;
+        }
         ggml_backend_sched_set_tensor_backend(c->sched, node, c->backend_cpu);
         n_pinned++;
     }
@@ -353,7 +421,12 @@ static void s3gen_maybe_pin_graph_to_cpu(chatterbox_s3gen_context* c, ggml_cgrap
         static int logged_count[3] = {0, 0, 0};
         int idx = which == s3gen_subgraph::encoder ? 0 : which == s3gen_subgraph::unet ? 1 : 2;
         if (logged_count[idx] < 1) {
-            fprintf(stderr, "s3gen: [%s] pinned %d/%d compute nodes to CPU\n", tag, n_pinned, n_nodes);
+            if (keep_mode) {
+                fprintf(stderr, "s3gen: [%s] pinned %d nodes to CPU, kept %d nodes on GPU (filter \"%s\")\n", tag,
+                        n_pinned, n_kept_gpu, keep_env);
+            } else {
+                fprintf(stderr, "s3gen: [%s] pinned %d/%d compute nodes to CPU\n", tag, n_pinned, n_nodes);
+            }
             logged_count[idx]++;
         }
     }
@@ -1345,12 +1418,15 @@ static ggml_tensor* causal_conv1d(ggml_context* ctx, ggml_tensor* x, // input: (
     return y;
 }
 
-// Helper: CausalBlock1D — causal_conv(k=3) + LayerNorm(transpose) + Mish
+// Helper: Mish = x * tanh(softplus(x)).
+// Uses ggml_softplus (single fused kernel with overflow guard for x > 20) instead
+// of the earlier hand-roll log(exp(x)+1) chain built from exp/div/add/log. The
+// hand-roll fabricated the +1 via exp(x)/exp(x), which yields NaN whenever exp(x)
+// overflows to inf or underflows to 0 — and the 4-op cascade also accumulated
+// roughly 4× more per-element rounding than the native softplus, which the CFM
+// Euler solver then amplified across 10 steps on GPU. PLAN #83 round 6.
 static ggml_tensor* ggml_mish(ggml_context* ctx, ggml_tensor* x) {
-    ggml_tensor* exp_x = ggml_exp(ctx, x);
-    ggml_tensor* ones = ggml_div(ctx, exp_x, exp_x);
-    ggml_tensor* softplus = ggml_log(ctx, ggml_add(ctx, exp_x, ones));
-    return ggml_mul(ctx, x, ggml_tanh(ctx, softplus));
+    return ggml_mul(ctx, x, ggml_tanh(ctx, ggml_softplus(ctx, x)));
 }
 
 static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
@@ -1372,7 +1448,7 @@ static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
     return x;
 }
 
-// Helper: CausalResnetBlock1D — block1 + time_mlp + block2 + residual
+// Helper: CausalResnetBlock1D — block1 + time_mlp + block2 + residual.
 static ggml_tensor* causal_resnet_block(ggml_context* ctx, ggml_tensor* x, ggml_tensor* t_emb,
                                         chatterbox_s3gen_context* c, const char* prefix, ggml_tensor* mask) {
     char key[64];
@@ -1385,24 +1461,18 @@ static ggml_tensor* causal_resnet_block(ggml_context* ctx, ggml_tensor* x, ggml_
 
     // block1: CausalConv1d(k=3) + LayerNorm + Mish
     x = causal_block1d(ctx, x, W("b1.0.weight"), W("b1.0.bias"), W("b1.2.weight"), W("b1.2.bias"));
-    // DISABLED: if (mask) x = ggml_mul(ctx, x, mask);
 
     // Time MLP: Mish → linear(1024 → C_out) → add broadcast over T
-    // t_emb is (1024,), W is (C_out, 1024) → t_proj is (C_out,)
     ggml_tensor* t_proj_in = ggml_mish(ctx, t_emb);
     ggml_tensor* t_proj = ggml_mul_mat(ctx, W("mlp.1.weight"), t_proj_in);
     ggml_tensor* t_b = W("mlp.1.bias");
     if (t_b)
         t_proj = ggml_add(ctx, t_proj, t_b);
-    // x is (T, C_out) after causal_block1d. t_proj is (C_out,).
-    // Reshape t_proj to (1, C_out) so it broadcasts over T (ne[0]).
     t_proj = ggml_reshape_2d(ctx, t_proj, 1, (int)t_proj->ne[0]);
-    // Now (T, C_out) + (1, C_out) → broadcasts T times
     x = ggml_add(ctx, x, t_proj);
 
     // block2: CausalConv1d(k=3) + LayerNorm + Mish
     x = causal_block1d(ctx, x, W("b2.0.weight"), W("b2.0.bias"), W("b2.2.weight"), W("b2.2.bias"));
-    // DISABLED: if (mask) x = ggml_mul(ctx, x, mask);
 
     // Residual conv (if dimensions differ)
     ggml_tensor* rc_w = W("rc.weight");

@@ -2356,6 +2356,7 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         const bool split_t3_cpu = env_set("CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU");
         const bool s3gen_cpu_override = env_set("CRISPASR_CHATTERBOX_S3GEN_CPU");
         const bool full_cpu = env_set("CRISPASR_CHATTERBOX_FULL_CPU");
+        const bool t3_gpu_override = env_set("CRISPASR_CHATTERBOX_T3_GPU");
 
         if (full_cpu) {
             fprintf(stderr, "chatterbox: full CPU (CRISPASR_CHATTERBOX_FULL_CPU=1).\n");
@@ -2374,12 +2375,31 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
                             "WARNING: s3gen GPU path is broken; expect garbled audio.\n");
             t3_use_gpu = false;
         } else {
-            // Default: T3 on GPU, S3Gen on CPU (clean output, most of
-            // the GPU speedup). See chatterbox-gpu-bug-is-s3gen.md.
-            fprintf(stderr, "chatterbox: T3 → GPU, s3gen → CPU (default). Override with "
-                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (both GPU, broken) or "
-                            "CRISPASR_CHATTERBOX_FULL_CPU=1.\n");
+            // Default split. T3 GPU is a real speedup on CUDA/Vulkan/etc but
+            // on Apple Silicon Metal it is *slower* than CPU: 30 layers × 86
+            // sequential AR tokens × batch=1 ≈ 25k small kernel launches,
+            // and Metal pays µs-class launch overhead per dispatch that the
+            // M1 NEON CPU cache-blasts straight through (benchmark on M1:
+            // 50s full CPU vs 75s T3-GPU + S3Gen-CPU for the JFK sentence).
+            // S3Gen is the same on both routes here — it has to be on CPU
+            // until the compound Metal-precision drift in the UNet1D is
+            // fixed (see handover-prompts/chatterbox-gpu-bug-is-s3gen.md).
+            // Opt back into T3-GPU on Metal with CRISPASR_CHATTERBOX_T3_GPU=1;
+            // it stays on by default for non-Metal GPU backends.
+#ifdef GGML_USE_METAL
+            const bool t3_gpu_default = false;
+            const char* t3_default_reason = "Metal kernel-launch overhead × AR steps is slower than CPU on Apple "
+                                            "Silicon (override: CRISPASR_CHATTERBOX_T3_GPU=1)";
+#else
+            const bool t3_gpu_default = true;
+            const char* t3_default_reason = "non-Metal GPU";
+#endif
+            t3_use_gpu = t3_gpu_override ? true : t3_gpu_default;
             s3gen_use_gpu = false;
+            fprintf(stderr, "chatterbox: T3 → %s, s3gen → CPU (default; %s). Overrides: "
+                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (both GPU, broken), "
+                            "CRISPASR_CHATTERBOX_FULL_CPU=1, CRISPASR_CHATTERBOX_T3_GPU=1.\n",
+                    t3_use_gpu ? "GPU" : "CPU", t3_default_reason);
         }
     }
     // Issue #94: flush so consumers see progress on slow-disk loads — the

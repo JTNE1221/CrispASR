@@ -358,15 +358,50 @@ forks on the input sample rate:
   to get a real clone.
 
 **Known issues for the native path**:
-- **Chatterbox T3+S3Gen auto-fall back to CPU** when GPU is requested.
-  GPU quantized mul_mat (Q4_K/Q5_K/Q6_K/Q8_0 weights) uses a different
-  dot-product algorithm than CPU's Q8_K-input path, accumulating ~1e-2
-  logit drift per forward pass. Past ~16 decode steps, chatterbox's
-  multinomial sampler diverges into garbled/repeating speech. Affects
-  Metal, Vulkan, and CUDA — not Metal-specific. F16 weights match
-  bit-identical but quantized weights all drift. The runtime detects
-  GPU mode and quietly switches to CPU. Override with
-  `CRISPASR_CHATTERBOX_FORCE_GPU=1` (output may be garbled).
+- **Default backend split is hardware-dependent.** On Metal (Apple
+  Silicon) the default is full CPU because (a) T3's 30-layer × 86-step
+  AR loop is dominated by Metal kernel-launch overhead — measured 50 s
+  on CPU vs 75 s on T3-GPU + S3Gen-CPU on M1 — and (b) S3Gen UNet1D
+  on Metal has compound per-op precision drift across mul_mat / FA /
+  norm / add / gelu / tanh / softplus that the 10-step CFM Euler
+  solver amplifies ~1000× into the documented `s3gen_mel cos≈0.92`
+  collapse. On non-Metal GPU builds (CUDA / Vulkan), the default keeps
+  T3 on GPU and S3Gen on CPU — the S3Gen-on-GPU drift has only been
+  bisected on Metal but the same compound-precision class likely
+  applies to CUDA wmma / Vulkan cooperative-matrix paths with F16
+  intermediate state, so the safer S3Gen-CPU default ships on every
+  GPU backend.
+- **Env knobs to override the default:**
+  - `CRISPASR_CHATTERBOX_FULL_CPU=1` — force everything to CPU.
+  - `CRISPASR_CHATTERBOX_T3_GPU=1` — opt T3 back into GPU on Metal
+    (useful for benchmarking on M3+ where tensor cores may flip the
+    balance, or to verify correctness on CUDA-without-S3Gen).
+  - `CRISPASR_CHATTERBOX_FORCE_GPU=1` — put T3 *and* S3Gen on the GPU
+    backend. Output is garbled on Metal (vocoder amplifies drifted /
+    NaN mel into saturated audio). Kept as a diagnostic.
+  - `CRISPASR_S3GEN_UNET_CPU=1` / `CRISPASR_S3GEN_ENCODER_CPU=1` /
+    `CRISPASR_S3GEN_VOCODER_CPU=1` — pin individual S3Gen sub-graphs
+    to CPU when the parent context uses GPU. Diagnostic: the
+    documented Metal scheduler "upgrade to higher-priority backend"
+    pass undoes user-set CPU assignments for host-mapped buffers, so
+    these don't fully isolate sub-graphs on unified-memory devices.
+  - `CRISPASR_S3GEN_UNET_PIN_CPU_OP=<op>` /
+    `CRISPASR_S3GEN_UNET_KEEP_GPU_OP=<op>` — op-type bisect (handover
+    round 7). Pins the named op to CPU (or keeps only that op on GPU)
+    inside `build_graph_unet1d`. Useful for localising the next
+    suspect op in further drift work; doesn't fix end-to-end TTS
+    audio on its own because the vocoder still amplifies whatever
+    mel the UNet produces.
+- **F16 vs Q-mat weights:** F16 mul_mat is bit-identical CPU↔GPU on
+  every quant. Quantised weights (Q4_K/Q5_K/Q6_K/Q8_0) need the
+  CrispASR ggml-metal patches (`kernel_mul_mv_q4_K_q8_K`,
+  `kernel_quantize_q8_K_f32`, `kernel_mul_mm_*_hp`) plus
+  `GGML_PREC_F32` op tagging to reach the F32-precise path on Metal.
+  T3 carries those tags (see `chatterbox.cpp:build_graph_t3_kv`);
+  S3Gen tagging was tested and helped mul_mat alone but didn't break
+  the compound-drift chain, so it isn't currently applied. F16 T3 +
+  CPU S3Gen is the safest config if you need T3 on GPU and care
+  about exact-match output on Metal.
 - T3 sampling can produce unrelated text on long technical prompts
   (sampler drift). Short, common phrases work reliably; if a prompt
   produces gibberish, try a different seed via `--seed <n>` (or the
@@ -495,3 +530,16 @@ knobs for power users:
 
 Set `INDEXTTS_DEBUG=1` for per-stage intermediate dumps (mel, conformer
 blocks, perceiver output) useful for diff-testing against Python.
+
+**Chinese (CJK) text** is handled via a port of the upstream
+`tokenize_by_CJK_char` pre-tokenizer plus the relevant subset of
+`TextNormalizer.char_rep_map` (CJK punctuation → ASCII). Token IDs are
+bit-identical to Python `sp.Encode` on the preprocessed text. Mixed
+CJK+English (e.g. `他用Python写了一个程序。`) works without special
+flags. Numbers-to-hanzi conversion and pinyin tone digits are not
+ported — they need the upstream wetext FST and are not currently in
+the CLI. ASR-validate Chinese output with a real Chinese ASR (e.g.
+Qwen3-ASR-0.6B); whisper-base over-counts CER ~5× on Mandarin.
+
+Pass `-vv` to dump the BPE token IDs (`indextts: text_ids[...]`) for
+diffing against `sentencepiece` if the output sounds wrong.
