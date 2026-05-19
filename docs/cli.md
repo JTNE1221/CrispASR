@@ -126,7 +126,7 @@ per-token `tokens[]` arrays when the backend populates them.
 | `-vt F` | VAD threshold (default 0.5) |
 | `-vspd N` | VAD min speech duration (ms, default 250) |
 | `-vsd N` | VAD min silence duration (ms, default 100) |
-| `-ck N`, `--chunk-seconds N` | Fallback chunk size when VAD is off (default 30 s) |
+| `-ck N`, `--chunk-seconds N` | Fallback chunk size when VAD is off (default: 30 s for whisper, disabled for other backends) |
 
 ### How VAD works
 
@@ -150,9 +150,12 @@ segments (< 3 s) are auto-merged, and oversized segments are split at
 ```
 
 The cached model lives at `~/.cache/crispasr/ggml-silero-v5.1.2.bin`
-(~885 KB). If you don't pass `--vad`, CrispASR falls back to fixed
-30-second chunking (`-ck`). Encoder cost is O(T²) in the frame count,
-so for multi-minute audio you really want VAD.
+(~885 KB). If you don't pass `--vad`, whisper falls back to fixed
+30-second chunking (`-ck 30`). Non-whisper backends (parakeet, canary,
+moonshine, etc.) process the full audio in one encoder pass by default
+because their bidirectional encoders lose context at fixed chunk
+boundaries (#89). Pass `--chunk-seconds N` explicitly to force chunking
+on these backends (useful for very long audio where memory is a concern).
 
 ### Recommended for subtitles
 
@@ -172,9 +175,8 @@ crispasr --backend parakeet -m parakeet.gguf -f long_audio.wav \
   `voxtral`, `voxtral4b`, `qwen3`): use a CTC aligner together with
   `--vad`. Without VAD, leading silence can throw off sentence
   starts, especially for the qwen3 forced aligner.
-- **If parakeet is too heavy for very long audio:** keep parakeet for
-  timing quality, but cap memory with fixed chunking
-  (`--chunk-seconds 180`).
+- **If parakeet OOMs on very long audio:** cap memory with explicit
+  chunking (`--chunk-seconds 180`).
 
 ## Word-level timestamps via CTC alignment
 

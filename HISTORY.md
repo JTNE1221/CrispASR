@@ -6,6 +6,32 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-19 Issue #89 — disable default 30s chunking for non-whisper backends
+
+**Problem:** parakeet-tdt-0.6b-ja (and other non-whisper backends with
+bidirectional FastConformer encoders) lost text at fixed 30-second chunk
+boundaries. The default `--chunk-seconds 30` was a whisper-era default —
+whisper's positional-encoding encoder is trained on exactly 30 s windows,
+but parakeet/canary/moonshine/etc. can handle arbitrary-length input.
+Chunking these backends threw away the bidirectional context at each
+boundary, causing tokens near the cut point to decode as blanks.
+
+**Fix (`68b4b3e`):**
+- Added `chunk_seconds_explicit` flag to `whisper_params`. When the user
+  doesn't pass `--chunk-seconds`, non-whisper backends (detected via
+  `!(CAP_VAD_INTERNAL)`) now process the full audio in one encoder pass.
+  Users can still force chunking with `--chunk-seconds N` for very long
+  audio where memory is a concern.
+- Also fixed streaming-mode VAD timestamp offsets: `sl.t0_cs` (relative
+  to rolling window) was passed as absolute `t_offset_cs` to
+  `backend->transcribe()` in 4 call sites. Corrected to
+  `window_start_cs + sl.t0_cs`.
+
+**Files:** `whisper_params.h`, `cli.cpp`, `crispasr_run.cpp`,
+`docs/cli.md`.
+
+---
+
 ## 2026-05-17 Graduate canary-1b-v2 mel + encoder to full diff
 
 The canary encoder had cos_min=0.917 for `pre_encode_output` vs
