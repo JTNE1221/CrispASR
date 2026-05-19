@@ -1,6 +1,6 @@
 # CrispASR
 
-**One C++ binary, twenty-four ASR backends + five TTS engines + multilingual text translation, zero Python dependencies.**
+**One C++ binary, twenty-four ASR backends + eight TTS engines + multilingual text translation, zero Python dependencies.**
 
 CrispASR started as a fork of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and extends that base into a **unified speech engine** called `crispasr`, backed by full ggml C++ runtimes for major open-weights ASR *and* TTS architectures. One build, one binary, one consistent CLI — pick the backend at the command line or let CrispASR auto-detect it from your GGUF file. See [Text-to-Speech](#text-to-speech-tts) for the TTS side.
 
@@ -19,7 +19,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 
 | Project | What it does |
 |---|---|
-| **[CrispASR](https://github.com/CrispStrobe/CrispASR)** | This repo — C++ speech recognition engine. 24 ASR backends + 5 TTS backends, CLI + HTTP server + C-ABI + Python/Rust/Dart bindings. |
+| **[CrispASR](https://github.com/CrispStrobe/CrispASR)** | This repo — C++ speech recognition engine. 24 ASR backends + 8 TTS backends, CLI + HTTP server + C-ABI + Python/Rust/Dart bindings. |
 | **[CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver)** | Cross-platform Flutter transcription app built on CrispASR. Desktop + mobile, all 10 backends, model browser with download queue, mic capture, SRT/VTT/JSON export, diarization, batch processing. Fully offline. |
 | **[CrispEmbed](https://github.com/CrispStrobe/CrispEmbed)** | Text embedding engine via ggml — same philosophy as CrispASR but for retrieval. 10 architectures (XLM-R, Qwen3-Embed, Gemma3, ModernBERT, ...), dense + sparse + ColBERT + reranking. 9.5x faster than ONNX on CPU, GPU via CUDA/Metal/Vulkan. Python/Rust/Dart bindings. |
 | **[Susurrus](https://github.com/CrispStrobe/Susurrus)** | Python ASR GUI with 9 backends (faster-whisper, mlx-whisper, voxtral, insanely-fast-whisper, ...). The Python counterpart to CrispASR's C++ approach. |
@@ -32,7 +32,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 - [Feature matrix](#feature-matrix)
 - [Install & build](#install--build) — quick install (full guide in [docs/install.md](docs/install.md))
 - [Quick start — ASR](#quick-start)
-- [**Text-to-Speech (TTS)**](docs/tts.md) — Kokoro, Qwen3-TTS, VibeVoice, Orpheus, Chatterbox, IndexTTS
+- [**Text-to-Speech (TTS)**](docs/tts.md) — Kokoro, Qwen3-TTS, VibeVoice, Orpheus, Chatterbox, IndexTTS, VoxCPM2 _(beta)_
 - [Streaming & live transcription](docs/streaming.md)
 - [Server mode (HTTP API)](docs/server.md)
 - [CLI reference](docs/cli.md) — flags, VAD, CTC alignment, output formats, auto-download, audio formats
@@ -50,7 +50,7 @@ No Python. No PyTorch. No separate per-model binary. No `pip install`. Just one 
 ## Supported backends
 
 CrispASR ships **24 ASR backends** for transcription/translation and
-**five TTS engines** for synthesis. Pick at the CLI with `--backend NAME`,
+**eight TTS engines** for synthesis. Pick at the CLI with `--backend NAME`,
 or omit it to let the binary auto-detect from the GGUF metadata. Jump
 to the [TTS table](#text-to-speech-models) for the synthesis side.
 
@@ -106,6 +106,15 @@ quick-start commands and engine selection guidance.
 | **orpheus** | [`Orpheus-3B-FT`](https://huggingface.co/cstr/orpheus-3b-base-GGUF) + [`SNAC 24 kHz`](https://huggingface.co/cstr/snac-24khz-GGUF) | Llama-3.2-3B + SNAC RVQ codec; 8 speakers ([more](docs/architecture.md#orpheus)) | en, de | Llama / MIT |
 | **chatterbox** | [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) + turbo/kartoffelbox/lahgtna variants | T3 AR + S3Gen flow-matching ([more](docs/architecture.md#chatterbox--chatterbox-turbo--kartoffelbox-turbo--lahgtna-chatterbox)) | en, de, ar | MIT |
 | **indextts** | [`cstr/indextts-1.5-GGUF`](https://huggingface.co/cstr/indextts-1.5-GGUF) | GPT-2 AR (24L/1280d) + Conformer conditioning + BigVGAN vocoder; voice cloning via reference audio | zh, en | Apache-2.0 |
+| **voxcpm2-tts** _(beta)_ | [`cstr/voxcpm2-GGUF`](https://huggingface.co/cstr/voxcpm2-GGUF) | Tokenizer-free CFM diffusion AR (TSLM + RALM + LocDiT) at 48 kHz native; intended for zero-shot voice cloning | 30 languages | Apache-2.0 |
+
+> _Beta:_ voxcpm2-tts is end-to-end runnable today on Q4_K but the default
+> Q4_K output is currently in the "garbled-but-recognisable" band — the
+> inference path matches the upstream PyTorch reference within precision
+> floor (see `crispasr-diff voxcpm2-tts`), so the remaining gap is on the
+> quantization side. Voice cloning via `--voice <wav>` is declared in the
+> backend's capability bits but the adapter currently falls back to the
+> default voice with a warning.
 
 ### Translation
 

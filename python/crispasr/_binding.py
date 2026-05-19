@@ -1301,7 +1301,7 @@ class Session:
             self._lib.crispasr_session_result_free(res)
 
     # ---------------------------------------------------------------------
-    # TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus)
+    # TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus, chatterbox, indextts, voxcpm2)
     # ---------------------------------------------------------------------
 
     def set_codec_path(self, path: str) -> None:
@@ -1669,11 +1669,14 @@ class Session:
         return out
 
     def synthesize(self, text: str) -> np.ndarray:
-        """Synthesise ``text`` to 24 kHz mono float32 PCM as a numpy array.
+        """Synthesise ``text`` to mono float32 PCM as a numpy array.
 
-        Requires a TTS-capable backend (``vibevoice``, ``qwen3-tts``,
-        ``kokoro``, ``orpheus``). For qwen3-tts call
-        :meth:`set_codec_path` and one of:
+        Output sample rate is backend-dependent (24 kHz for most engines;
+        ``voxcpm2-tts`` returns 48 kHz).
+
+        Works with any TTS-capable backend — ``vibevoice``, ``qwen3-tts``,
+        ``kokoro``, ``orpheus``, ``chatterbox``, ``indextts``, ``voxcpm2-tts``.
+        For qwen3-tts call :meth:`set_codec_path` and one of:
 
         * :meth:`set_voice` — Base variants (WAV + ref_text, or voice-pack GGUF)
         * :meth:`set_speaker_name` — CustomVoice variants (fixed speaker name)
@@ -1682,6 +1685,9 @@ class Session:
         Branch via :meth:`is_voice_design` / :meth:`is_custom_voice` —
         Base if neither returns True. For orpheus call
         :meth:`set_codec_path` (SNAC GGUF) and :meth:`set_speaker_name`.
+        voxcpm2-tts runs zero-shot today — the CLI ``--voice`` flag is
+        accepted but ignored (the adapter prints a warning and falls back
+        to the default voice; cloning hookup is still pending).
         """
         if not hasattr(self._lib, "crispasr_session_synthesize"):
             raise RuntimeError("TTS API not present in this libcrispasr build")
