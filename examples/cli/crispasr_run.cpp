@@ -373,18 +373,30 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     // When the user didn't explicitly pass --chunk-seconds, disable
     // chunking for unbounded-input backends so the full audio is
     // processed in one encoder pass.
-    // For CAP_UNBOUNDED_INPUT backends, always process the full audio
-    // in one encoder pass. Chunking these backends causes 7-9% text
-    // loss because the bidirectional encoder produces inferior features
-    // with less context. --chunk-seconds is silently ignored for these
-    // backends (it was designed for whisper/LLM backends where KV cache
-    // memory is the constraint, not encoder quality).
+    // Issue #89: CAP_UNBOUNDED_INPUT backends (parakeet, canary, wav2vec2,
+    // firered-asr, fastconformer-ctc, granite-nar) use bidirectional
+    // encoders that produce inferior features when chunked (7-9% text
+    // loss). Default to full-audio encoding for best quality.
+    //
+    // When the user explicitly passes --chunk-seconds, honor it — they
+    // need chunking to avoid OOM on very long audio. Overlap-save
+    // context (--chunk-overlap) mitigates boundary artifacts but the
+    // encoder quality loss from reduced context is inherent to the
+    // architecture.
     int effective_chunk_seconds = params.chunk_seconds;
-    if (backend.capabilities() & CAP_UNBOUNDED_INPUT) {
+    if (!params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
         effective_chunk_seconds = 0;
-        if (!params.no_prints && params.chunk_seconds_explicit && (int)samples.size() > params.chunk_seconds * SR) {
-            fprintf(stderr, "crispasr: %s backend uses full-audio encoding — "
-                            "--chunk-seconds ignored (no quality loss)\n", backend.name());
+    }
+    if (!params.no_prints) {
+        if (effective_chunk_seconds == 0 && (int)samples.size() > params.chunk_seconds * SR &&
+            (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
+            fprintf(stderr, "crispasr: %s backend — full-audio encoding "
+                            "(use --chunk-seconds N if OOM)\n", backend.name());
+        } else if (params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT) &&
+                   (int)samples.size() > params.chunk_seconds * SR) {
+            fprintf(stderr, "crispasr: %s backend — chunking at %ds may reduce quality; "
+                            "remove --chunk-seconds for best results\n",
+                    backend.name(), params.chunk_seconds);
         }
     }
 
