@@ -151,11 +151,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential libsdl2-dev cmake git
@@ -186,11 +189,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential libsdl2-dev cmake git
@@ -221,11 +227,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential libsdl2-dev cmake git
@@ -314,11 +323,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential cmake libsdl2-dev git
@@ -351,11 +363,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential cmake libsdl2-dev git
@@ -388,11 +403,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential cmake libsdl2-dev git
@@ -428,11 +446,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y clang build-essential cmake libsdl2-dev git
@@ -465,11 +486,14 @@ jobs:
             -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
-            # Foreign-arch Ubuntu pulls from ports.ubuntu.com which has
-            # been timing out in QEMU runners; redirect that mirror too.
-            sed -i "s|ports.ubuntu.com|mirrors.kernel.org|g" /etc/apt/sources.list
+            # Azure-hosted Ubuntu mirror — both /ubuntu/ (amd64) and
+            # /ubuntu-ports/ (foreign-arch jammy data) work, and the
+            # GitHub Actions runners are on Azure VMs so egress is fast.
+            # Previously redirected to mirrors.kernel.org but kernel.org's
+            # /ubuntu-ports/ is incomplete and returns 404 on jammy Release.
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
 
             apt update
             apt install -y build-essential cmake git
@@ -1400,6 +1424,18 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The ggml-org/ccache-action below internally apt-installs ccache +
+      # libhiredis. On ubuntu-22.04-arm runners the default sources.list
+      # points at ports.ubuntu.com, which intermittently fails with
+      # connection-timeout under load. Swap to azure.archive.ubuntu.com
+      # first so the ccache-action's internal apt has a healthy mirror.
+      - name: Swap to Azure mirror (arm64 runner)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          sudo sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -type f -exec sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" {} +
+          sudo apt-get update -y || true
+
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.16
         with:
@@ -1424,6 +1460,18 @@ jobs:
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
+
+      # The ggml-org/ccache-action below internally apt-installs ccache +
+      # libhiredis. On ubuntu-22.04-arm runners the default sources.list
+      # points at ports.ubuntu.com, which intermittently fails with
+      # connection-timeout under load. Swap to azure.archive.ubuntu.com
+      # first so the ccache-action's internal apt has a healthy mirror.
+      - name: Swap to Azure mirror (arm64 runner)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          sudo sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -type f -exec sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" {} +
+          sudo apt-get update -y || true
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.16
@@ -1450,6 +1498,18 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The ggml-org/ccache-action below internally apt-installs ccache +
+      # libhiredis. On ubuntu-22.04-arm runners the default sources.list
+      # points at ports.ubuntu.com, which intermittently fails with
+      # connection-timeout under load. Swap to azure.archive.ubuntu.com
+      # first so the ccache-action's internal apt has a healthy mirror.
+      - name: Swap to Azure mirror (arm64 runner)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          sudo sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -type f -exec sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" {} +
+          sudo apt-get update -y || true
+
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.16
         with:
@@ -1475,6 +1535,18 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The ggml-org/ccache-action below internally apt-installs ccache +
+      # libhiredis. On ubuntu-22.04-arm runners the default sources.list
+      # points at ports.ubuntu.com, which intermittently fails with
+      # connection-timeout under load. Swap to azure.archive.ubuntu.com
+      # first so the ccache-action's internal apt has a healthy mirror.
+      - name: Swap to Azure mirror (arm64 runner)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          sudo sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -type f -exec sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" {} +
+          sudo apt-get update -y || true
+
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.16
         with:
@@ -1499,6 +1571,18 @@ jobs:
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
+
+      # The ggml-org/ccache-action below internally apt-installs ccache +
+      # libhiredis. On ubuntu-22.04-arm runners the default sources.list
+      # points at ports.ubuntu.com, which intermittently fails with
+      # connection-timeout under load. Swap to azure.archive.ubuntu.com
+      # first so the ccache-action's internal apt has a healthy mirror.
+      - name: Swap to Azure mirror (arm64 runner)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          sudo sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -type f -exec sed -i "s|ports.ubuntu.com|azure.archive.ubuntu.com|g" {} +
+          sudo apt-get update -y || true
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.16
