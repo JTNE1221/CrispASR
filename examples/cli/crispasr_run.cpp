@@ -390,12 +390,15 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     if (!params.no_prints) {
         if (effective_chunk_seconds == 0 && (int)samples.size() > params.chunk_seconds * SR &&
             (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
-            fprintf(stderr, "crispasr: %s backend — full-audio encoding "
-                            "(use --chunk-seconds N if OOM)\n", backend.name());
+            fprintf(stderr,
+                    "crispasr: %s backend — full-audio encoding "
+                    "(use --chunk-seconds N if OOM)\n",
+                    backend.name());
         } else if (params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT) &&
                    (int)samples.size() > params.chunk_seconds * SR) {
-            fprintf(stderr, "crispasr: %s backend — chunking at %ds may reduce quality; "
-                            "remove --chunk-seconds for best results\n",
+            fprintf(stderr,
+                    "crispasr: %s backend — chunking at %ds may reduce quality; "
+                    "remove --chunk-seconds for best results\n",
                     backend.name(), params.chunk_seconds);
         }
     }
@@ -646,9 +649,9 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
                 }
             }
             // Remove empty segments.
-            segs.erase(std::remove_if(segs.begin(), segs.end(),
-                                       [](const crispasr_segment& s) { return s.text.empty(); }),
-                        segs.end());
+            segs.erase(
+                std::remove_if(segs.begin(), segs.end(), [](const crispasr_segment& s) { return s.text.empty(); }),
+                segs.end());
         }
 
         if (params.diarize && !segs.empty()) {
@@ -1683,8 +1686,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
                                 decode_params.vad_model.clear();
                                 partial_decode_attempted_this_step = true;
                                 const int64_t abs_offset_cs = (window_start_sample_now + (int64_t)sub_start) * 100 / SR;
-                                sl_for_text =
-                                    backend->transcribe(pcm_window.data() + sub_start, sub_len, abs_offset_cs, decode_params);
+                                sl_for_text = backend->transcribe(pcm_window.data() + sub_start, sub_len, abs_offset_cs,
+                                                                  decode_params);
                             }
                             // else: sl_for_text stays empty → empty
                             // partial text for this slice, which
@@ -1728,8 +1731,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 if (partial_decode_attempted_this_step)
                     last_partial_decode_sample = cumulative_samples;
             } else {
-                const int64_t no_vad_window_start_cs =
-                    (cumulative_samples - (int64_t)pcm_window.size()) * 100 / SR;
+                const int64_t no_vad_window_start_cs = (cumulative_samples - (int64_t)pcm_window.size()) * 100 / SR;
                 segs = backend->transcribe(pcm_window.data(), (int)pcm_window.size(), no_vad_window_start_cs, params);
                 if (!segs.empty())
                     decoded_segments_this_step = true;

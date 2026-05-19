@@ -8,9 +8,13 @@
 #include "crispasr_backend_utils.h"
 #include "whisper_params.h"
 
+#include "core/audio_resample.h"
+#include "core/wav_reader.h"
+
 #include "voxcpm2_tts.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -59,6 +63,10 @@ public:
             fprintf(stderr, "crispasr[voxcpm2-tts]: failed to load model '%s'\n", p.model.c_str());
             return false;
         }
+
+        if (!p.tts_voice.empty()) {
+            voice_path_ = p.tts_voice;
+        }
         return true;
     }
 
@@ -66,16 +74,38 @@ public:
         if (!ctx_ || text.empty())
             return {};
 
-        int n = 0;
-        float* pcm = nullptr;
-
-        // Voice cloning path (requires VAE encoder — not yet implemented,
-        // synthesize_clone falls back to zero-shot for now).
-        if (!params.tts_voice.empty()) {
-            fprintf(stderr, "crispasr[voxcpm2-tts]: voice cloning not yet implemented, using zero-shot\n");
+        // Voice cloning path: load WAV, resample to 16 kHz mono float32, hand to
+        // voxcpm2_synthesize_clone. The encoder pads internally to the patch
+        // length, so any ref duration ≥ ~2 s should work.
+        std::vector<float> ref_pcm;
+        if (!voice_path_.empty()) {
+            int sr = 0;
+            if (crispasr::core::read_wav_mono_pcm16(voice_path_, ref_pcm, sr)) {
+                if (sr != 16000 && sr > 0) {
+                    ref_pcm = core_audio::resample_polyphase(ref_pcm.data(), (int)ref_pcm.size(), sr, 16000);
+                    if (!params.no_prints) {
+                        fprintf(stderr, "crispasr[voxcpm2-tts]: resampled reference '%s' from %d Hz to 16000 Hz\n",
+                                voice_path_.c_str(), sr);
+                    }
+                }
+                if (!params.no_prints) {
+                    fprintf(stderr, "crispasr[voxcpm2-tts]: loaded reference audio '%s' (%zu samples @ 16 kHz)\n",
+                            voice_path_.c_str(), ref_pcm.size());
+                }
+            } else {
+                fprintf(stderr,
+                        "crispasr[voxcpm2-tts]: failed to load reference audio '%s' — falling back to zero-shot\n",
+                        voice_path_.c_str());
+            }
         }
 
-        pcm = voxcpm2_synthesize(ctx_, text.c_str(), &n);
+        int n = 0;
+        float* pcm = nullptr;
+        if (!ref_pcm.empty()) {
+            pcm = voxcpm2_synthesize_clone(ctx_, text.c_str(), ref_pcm.data(), (int)ref_pcm.size(), &n);
+        } else {
+            pcm = voxcpm2_synthesize(ctx_, text.c_str(), &n);
+        }
 
         if (!pcm || n <= 0)
             return {};
@@ -96,6 +126,7 @@ public:
 
 private:
     struct voxcpm2_context* ctx_ = nullptr;
+    std::string voice_path_;
 };
 
 } // namespace

@@ -1216,7 +1216,7 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
 // ===========================================================================
 
 static std::vector<parakeet_emitted_token> parakeet_ctc_decode(parakeet_context* ctx, const float* enc, int T_enc,
-                                                                int d_model) {
+                                                               int d_model) {
     std::vector<parakeet_emitted_token> emitted;
     if (!ctx->model.ctc_w || !ctx->model.ctc_b)
         return emitted;
@@ -1639,8 +1639,8 @@ static std::string spiece_to_text(const std::string& piece) {
 // Split encode / decode API
 // ---------------------------------------------------------------------------
 
-extern "C" float* parakeet_encode(struct parakeet_context* ctx, const float* samples, int n_samples,
-                                   int* out_T_enc, int* out_d_model) {
+extern "C" float* parakeet_encode(struct parakeet_context* ctx, const float* samples, int n_samples, int* out_T_enc,
+                                  int* out_d_model) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
     int T_mel = 0;
@@ -1654,8 +1654,10 @@ extern "C" float* parakeet_encode(struct parakeet_context* ctx, const float* sam
     const int d = (int)ctx->model.hparams.d_model;
     float* out = (float*)malloc(enc.size() * sizeof(float));
     memcpy(out, enc.data(), enc.size() * sizeof(float));
-    if (out_T_enc) *out_T_enc = T_enc;
-    if (out_d_model) *out_d_model = d;
+    if (out_T_enc)
+        *out_T_enc = T_enc;
+    if (out_d_model)
+        *out_d_model = d;
     return out;
 }
 

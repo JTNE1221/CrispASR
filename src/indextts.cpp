@@ -44,20 +44,25 @@
 #include <unordered_map>
 #include <vector>
 
-#include <unistd.h> // unlink, close, write (external normalizer hook)
-
-// system() is unavailable on iOS (sandbox restriction). Same guard pattern
-// as src/crispasr_mic.cpp and src/crispasr_audio.cpp — the external
-// text-normalizer hook compiles to a pass-through on iOS-family platforms
-// (iOS, tvOS, watchOS, visionOS); the full implementation is available on
-// macOS, Linux, and Windows.
+// External text-normalizer hook is available on macOS host + Linux only:
+//   * iOS / tvOS / watchOS / visionOS: system() is __API_UNAVAILABLE(ios)
+//     in the SDK (sandbox restriction).
+//   * Windows: no <unistd.h>, no mkstemp(); the POSIX subprocess plumbing
+//     this hook uses doesn't port cleanly. Windows users who need the
+//     wetext bridge can run the build under WSL.
+// Same guard pattern as src/crispasr_cache.cpp (curl/wget fallback) and
+// src/crispasr_mic.cpp / src/crispasr_audio.cpp (miniaudio device IO).
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(_WIN32)
 #define INDEXTTS_HAS_SUBPROCESS 0
 #else
 #define INDEXTTS_HAS_SUBPROCESS 1
+#endif
+
+#if INDEXTTS_HAS_SUBPROCESS
+#include <unistd.h> // unlink, close, write (external normalizer hook only)
 #endif
 
 namespace {

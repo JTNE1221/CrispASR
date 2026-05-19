@@ -2396,9 +2396,10 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
 #endif
             t3_use_gpu = t3_gpu_override ? true : t3_gpu_default;
             s3gen_use_gpu = false;
-            fprintf(stderr, "chatterbox: T3 → %s, s3gen → CPU (default; %s). Overrides: "
-                            "CRISPASR_CHATTERBOX_FORCE_GPU=1 (both GPU, broken), "
-                            "CRISPASR_CHATTERBOX_FULL_CPU=1, CRISPASR_CHATTERBOX_T3_GPU=1.\n",
+            fprintf(stderr,
+                    "chatterbox: T3 → %s, s3gen → CPU (default; %s). Overrides: "
+                    "CRISPASR_CHATTERBOX_FORCE_GPU=1 (both GPU, broken), "
+                    "CRISPASR_CHATTERBOX_FULL_CPU=1, CRISPASR_CHATTERBOX_T3_GPU=1.\n",
                     t3_use_gpu ? "GPU" : "CPU", t3_default_reason);
         }
     }

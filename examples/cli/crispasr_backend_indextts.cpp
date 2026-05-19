@@ -10,6 +10,9 @@
 #include "crispasr_model_registry.h"
 #include "whisper_params.h"
 
+#include "core/audio_resample.h"
+#include "core/wav_reader.h"
+
 #include "indextts.h"
 
 #include <cstdio>
@@ -45,96 +48,6 @@ static std::string discover_vocoder(const std::string& model_path) {
         }
     }
     return "";
-}
-
-// Minimal WAV reader (mono float32 at any sample rate — caller resamples).
-static bool read_wav_mono(const std::string& path, std::vector<float>& pcm, int& sample_rate) {
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) {
-        return false;
-    }
-
-    char riff[4];
-    if (fread(riff, 1, 4, f) != 4 || memcmp(riff, "RIFF", 4) != 0) {
-        fclose(f);
-        return false;
-    }
-    fseek(f, 4, SEEK_CUR); // skip chunk size
-    char wave[4];
-    if (fread(wave, 1, 4, f) != 4 || memcmp(wave, "WAVE", 4) != 0) {
-        fclose(f);
-        return false;
-    }
-
-    // Find fmt chunk
-    int16_t audio_format = 0;
-    int16_t n_channels = 0;
-    int32_t sr = 0;
-    int16_t bits_per_sample = 0;
-    bool found_fmt = false;
-    bool found_data = false;
-    int32_t data_size = 0;
-
-    while (!feof(f)) {
-        char chunk_id[4];
-        int32_t chunk_size;
-        if (fread(chunk_id, 1, 4, f) != 4) {
-            break;
-        }
-        if (fread(&chunk_size, 4, 1, f) != 1) {
-            break;
-        }
-
-        if (memcmp(chunk_id, "fmt ", 4) == 0) {
-            if (fread(&audio_format, 2, 1, f) != 1) {
-                break;
-            }
-            if (fread(&n_channels, 2, 1, f) != 1) {
-                break;
-            }
-            if (fread(&sr, 4, 1, f) != 1) {
-                break;
-            }
-            fseek(f, 6, SEEK_CUR); // byte_rate + block_align
-            if (fread(&bits_per_sample, 2, 1, f) != 1) {
-                break;
-            }
-            if (chunk_size > 16) {
-                fseek(f, chunk_size - 16, SEEK_CUR);
-            }
-            found_fmt = true;
-        } else if (memcmp(chunk_id, "data", 4) == 0) {
-            data_size = chunk_size;
-            found_data = true;
-            break;
-        } else {
-            fseek(f, chunk_size, SEEK_CUR);
-        }
-    }
-
-    if (!found_fmt || !found_data || audio_format != 1 || bits_per_sample != 16) {
-        fclose(f);
-        return false;
-    }
-
-    sample_rate = sr;
-    int n_samples_total = data_size / (n_channels * (bits_per_sample / 8));
-    pcm.resize(n_samples_total);
-
-    std::vector<int16_t> raw(n_samples_total * n_channels);
-    size_t read_count = fread(raw.data(), sizeof(int16_t), raw.size(), f);
-    fclose(f);
-
-    int n_read = (int)(read_count / n_channels);
-    for (int i = 0; i < n_read; i++) {
-        float sum = 0.0f;
-        for (int ch = 0; ch < n_channels; ch++) {
-            sum += (float)raw[i * n_channels + ch] / 32768.0f;
-        }
-        pcm[i] = sum / n_channels;
-    }
-    pcm.resize(n_read);
-    return true;
 }
 
 class IndexttsBackend : public CrispasrBackend {
@@ -215,22 +128,10 @@ public:
 
         if (!voice_path_.empty()) {
             int sr = 0;
-            if (read_wav_mono(voice_path_, ref_audio, sr)) {
+            if (crispasr::core::read_wav_mono_pcm16(voice_path_, ref_audio, sr)) {
                 // IndexTTS API expects 24kHz mono float32 PCM. Resample if needed.
                 if (sr != 24000 && sr > 0) {
-                    double ratio = 24000.0 / (double)sr;
-                    int out_len = (int)(ref_audio.size() * ratio);
-                    std::vector<float> resampled(out_len);
-                    for (int i = 0; i < out_len; i++) {
-                        double src = i / ratio;
-                        int idx = (int)src;
-                        double frac = src - idx;
-                        if (idx + 1 < (int)ref_audio.size())
-                            resampled[i] = (float)((1.0 - frac) * ref_audio[idx] + frac * ref_audio[idx + 1]);
-                        else if (idx < (int)ref_audio.size())
-                            resampled[i] = ref_audio[idx];
-                    }
-                    ref_audio = std::move(resampled);
+                    ref_audio = core_audio::resample_polyphase(ref_audio.data(), (int)ref_audio.size(), sr, 24000);
                     if (!params.no_prints) {
                         fprintf(stderr, "crispasr[indextts]: resampled reference audio from %d Hz to 24000 Hz\n", sr);
                     }

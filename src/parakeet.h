@@ -96,10 +96,10 @@ bool parakeet_has_ctc(struct parakeet_context* ctx);
 // parakeet_encode: mel → encoder, returns malloc'd float[T_enc * d_model].
 // parakeet_decode_frames: run TDT/CTC decode on pre-encoded frames.
 // Caller must free() the returned encoder buffer.
-float* parakeet_encode(struct parakeet_context* ctx, const float* samples, int n_samples,
-                       int* out_T_enc, int* out_d_model);
-struct parakeet_result* parakeet_decode_frames(struct parakeet_context* ctx, const float* enc_frames,
-                                               int T_enc, int d_model, int64_t t_offset_cs);
+float* parakeet_encode(struct parakeet_context* ctx, const float* samples, int n_samples, int* out_T_enc,
+                       int* out_d_model);
+struct parakeet_result* parakeet_decode_frames(struct parakeet_context* ctx, const float* enc_frames, int T_enc,
+                                               int d_model, int64_t t_offset_cs);
 
 // Hyper-parameters needed by callers (frame duration for stamping etc.)
 int parakeet_frame_dur_cs(struct parakeet_context* ctx); // centiseconds per encoder frame

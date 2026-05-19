@@ -42,6 +42,16 @@
 
 #include "ggml.h"
 
+// MSVC's <cmath> does not define M_PI unless _USE_MATH_DEFINES is set
+// before <math.h> is included — and that gate is fragile because <math.h>
+// may have been pulled in transitively before us. Define the macro here if
+// the compiler didn't, using the same value PyTorch's c10::pi<double> uses.
+// We keep the exact `2.0f * (float)M_PI * u2` computation in callers below
+// because this header's whole point is bit-equality with torch.randn.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace crispasr::core {
 
 struct mt19937_state {

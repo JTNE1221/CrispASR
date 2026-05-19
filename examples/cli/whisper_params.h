@@ -133,9 +133,9 @@ struct whisper_params {
     bool no_auto_aligner = false;
     int32_t max_new_tokens = 512;
     int32_t chunk_seconds = 30;
-    bool    chunk_seconds_explicit = false; // true when user passed --chunk-seconds
-    float   chunk_overlap_seconds = 3.0f;  // overlap context on each side of chunk boundary
-    std::string parakeet_decoder;          // "tdt" (default), "ctc" — selects parakeet decode head
+    bool chunk_seconds_explicit = false; // true when user passed --chunk-seconds
+    float chunk_overlap_seconds = 3.0f;  // overlap context on each side of chunk boundary
+    std::string parakeet_decoder;        // "tdt" (default), "ctc" — selects parakeet decode head
     std::string lid_backend;
     std::string lid_model;
     // Post-ASR text LID: when set, after transcription completes, run

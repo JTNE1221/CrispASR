@@ -85,9 +85,9 @@ enum crispasr_capability : uint32_t {
     CAP_TTS = 1u << 16,                 // text-to-speech synthesis
     CAP_VOICE_CLONING = 1u << 17,       // TTS: synthesise with --voice <reference.wav>
     CAP_PUNCTUATION_NATIVE = 1u << 18,  // backend already emits punctuation by default
-    CAP_UNBOUNDED_INPUT = 1u << 19,    // encoder handles arbitrary-length audio without chunking
-                                       // (FastConformer, CTC-only encoders). LLM-based backends
-                                       // and whisper's fixed-window encoder do NOT set this.
+    CAP_UNBOUNDED_INPUT = 1u << 19,     // encoder handles arbitrary-length audio without chunking
+                                        // (FastConformer, CTC-only encoders). LLM-based backends
+                                        // and whisper's fixed-window encoder do NOT set this.
 };
 
 // ---------------------------------------------------------------------------
