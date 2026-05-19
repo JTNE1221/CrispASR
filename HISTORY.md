@@ -6,6 +6,53 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-19 voxcpm2-tts: TSLM per-step ggml graph + backend-resident KV (PLAN #96 partial)
+
+**Problem.** TSLM step (28 MiniCPM-4 layers, T=1) was the #2 AR-step
+hotspot after CFM. The legacy path called `tslm_layer_step` 28×, each
+of which did 7 `matmul_mv` calls (Q/K/V/O + gate/up/down), and inside
+each `matmul_mv` built/destroyed its own tiny cgraph — ~196 graph
+builds per AR-step TSLM call.
+
+**Fix.** Added `build_tslm_step_graph` (one 28-layer cgraph using
+`core_attn::kv_self_attn` with NEOX RoPE + LongRoPE freq_factors +
+GQA expansion + flash-attn + `core_ffn::swiglu`) and
+`tslm_step_graph` wrapper. The graph reads/writes a backend-resident
+KV tensor (qwen3 layout: `(head_dim, max_ctx, n_kv, n_layers)`) via
+`init_tslm_kv_backend` + `ggml_backend_alloc_buffer`. One-time
+`sync_tslm_kv_cpu_to_backend` runs once per synthesis after the
+legacy prefill has populated `vox_kv_cache`, transposing pos↔kvh
+into the qwen3 layout. AR loop routes through the graph under the
+same `VOXCPM2_USE_GRAPH=1` gate as LocDiT.
+
+**Validation.** Diff harness `voxcpm2-q4_k.gguf` zero-shot ref: 14
+pass / 0 fail / 3 skip — no regression vs LocDiT-only. "Hello
+world" zero-shot synth still ASR-roundtrips correctly.
+
+**Bench** (M1 CPU, OMP=8, "Hi" zero-shot, 4 AR steps, contended
+system):
+
+| Path                  | AR loop (ms) | cfm/step | tslm/step |
+| --------------------- | -----------: | -------: | --------: |
+| legacy                | 24 706       | 5 110    |       158 |
+| graph (LocDiT + TSLM) | 18 731       | 1 700    |     1 781 |
+
+Net: AR loop -24 %, total -12 %. **TSLM step is slower per call on
+CPU** — the 28-layer per-call graph build + `gallocr_alloc_graph`
+overhead exceeds the per-matmul-overhead savings for T=1. LocDiT
+graph wins enough to make the combined path net-positive. Both
+graphs together are the prerequisite for moving weights to the
+Metal backend (where GPU compute will dwarf the build overhead).
+
+**Next:** graph-cache the TSLM step across AR iterations (qwen3
+LK_BUCKET pattern with `fixed_kv_len` + `kv_indices=positions` so
+topology is `n_past`-invariant). Estimated 4-10 × on CPU
+`tslm_step` cost — flips it from regression to net win on CPU
+alone.
+
+---
+
+
 ## 2026-05-19 voxcpm2-tts: LocDiT per-call ggml graph (PLAN #96 partial)
 
 **Problem.** `cfm_euler_solve` was the AR-step hotspot at 63.7% of

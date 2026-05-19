@@ -212,7 +212,7 @@ share enough that landing one substantially de-risks the other.
 
 ---
 
-## 96. voxcpm2-tts perf — switch to per-step ggml graph (Metal-ready) — partial
+## 96. voxcpm2-tts perf — switch to per-step ggml graph (Metal-ready) — partial (LocDiT + TSLM done)
 
 ### Where we are (2026-05-19)
 
@@ -322,17 +322,50 @@ not the per-matmul work; caching the graph across CFM Euler iterations
 moving weights off `backend_cpu`, blocked on the matching TSLM-step
 graph (otherwise the legacy CPU paths SIGSEGV reading Metal memory).
 
+### Progress (2026-05-19 follow-up)
+
+TSLM step graph done. `build_tslm_step_graph` + `tslm_step_graph` use
+`core_attn::kv_self_attn` (NEOX RoPE w/ LongRoPE freq_factors, GQA
+expansion, flash-attn) with a backend-resident KV tensor.
+`init_tslm_kv_backend` + `sync_tslm_kv_cpu_to_backend` transpose the
+legacy `vox_kv_cache` (pos-major) into the qwen3 layout (kvh-major)
+once per synthesis before the AR loop's first graph step. AR loop
+routes through the graph under the same `VOXCPM2_USE_GRAPH=1` gate
+as LocDiT.
+
+Diff harness on `voxcpm2-q4_k.gguf` zero-shot ref: still 14 pass /
+0 fail / 3 skip; no regression. Smoke "Hello world" zero-shot
+ASR-roundtrips correctly.
+
+Bench (M1 CPU, OMP=8, "Hi" zero-shot, 4 AR steps, contended):
+
+| Path                  | AR loop (ms) | cfm/step | tslm/step |
+| --------------------- | -----------: | -------: | --------: |
+| legacy                | 24 706       | 5 110    |       158 |
+| graph (LocDiT + TSLM) | 18 731       | 1 700    |     1 781 |
+
+Net: AR -24%, total -12%. LocDiT graph wins by ~14 s; TSLM graph
+loses ~6.5 s. **TSLM step is slower in absolute terms on CPU** —
+the 28-layer per-call graph build + `gallocr_alloc_graph` overhead
+exceeds the matmul-overhead savings for T=1. Both graphs together
+are still net positive overall, and the per-step graph is the
+prerequisite for moving weights to Metal (where the GPU compute
+savings will dominate the build overhead).
+
 ### Still TODO
 
-- `build_tslm_step_graph` (28L MiniCPM-4 step with backend-resident KV
-  cache) — same shape as `qwen3_tts.cpp build_graph_talker_kv`.
-- KV cache sync from `vox_kv_cache` (CPU `std::vector<float>`) into a
-  backend tensor before the AR loop's first graph step.
-- Graph-cache the LocDiT cgraph across CFM Euler iterations (build /
-  gallocr-alloc once per init, just `tensor_set` + `compute` per call).
-- Once both step graphs are on the backend, switch default to
-  `VOXCPM2_USE_GRAPH=1`, load weights on `c->backend` (Metal-capable),
-  and drop the legacy `matmul_mv_ggml` path entirely.
+- Graph-cache the TSLM step graph across AR iterations (qwen3
+  bucketed pattern with `fixed_kv_len` + `kv_indices=positions` so
+  the graph topology is invariant across `n_past`). Estimated 4-10×
+  on the CPU `tslm_step` cost — should swing the metric from
+  "regression vs legacy" to "net win on CPU".
+- Graph-cache the LocDiT cgraph across CFM Euler iterations (same
+  pattern, simpler since LocDiT has no KV-cache state).
+- Load weights on `c->backend` (Metal-capable). Blocked on dropping
+  the legacy CPU paths entirely — once both per-step graphs are on
+  the backend, `matmul_mv_ggml` is dead.
+- Once green on Metal, swap default to `VOXCPM2_USE_GRAPH=1` and
+  remove the legacy path + this env gate.
 
 ---
 

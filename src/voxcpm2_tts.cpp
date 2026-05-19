@@ -752,6 +752,209 @@ static void ralm_layer_step(voxcpm2_context* ctx, int layer, float* hidden, ggml
 }
 
 // ---------------------------------------------------------------------------
+// VOXCPM2_USE_GRAPH=1 TSLM step path — backend-resident KV cache + a single
+// 28-layer cgraph per AR-step TSLM call.
+//
+// Layout: backend tensor ne = (head_dim, max_ctx, n_kv, n_layers) — the
+// qwen3-style layout that core_attn::kv_self_attn expects. The legacy
+// vox_kv_cache stores (hd, n_kv, max_ctx, n_layers) on the host (different
+// pos↔kvh order), so `sync_tslm_kv_cpu_to_backend` walks both layouts and
+// transposes pos/kvh while copying. Called once per synthesis, after TSLM
+// prefill has populated the legacy cache and before the first AR-step
+// graph call.
+// ---------------------------------------------------------------------------
+
+static bool init_tslm_kv_backend(voxcpm2_context* ctx) {
+    if (ctx->tslm_kv_k) {
+        return true;
+    }
+    const vox_hparams& hp = ctx->hp;
+    const int hd = (int)hp.tslm_head_dim;
+    const int n_kv = (int)hp.tslm_n_kv;
+    const int n_lay = (int)hp.tslm_n_layers;
+    const int max_ctx = ctx->tslm_kv.max_ctx > 0 ? ctx->tslm_kv.max_ctx : 4096;
+
+    ggml_init_params kp = {ggml_tensor_overhead() * 4 + 1024, nullptr, /*no_alloc=*/true};
+    ctx->tslm_kv_ctx = ggml_init(kp);
+    if (!ctx->tslm_kv_ctx) {
+        return false;
+    }
+    ctx->tslm_kv_k = ggml_new_tensor_4d(ctx->tslm_kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_kv, n_lay);
+    ctx->tslm_kv_v = ggml_new_tensor_4d(ctx->tslm_kv_ctx, GGML_TYPE_F32, hd, max_ctx, n_kv, n_lay);
+    ggml_set_name(ctx->tslm_kv_k, "tslm_kv_k");
+    ggml_set_name(ctx->tslm_kv_v, "tslm_kv_v");
+    const size_t kb = ggml_nbytes(ctx->tslm_kv_k);
+    const size_t vb = ggml_nbytes(ctx->tslm_kv_v);
+    ctx->tslm_kv_buf = ggml_backend_alloc_buffer(ctx->backend, kb + vb);
+    if (!ctx->tslm_kv_buf) {
+        fprintf(stderr, "voxcpm2: failed to alloc tslm kv backend buffer (%zu bytes)\n", kb + vb);
+        return false;
+    }
+    char* base = (char*)ggml_backend_buffer_get_base(ctx->tslm_kv_buf);
+    ggml_backend_tensor_alloc(ctx->tslm_kv_buf, ctx->tslm_kv_k, base);
+    ggml_backend_tensor_alloc(ctx->tslm_kv_buf, ctx->tslm_kv_v, base + kb);
+    ggml_backend_buffer_clear(ctx->tslm_kv_buf, 0);
+    ctx->tslm_kv_max_ctx = max_ctx;
+    return true;
+}
+
+// Copy legacy CPU KV cache (vox_kv_cache, pos-major) into the backend
+// tensor (kvh-major). Writes one (max_ctx × hd) layer slice per call to
+// ggml_backend_tensor_set, transposing pos↔kvh into a small staging buffer.
+static void sync_tslm_kv_cpu_to_backend(voxcpm2_context* ctx) {
+    const vox_hparams& hp = ctx->hp;
+    const int hd = (int)hp.tslm_head_dim;
+    const int n_kv = (int)hp.tslm_n_kv;
+    const int n_lay = (int)hp.tslm_n_layers;
+    const int n_past = ctx->tslm_kv.n_past;
+    const int max_ctx = ctx->tslm_kv_max_ctx;
+    if (n_past <= 0 || !ctx->tslm_kv_k || !ctx->tslm_kv_v) {
+        return;
+    }
+    std::vector<float> stage((size_t)max_ctx * n_kv * hd, 0.0f);
+    const size_t layer_bytes = (size_t)max_ctx * n_kv * hd * sizeof(float);
+    for (int layer = 0; layer < n_lay; layer++) {
+        // K
+        std::fill(stage.begin(), stage.end(), 0.0f);
+        for (int kvh = 0; kvh < n_kv; kvh++) {
+            for (int pos = 0; pos < n_past; pos++) {
+                float* dst = stage.data() + (size_t)(kvh * max_ctx + pos) * hd;
+                const float* src = ctx->tslm_kv.k_cache[layer].data() + (size_t)pos * n_kv * hd + (size_t)kvh * hd;
+                std::memcpy(dst, src, (size_t)hd * sizeof(float));
+            }
+        }
+        ggml_backend_tensor_set(ctx->tslm_kv_k, stage.data(), (size_t)layer * layer_bytes, layer_bytes);
+        // V
+        std::fill(stage.begin(), stage.end(), 0.0f);
+        for (int kvh = 0; kvh < n_kv; kvh++) {
+            for (int pos = 0; pos < n_past; pos++) {
+                float* dst = stage.data() + (size_t)(kvh * max_ctx + pos) * hd;
+                const float* src = ctx->tslm_kv.v_cache[layer].data() + (size_t)pos * n_kv * hd + (size_t)kvh * hd;
+                std::memcpy(dst, src, (size_t)hd * sizeof(float));
+            }
+        }
+        ggml_backend_tensor_set(ctx->tslm_kv_v, stage.data(), (size_t)layer * layer_bytes, layer_bytes);
+    }
+}
+
+// Build the per-step TSLM cgraph (all 28 layers, T=1). Reuses
+// core_attn::kv_self_attn (NEOX RoPE with LongRoPE freq_factors, GQA
+// expansion, flash-attn) and core_ffn::swiglu. The graph writes the new
+// (K, V) into ctx->tslm_kv_{k,v} at position n_past and reads the full
+// [0, n_past+1) history. The final RMSNorm + output_norm scale are
+// folded into the graph so the caller gets the already-normed hidden
+// state — same value that the legacy path produces after its post-loop
+// rms_norm_cpu(... tslm_output_norm ...).
+static ggml_cgraph* build_tslm_step_graph(voxcpm2_context* ctx, int n_past) {
+    const vox_hparams& hp = ctx->hp;
+    const vox_weights& W = ctx->weights;
+    const int d = (int)hp.tslm_d_model;
+    const int n_q = (int)hp.tslm_n_heads;
+    const int n_kv = (int)hp.tslm_n_kv;
+    const int hd = (int)hp.tslm_head_dim;
+    const int n_kv_grp = n_q / n_kv;
+    const float eps = hp.rms_norm_eps;
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+    const int T = 1;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), /*no_alloc=*/true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 4096, false);
+
+    ggml_tensor* hidden_in = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+    ggml_set_name(hidden_in, "hidden_in");
+    ggml_set_input(hidden_in);
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    const core_attn::KvSelfAttnParams kvp = {
+        /*n_heads*/ n_q,
+        /*n_kv_heads*/ n_kv,
+        /*head_dim*/ hd,
+        /*n_kv_grp*/ n_kv_grp,
+        /*n_ctx_orig*/ (int)hp.tslm_max_pos,
+        /*rope_theta*/ hp.tslm_rope_theta,
+        /*rope_beta_fast*/ 0.0f,
+        /*rope_beta_slow*/ 0.0f,
+        /*attn_scale*/ attn_scale,
+        /*qk_norm_eps*/ 0.0f,
+        /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
+        /*rope_type*/ GGML_ROPE_TYPE_NEOX,
+        /*n_rot*/ 0,
+        /*v_rms_norm*/ false,
+        /*rope_freq_factors*/ W.tslm_rope_short,
+    };
+
+    ggml_tensor* cur = hidden_in;
+    for (uint32_t il = 0; il < hp.tslm_n_layers; il++) {
+        const vox_lm_layer& L = W.tslm_layers[il];
+        ggml_tensor* residual = cur;
+
+        // Attention block (RMSNorm × scale → kv_self_attn → residual).
+        ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
+        x = ggml_mul(ctx0, x, L.attn_norm_w);
+
+        ggml_tensor* attn =
+            core_attn::kv_self_attn(ctx0, gf, x, L.attn_q_w, L.attn_k_w, L.attn_v_w, L.attn_o_w,
+                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
+                                    /*causal_mask*/ nullptr, // T=1 — single new token attends to all history
+                                    ctx->tslm_kv_k, ctx->tslm_kv_v, (int)il, n_past, kvp);
+        cur = ggml_add(ctx0, residual, attn);
+
+        // FFN block (RMSNorm × scale → SwiGLU → residual).
+        residual = cur;
+        x = ggml_rms_norm(ctx0, cur, eps);
+        x = ggml_mul(ctx0, x, L.ffn_norm_w);
+        ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, L.ffn_gate_w, L.ffn_up_w, L.ffn_down_w);
+        cur = ggml_add(ctx0, residual, mlp);
+    }
+
+    // Final RMSNorm × tslm_output_norm. AR loop's legacy path applies this
+    // after the per-layer loop; folding it into the graph keeps wrapper
+    // arithmetic out of the hot path.
+    cur = ggml_rms_norm(ctx0, cur, eps);
+    cur = ggml_mul(ctx0, cur, W.tslm_output_norm);
+    ggml_set_name(cur, "hidden_out");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+
+    ggml_free(ctx0);
+    return gf;
+}
+
+// Run one TSLM step through the graph. Caller must have ensured
+// init_tslm_kv_backend + sync_tslm_kv_cpu_to_backend completed before the
+// first invocation. Returns the normed hidden state [d_model].
+static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hidden_in, int pos) {
+    const int d = (int)ctx->hp.tslm_d_model;
+    int32_t pos_i = pos;
+
+    ggml_cgraph* gf = build_tslm_step_graph(ctx, pos);
+    if (!ggml_gallocr_alloc_graph(ctx->galloc, gf)) {
+        fprintf(stderr, "voxcpm2: tslm_step gallocr alloc failed\n");
+        return std::vector<float>(d, 0.0f);
+    }
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "hidden_in"), hidden_in, 0, (size_t)d * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &pos_i, 0, sizeof(int32_t));
+
+    if (ggml_backend_is_cpu(ctx->backend)) {
+        ggml_backend_cpu_set_n_threads(ctx->backend, g_cpu_n_threads);
+    }
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "voxcpm2: tslm_step graph compute failed\n");
+        return std::vector<float>(d, 0.0f);
+    }
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "hidden_out");
+    std::vector<float> result(d);
+    ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // TSLM prefill — run all text tokens through, filling KV cache
 // Returns last hidden state [d_model] (pre-output-norm)
 // ---------------------------------------------------------------------------
@@ -3274,6 +3477,16 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     double sum_cfm = 0, sum_locenc = 0, sum_enc_to_lm = 0;
     double sum_tslm = 0, sum_fsq = 0, sum_fusion = 0, sum_ralm = 0, sum_stop = 0;
 
+    // VOXCPM2_USE_GRAPH=1: replace the 28-call tslm_layer_step loop with one
+    // backend cgraph per AR step. Backend KV is one-time-synced from the
+    // legacy vox_kv_cache (built by the legacy prefill path above) on first
+    // use of the graph; subsequent steps write/read the backend KV directly
+    // through the graph (no further CPU↔backend traffic). Resetting
+    // tslm_kv_synced here ensures every synthesis call re-syncs from the
+    // fresh prefill cache.
+    const bool use_graph_tslm = vox_env_bool("VOXCPM2_USE_GRAPH");
+    ctx->tslm_kv_synced = false;
+
     // Python AR loop order (from voxcpm2.py _inference, lines 1060-1108):
     //   1. Build mu → CFM solve → LocEnc → enc_to_lm → collect patch
     //   2. Stop check (on PREVIOUS lm_hidden, BEFORE TSLM step)
@@ -3346,16 +3559,27 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         tb = bench ? vox_now_ms() : 0;
         {
             int tslm_pos = ctx->tslm_kv.n_past;
-            std::vector<float> h = enc_lm;
-            for (int l = 0; l < (int)ctx->hp.tslm_n_layers; l++) {
-                tslm_layer_step(ctx, l, h.data(), tslm_pos, cpu_be);
+            if (use_graph_tslm) {
+                if (!ctx->tslm_kv_synced) {
+                    if (!init_tslm_kv_backend(ctx)) {
+                        fprintf(stderr, "voxcpm2: tslm kv backend init failed; falling back to legacy step\n");
+                    } else {
+                        sync_tslm_kv_cpu_to_backend(ctx);
+                        ctx->tslm_kv_synced = true;
+                    }
+                }
+                tslm_hidden = tslm_step_graph(ctx, enc_lm.data(), tslm_pos);
+            } else {
+                std::vector<float> h = enc_lm;
+                for (int l = 0; l < (int)ctx->hp.tslm_n_layers; l++) {
+                    tslm_layer_step(ctx, l, h.data(), tslm_pos, cpu_be);
+                }
+                std::vector<float> normed(d_lm);
+                rms_norm_cpu(h.data(), tensor_data_f32(ctx->weights.tslm_output_norm), normed.data(), d_lm,
+                             ctx->hp.rms_norm_eps);
+                tslm_hidden = normed;
             }
             ctx->tslm_kv.n_past++;
-
-            std::vector<float> normed(d_lm);
-            rms_norm_cpu(h.data(), tensor_data_f32(ctx->weights.tslm_output_norm), normed.data(), d_lm,
-                         ctx->hp.rms_norm_eps);
-            tslm_hidden = normed;
         }
         if (bench)
             sum_tslm += vox_now_ms() - tb;
