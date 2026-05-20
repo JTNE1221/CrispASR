@@ -5187,3 +5187,207 @@ build may report `Built target X` without actually relinking the final
 executable — the `.a` timestamp doesn't trigger the exe's link step. The
 binary stays stale. Workaround: `rm build/bin/crispasr` then rebuild, or
 touch the exe's own `.o` dependency.
+
+---
+
+## voxcpm2 perf — per-step ggml graphs, Metal, SIMD layouts (May 2026)
+
+The PLAN #96 push took voxcpm2-tts "Hello world" zero-shot from **~49 s
+to ~5–7 s** wall on M1 (≈8 commits across one session). Most of the
+lessons below apply to any new TTS / ASR backend that mixes legacy
+CPU helpers with ggml graphs.
+
+### Per-call ggml cgraph beats per-matmul tiny graphs by 2–3× even on CPU
+
+The original voxcpm2 LocDiT did ~30 `matmul_mv_ggml` calls per
+invocation, each of which ran `ggml_init` + `ggml_new_graph` +
+`ggml_backend_graph_compute` + `ggml_free`. With CFM running LocDiT
+19× per AR step (CFG × 10 timesteps − the zero-star skip), that's
+~570 graph builds per AR step *just for CFM*.
+
+Replacing them with one cgraph per `locdit_forward` call — 12 layers
+folded into a single graph with named `ggml_set_input` tensors —
+gave 2.3× on CPU (CFM/step 2398 → 1035 ms on M1 OMP=8) before any
+Metal involvement. The win is amortising graph-build overhead, not
+the matmul work itself.
+
+Pattern (mirror `qwen3_tts.cpp build_graph_talker_kv` or
+`chatterbox.cpp build_graph_t3_kv`):
+
+  - Add `backend`, `backend_cpu`, `compute_meta` (vector<uint8_t>),
+    `galloc` (ggml_gallocr_t) to the context.
+  - Pre-allocate `compute_meta` = `ggml_tensor_overhead() * N +
+    ggml_graph_overhead_custom(N, false)` where `N` is the
+    worst-case node count (4096 was generous for voxcpm2).
+  - `build_<thing>_graph(ctx)` runs `ggml_init` with
+    `no_alloc=true` over `compute_meta`, builds the topology with
+    `ggml_set_input` / `ggml_set_output` named tensors, then
+    `ggml_free(ctx0)`.
+  - Per call: `ggml_gallocr_alloc_graph` + per-input
+    `ggml_backend_tensor_set` + `ggml_backend_graph_compute` +
+    `ggml_backend_tensor_get`.
+
+### Cache the graph itself for another 2× on top of that
+
+The above still rebuilds the cgraph topology on every call.
+`ggml_gallocr_reserve` against a long-lived graph in a dedicated
+per-cache arena (`std::vector<uint8_t>` + `ggml_context*`) lets all
+subsequent calls skip the rebuild + the gallocr planner walk. For
+voxcpm2 this took CFM/step from ~1035 ms (uncached) to ~410 ms
+(cached) — meeting the plan's ~400 ms CPU target.
+
+Works directly for any graph with constant topology (LocDiT,
+LocEnc — bidirectional encoders). For graphs with `n_past`-varying
+shape (TSLM step), use the qwen3 bucketed pattern below.
+
+### Multi-bucket Lk + runtime `kv_indices` makes KV-cache step graphs cacheable
+
+qwen3_tts's `talker_buckets` pattern: pin `Lk = bucket_size` in
+`core_attn::kv_self_attn`'s `fixed_kv_len` parameter and pass
+`positions` as the `kv_indices` tensor so the K/V scatter goes
+through `ggml_set_rows` (runtime-indexed) instead of a baked
+static offset. Topology becomes `n_past`-invariant. Layer count,
+KV-cache shape, and bucket Lk are the only things that affect
+the graph structure — and Lk is fixed per bucket.
+
+For voxcpm2 TSLM we ship 5 buckets {128, 256, 512, 1024, 2048};
+`tslm_pick_bucket(needed_lk)` picks the smallest fitting one,
+each is built lazily on first hit, longer prefills fall through
+to the dynamic per-call build. Short prompts pay the cheapest
+(Lk=128) attention overhead — important because
+`ggml_flash_attn_ext` computes `Q·K^T` over the full bucket Lk
+regardless of the `-inf`-masked tail, so wider buckets are
+genuinely more expensive even with the mask.
+
+### Apple Silicon Metal "shared" buffers keep `tensor->data` CPU-readable
+
+`ggml_backend_init_best()` on M1 returns a Metal backend whose
+weight buffers default to `is_shared = true` (unified memory).
+This means `tensor->data` is a CPU-dereferenceable pointer to the
+same physical pages Metal sees — no copy, no SIGSEGV when legacy
+CPU helpers (`matmul_mv_ggml`, `rms_norm_cpu`, `tensor_data_f32`,
+…) dereference it directly.
+
+Concretely: switching `vox_load_weights` to load onto
+`c->backend` (Metal) on `params.use_gpu=true` *didn't break* any
+of the remaining legacy CPU paths (TSLM/RALM prefill, LocEnc,
+VAE encode/decode, FSQ, stop predictor) on Apple Silicon. The
+graph paths automatically got Metal compute via
+`ggml_backend_graph_compute(c->backend, gf)`.
+
+This trick is M1-specific. On discrete GPUs (CUDA, ROCm) or
+non-shared Metal modes (very rare on M-series), `tensor->data`
+would be device-only and dereferencing from CPU would SIGSEGV —
+you'd need either per-weight CPU mirrors (like qwen3_tts's
+`CpuEmbdCache`) or a full graph-only path.
+
+The follow-on: the same Metal weights also speed up the legacy
+helpers because Q4_K dequant reads land in lower-latency unified
+memory than the previous CPU allocations. voxcpm2's TSLM prefill
+went 5 000 ms → 80 ms (~60×) just from this — the matmul code
+itself was unchanged.
+
+### `GGML_PREC_F32` on `ggml_flash_attn_ext` is refused by Metal's `supports_op`
+
+The chatterbox T3 patch (`ggml-metal-device.m`) explicitly returns
+`false` from `supports_op` for any `GGML_OP_FLASH_ATTN_EXT` tagged
+`GGML_PREC_F32`. The intent is to route those ops to the CPU
+backend via sched for bit-identical CPU/GPU output (chatterbox
+needs that to debug #83).
+
+But: if you call `ggml_backend_graph_compute(metal, gf)` directly
+(no sched), the unsupported op aborts the entire compute. Symptom:
+`ggml_metal_op_encode_impl: error: unsupported op 'FLASH_ATTN_EXT'`
+followed by ggml_abort.
+
+For voxcpm2 the fix was just to *not* set PREC_F32 on LocDiT's
+bidirectional flash-attn — the per-stage cosine bar (`cfm_step0_result
+≥ 0.93`) tolerates Metal's F16 simdgroup drift. Pre-existing
+`core_attn::kv_self_attn` doesn't set PREC_F32 internally, so TSLM
+step worked out of the box.
+
+If you do need bit-identical CPU/GPU (e.g. for debug bisects),
+switch from direct `ggml_backend_graph_compute` to
+`ggml_backend_sched_graph_compute` against a `[Metal, CPU]` sched —
+that's what qwen3_tts and chatterbox do, and it auto-routes
+PREC_F32 ops to CPU.
+
+### `ggml_flash_attn_ext` head_dim allowlist
+
+Metal's flash-attn supports `head_dim ∈ {32, 40, 48, 64, 72, 80,
+96, 112, 128, 192, 256, 320, 512, 576}`. Anything else falls back
+to CPU via sched or aborts under direct compute. Picking head_dim
+during a port: stick to the allowlist or expect to route attn to
+CPU.
+
+### OMP parallelism on conv loops needs gather-form rewrites
+
+The original `causal_transposed_conv1d` did scatter-add into
+shared output — race-prone, so the outer loop couldn't be OMP'd.
+Rewriting in gather form (for each output position, walk valid
+kernel taps via `k0 = (ot + trim) mod stride` step `stride`) made
+the `(out_ch, ot)` outer pair write-disjoint and parallelisable.
+
+Similar story for `snake1d` and per-block SR conditioning —
+outer loop over channels is write-disjoint, OMP-parallel.
+
+But OMP alone isn't enough when the inner loops have strided
+memory access (see next).
+
+### Strided ic loops kill auto-vectorisation; transpose to contiguous wins 4–8×
+
+VAE conv1d inner loops read `x[ic*T_in + it]` (stride `T_in`) and
+`weight[ic*out_ch*ksize + …]` (stride `out_ch * ksize`). Both
+strided in the inner axis — the compiler can't emit NEON vector
+loads. Per-call work was effectively scalar even with OMP.
+
+Fix: transpose both into contiguous-`ic` layout before the inner
+loop:
+
+  - weight: `[in_ch, out_ch, ksize] → [ksize, out_ch, in_ch_inner]`
+  - x: `[in_ch, T_in] → [T_in, in_ch_inner]`
+
+The inner `ic` dot product becomes a contiguous load on both
+operands — clang/gcc auto-vectorises into NEON `fmla` instructions.
+
+The transposes are `O(in_ch × (out_ch × ksize + T_in))` per call,
+small vs the unlocked dot work. For voxcpm2 block 0 transposed
+conv: 2 957 ms → 615 ms (4.8×) on M1 OMP=8. Total VAE decode
+8 772 → 3 875 ms (2.3×).
+
+Gate the transpose path on `in_per_grp > 1 && ksize > 1` —
+depthwise (`in_per_grp == 1`) and 1×1 convs (`ksize == 1`)
+get no SIMD lift and the transpose is pure overhead.
+
+### Build instrumentation BEFORE optimising the wrong thing
+
+Per-block VAE decode timings under `VOXCPM2_BENCH=1` revealed
+that **72 % of VAE time was in `causal_transposed_conv1d` upsamples**,
+not the residual units I'd been about to spend an hour rewriting.
+Before then I'd assumed snake1d was the hotspot — wrong.
+
+The instrumentation cost: ~10 lines of `vox_now_ms()` deltas +
+one `fprintf` per block, gated on the existing
+`VOXCPM2_BENCH` env. Always pays for itself.
+
+### `ggml_concat` along time axis lets you build prefix sequences cleanly
+
+For both the LocDiT graph (mu_toks + time + cond + x = T=11) and
+the LocEnc graph (CLS + patch_frames = T=5), the input sequence
+is built by concatenating disjoint pieces with `ggml_concat(ctx,
+a, b, dim=1)`. This is much cleaner than allocating a
+pre-sized `[d, T]` tensor and writing slices into it — and on
+Metal it's just a single `kernel_concat` dispatch.
+
+### Don't over-engineer the first cut — ship working, then optimise
+
+The session's biggest unit wins came from the simplest changes:
+
+  1. LocDiT graph (1 day): 2.3× CPU CFM.
+  2. Cache the graph (3 hours): 1.7× on top.
+  3. Metal-load weights (1 hour): 60× on TSLM prefill.
+
+Each commit was small, single-purpose, validated by the diff
+harness before the next one started. If we'd tried to land
+"VAE graph + LocDiT graph + Metal + caching + buckets" in one
+go we'd still be debugging.
