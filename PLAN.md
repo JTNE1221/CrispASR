@@ -142,6 +142,123 @@ None of these affect correctness — they're pure throughput pickings.
 
 ---
 
+## CosyVoice3-0.5B-2512 TTS port — Phase 1 landed, runtime is open
+
+Tier 2 of the FunAudioLLM family work (after funasr + sensevoice).
+**Apache-2.0** multilingual TTS (9 langs + 18+ Chinese dialects),
+zero-shot voice cloning, 24 kHz output, 278K downloads/month upstream.
+
+### Architecture — three sub-models
+
+```
+text (Qwen2 BPE, vocab=151936)
+  → CosyVoice3LM: Qwen2-0.5B body (24L, GQA 14/2, q/k/v biases,
+                  NEOX RoPE θ=1e6, RMSNorm 1e-6) + speech_embedding
+                  (6761, 896) + llm_decoder (6761, 896)
+  → AR-decode speech tokens with RAS (top_p=0.8, top_k=25, win_size=10,
+                                       tau_r=0.1 — uniform-random fallback
+                                       when last 10 tokens are too
+                                       repetitive)              → (T_tok,) ∈ [0, 6561)
+
+  → input_embedding (6561, 80)
+  → pre_lookahead causal conv (k=4 then k=3, 3-frame future lookahead)
+  → concat [pre_la, spk_affine, ...]                            → (T_tok, 320)
+  → CausalConditionalCFM (Euler ODE, 10 steps, cosine t-schedule,
+                          sigma_min=1e-6, inference_cfg_rate=0.7):
+      22-block DiT estimator @ dim=1024, heads=16, head_dim=64,
+      ff_mult=2 with AdaLN-Zero per-block modulation projected
+      from sinusoidal time-embed via 2-layer MLP. RoPE inside MHA.
+      conv_pos_embed (2× conv1d-31) on the input.                → mel (T_mel=2*T_tok, 80)
+
+  → CausalHiFTGenerator (HiFi-GAN-iSTFT hybrid):
+      conv_pre 80→512 (k=5) → 3 upsample stages (rates [8, 5, 3],
+      kernels [16, 11, 7]) with Snake activations (learnable α)
+      + NSF source modulator (CausalConvRNNF0Predictor → SineGen
+      9-harmonics → source_downs/resblocks chain) → conv_post 64→18
+      → iSTFT (n_fft=16, hop=4)                                  → 24 kHz PCM
+```
+
+### Reuse map (proven by repo sweep)
+
+Almost every primitive is already in tree:
+
+- **Qwen2 LLM forward**: `core_attn::kv_self_attn` already accepts q/k/v
+  biases. `src/mimo_asr.cpp` is the closest existing consumer.
+- **CFM Euler solver w/ cosine schedule + CFG**: `src/chatterbox_s3gen.cpp:1690`
+  `cfm_euler_solve` — byte-equivalent reuse, just plug our DiT denoiser
+  in as the forward function.
+- **Sinusoidal time embedding**: `src/chatterbox_s3gen.cpp:1367`
+  `sinusoidal_embedding` (scale=1000).
+- **Causal 1D conv with left-pad**: `src/chatterbox_s3gen.cpp:1395`
+  `causal_conv1d`.
+- **F0 predictor** (5× Conv1d → classifier): `src/chatterbox_s3gen.cpp:1925`
+  `run_f0_predictor` — exact match to CosyVoice3's `CausalConvRNNF0Predictor`
+  (misleading name, no RNN).
+- **NSF SineGen** (9 harmonics → modulated source → STFT):
+  `src/chatterbox_s3gen.cpp:2413-2500`.
+- **iSTFT n_fft=16 hop=4**: `src/chatterbox_s3gen.cpp:77-162` —
+  exact-match parameters.
+- **weight_norm parametrisation resolver** (`g·v/‖v‖`):
+  `src/voxcpm2_tts.cpp:1395` `wn_reconstruct`. **Lifted into the
+  converter so the runtime never sees parametrised tensors.**
+- **CAMPPlus speaker encoder**: `src/chatterbox_campplus.{h,cpp}` —
+  100% reusable (192-dim output, CPU-only forward).
+- **S3Tokenizer V2 → V3** (for arbitrary-WAV cloning):
+  `src/chatterbox_s3tok.{h,cpp}`. V3 may have format changes around
+  the FSQ codebook; defer to Phase 5.
+- **GPT-2 BPE tokenizer**: `src/core/bpe.h` (Qwen2/Qwen3 share family).
+- **DiT block scaffolding**: `src/voxcpm2_tts.cpp` LocDiT — note
+  voxcpm2 uses pre-norm RMSNorm, CosyVoice3 uses AdaLN-Zero (~150 LOC delta).
+
+### Genuinely new code (small, well-bounded)
+
+1. AdaLN-Zero modulation (~150 LOC) — γ/β/gate × 2 from time-embed.
+2. Pre-lookahead conv (~30 LOC) — causal conv with asymmetric future padding.
+3. Snake activation w/ per-channel α (~30 LOC).
+4. RAS (Repetition-Aware Sampling) (~50 LOC).
+
+Total new infrastructure: **~260 LOC**. Plus ~1500 LOC glue +
+~500 LOC converter/dumper. Realistic timeline: **~1 week of focused
+work in 4 phases**.
+
+### Phase status (2026-05-20)
+
+- **Phase 1 — recon + converter — LANDED (this commit).**
+  `models/convert-cosyvoice3-to-gguf.py` walks the three .pt files
+  (`llm.pt` 2.0 GB → `cosyvoice3-llm-f16.gguf` 1.29 GB; `flow.pt`
+  1.3 GB → `cosyvoice3-flow-f16.gguf` 0.67 GB; `hift.pt` 83 MB
+  → `cosyvoice3-hift-f16.gguf` 42 MB) and materialises the
+  `weight_norm` parametrisations so the runtime side stays simple.
+  All three GGUFs are at
+  `/Volumes/backups/ai/crispasr-models/cosyvoice3-0.5b-2512/`.
+- **Phase 2 — LLM runtime (Qwen2 + speech heads + RAS sampling)**.
+  Open. Lift mimo_asr's Qwen2 step graph; add the speech_lm_head
+  + the 6761-vocab speech_embedding lookup; add RAS sampler.
+  Diff-gate: byte-identical speech-token sequence against upstream
+  given fixed text + temperature=0.
+- **Phase 3 — DiT-based flow-matching estimator + CausalConditionalCFM**.
+  Open. New AdaLN-Zero block (~150 LOC). Wire to
+  `chatterbox_s3gen::cfm_euler_solve`. Diff-gate: mel cos ≥ 0.99
+  after 10-step Euler ODE.
+- **Phase 4 — CausalHiFTGenerator + F0 predictor + Snake +
+  iSTFT**. Open. Mostly chatterbox_s3gen helpers + Snake +
+  causal-mode upsample. Diff-gate: waveform cos ≥ 0.95 (vocoders
+  are sensitive; lower bar than mel).
+- **Phase 5 — CLI adapter + model registry + HF upload + docs**.
+  Open. Phase-2-then-3-then-4 then this.
+- **Phase 6 (deferred)** — S3Tokenizer V3 for arbitrary-WAV cloning.
+  MVP uses baked-in voice references.
+
+### Voice cloning strategy
+
+MVP: precompute speech tokens for a small set of baked-in voices
+(`zero_shot_prompt.wav` from upstream's `asset/` + a handful of others),
+ship them as a GGUF blob keyed by voice name. Runtime selects via
+`--voice <name>`. Arbitrary-WAV cloning requires the S3Tokenizer V3
+port (Phase 6).
+
+---
+
 ## 51c. MiMo-V2.5-ASR F16 step decode — open
 
 Base runtime + Q4_K + fused-QKV layout shipped → HISTORY §56 + §64.
