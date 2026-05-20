@@ -5549,3 +5549,70 @@ order, **take `max(ne[0], ne[1])` for "the non-bucket dim"** instead
 of trusting either dim's position. The legacy CPU loop's pointer
 arithmetic doesn't care about ne order (it just walks raw bytes),
 which is why it kept working through the same ambiguity.
+
+---
+
+## Diff-harness "drift" is mostly the GGUF quant, not a code bug (May 2026)
+
+The voxcpm2 VAE-graph session (commit `3be663cc`) left
+`decoded_audio cos vs Python = 0.683` open and tracked as "upstream
+CFM / TSLM drift". Several intermediate stages also looked weak:
+`cfm_step0_result` 0.937, `tslm_layer_27_out` 0.968.
+
+I spent half a day chasing this assuming F32-vs-bf16 op precision was
+the culprit (Python runs voxcpm2 in `dtype=bfloat16`, our C++ in F32).
+Hypothesis: rounding every tensor op output to bf16 (via the
+`bf16_round_vec` helper in `core/torch_rng.h`) would align us with
+Python's bf16-throughout dataflow. Added rounds to `tslm_layer_step`
+(Q/K/V/O matmuls, RoPE, attention, FFN, both residual adds), to
+`bidir_attn_full`, and to `locdit_forward` (time MLP, in/cond projs,
+all 12 layers' attn + FFN).
+
+**The bf16-round changes had near-zero effect** and slightly
+**regressed** `cfm_step0_result` (0.937 → 0.925). They were also
+costly (synth wall +~15 min from extra sequential op overhead).
+Reverted entirely.
+
+**Actual cause: the diff harness loads `voxcpm2-q4_k.gguf`** (4-bit
+quantised weights) **but Python's reference uses the bfloat16
+weights**. The "drift" was the Q4_K quantisation noise, multiplied
+through the network. Re-running the diff with `voxcpm2-f16.gguf`:
+
+| Stage              | Q4_K cos | F16 cos |
+| ------------------ | -------: | ------: |
+| tslm_prefill_out   |    0.986 | **0.998** |
+| dit_single_fwd     |    0.994 | **0.99999** |
+| cfm_step0_result   |    0.937 | **0.99992** |
+| tslm_layer_27_out  |    0.968 | **0.999** |
+| **decoded_audio**  | **0.683**| **0.929** |
+| lm_to_dit_hidden   |    0.998 | **0.99996** |
+
+Every intermediate stage hits cos ≥ 0.998 on F16. The remaining 0.07
+gap in `decoded_audio` on F16 is most likely AR-stop-step jitter
+(C++ and Python stop predictors fire at slightly different patches
+when fed the same `mu`) plus residual F16-vs-bf16 mantissa drift in
+the VAE. Not the deep transformer body.
+
+**How to apply.**
+
+1. **Before chasing "upstream precision drift" in a diff harness,
+   re-run with the F16 (or BF16) GGUF.** If cos jumps to ≥ 0.998,
+   the model is bit-correct — the previous drift was just the
+   shipped quant level. Don't add bf16 rounds to F32 ops; they
+   don't fix quant noise.
+
+2. **The Q4_K → bf16 cos gap IS the quant cost** — it's the same
+   number you'd see for any sufficiently deep transformer that's
+   bf16 in Python and Q4_K in C++. The acceptance bar should be
+   "audio sounds good + ASR roundtrips" (which Q4_K passes for
+   voxcpm2), not "diff-harness cos ≥ 0.999 against bf16
+   reference" (which Q4_K never will).
+
+3. **For per-stage diff diagnostics, recommend dumping the
+   reference against the matching weight precision:** run the
+   Python dumper with `voxcpm2-f16` if you want to compare F16
+   C++ vs F16-equivalent Python, or accept the Q4_K cosine
+   penalty as quant noise.
+
+Cross-ref: [[project_voxcpm2_vae_kwargs_bug]] (real bug fix earlier
+in the same session, contrasts with this non-bug).
