@@ -159,13 +159,18 @@ jobs:
       - name: Install build + runtime deps
         run: |
           sudo apt-get update
-          # espeak-ng: kokoro's phonemizer shells out to `espeak-ng` at
-          # runtime when libespeak-ng wasn't linked at build time (the
-          # default in this CI). Without it, kokoro-82m-en synthesis
-          # crashes with `sh: 1: espeak-ng: not found` and the TTS->ASR
-          # roundtrip matrix entry fails (added 2026-05-18 in commit
-          # 4127aaa0).
-          sudo apt-get install -y cmake g++ ninja-build libopenblas-dev jq espeak-ng
+          # libespeak-ng-dev: provides espeak-ng/speak_lib.h + libespeak-ng.so
+          # + espeak-ng-data, so CMake's `CRISPASR_WITH_ESPEAK_NG=AUTO` detects
+          # the library and compiles kokoro with `CRISPASR_HAVE_ESPEAK_NG=1`.
+          # The kokoro backend then calls `espeak_TextToPhonemes()` in-process
+          # instead of shelling out to `popen("espeak-ng …")` — saves ~30–50 ms
+          # per call and avoids the shell-quoting surface. The popen path
+          # remains as a safety fallback if libespeak init fails at runtime,
+          # so we also keep the `espeak-ng` binary installed for belt-and-
+          # braces coverage. See src/kokoro.cpp `phonemize_espeak_lib` /
+          # `phonemize_popen` and src/CMakeLists.txt `CRISPASR_WITH_ESPEAK_NG`.
+          sudo apt-get install -y cmake g++ ninja-build libopenblas-dev jq \
+              libespeak-ng-dev espeak-ng pkg-config
           # huggingface_hub for hf_hub_download; no transformers / nemo
           # needed on the CI side because reference dumps are pre-baked
           # and stored in HF, not regenerated.
