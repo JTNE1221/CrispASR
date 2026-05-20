@@ -42,6 +42,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
 | **LOW** | [#95 IndexTTS Chinese TN binary alternative](#95-indextts-15-chinese-tn--binary-alternative-to-the-python-wetext-hook) | survey only | Python `INDEXTTS_TEXT_NORMALIZER` hook shipped 2026-05-19. Hand-roll (#95a) is the right next step *when* a user reports a digit/date prompt that breaks; OpenFST vendoring (#95b) only after #95a grows past ~5 cases. |
 | **LOW** | [#97 More Parakeet variants](#97-more-parakeet-variants) | Small per-variant | Converter-only for TDT / TDT+CTC variants (v2, tdt-1.1b, tdt_ctc-{110m,1.1b}); RNNT / realtime-EOU / unified-en deferred (need new decoder code or arch survey). |
+| **MEDIUM** | [#98 Hotwords / contextual biasing](#98-hotwords--contextual-biasing) | Phased | Two-feature path covers ~9/14 backends: (a) generic CTC-WS phrase-boost trie wired into the CTC path (parakeet-ctc, parakeet-tdt, fc-ctc, omniasr); (b) `--hotwords` → LLM prompt-prefix helper (funasr, granite-plus, voxtral, qwen3-asr). |
 
 **Recently completed** (full write-ups in HISTORY.md): **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -139,6 +140,125 @@ Per-variant work:
 
 - `parakeet-ctc-0.6b-Vietnamese` — already runtime-supported (CTC); ship
   if a Vietnamese user asks. Tracked as a known gap, not active work.
+
+See also: [#98 Hotwords](#98-hotwords--contextual-biasing) — orthogonal
+feature that lights up biasing on every Parakeet variant once the CTC-WS
+trie lands.
+
+---
+
+## 98. Hotwords / contextual biasing
+
+User-supplied vocabulary that the ASR should prefer when in doubt
+(names, jargon, product terms, place names). Distinct from "improve
+overall WER" — hotwords only help on the biased subset, but on that
+subset the lift is large (e.g. NeMo CTC-WS reports F1 jumps from ~30 %
+to ~80 % for OOV name spotting; FunASR SeACo-Paraformer ~58 % F1 lift
+on AISHELL-NER).
+
+### Upstream-support survey (May 2026)
+
+| Backend | Upstream support | Mechanism |
+|---|---|---|
+| parakeet-tdt, -ctc, -rnnt, -tdt_ctc, -unified | YES | NeMo CTC-WS (Aho-Corasick phrase-boost trie + shallow fusion); MBS Transducer hotwords (Feb 2026) |
+| fastconformer-ctc | YES | Same NeMo CTC-WS pipeline |
+| funasr / fun-asr-nano / mlt-nano (paraformer) | YES | Native `hotword=` kwarg in upstream `AutoModel.generate`; SeACo-Paraformer-style hotword encoder pre-decoder |
+| qwen3-asr | YES | DashScope `vocabulary_id` + free-text `-c <context>` |
+| voxtral / voxtral4b | YES | `context_bias` API field, up to 100 entries |
+| granite-speech-4.1-2b-plus | YES | Keyword list baked into LLM prompt (the `-plus` variant is the keyword-prompted one) |
+| mimo-asr | YES (research) | PromptASR cross-attends a text-prompt encoder into the speech encoder; HF card doesn't expose a flag yet |
+| whisper | partial | `initial_prompt` only — decoder text-prompt conditioning, no hard bias |
+| firered-asr-llm | partial | `(prompt, speech, transcript)` triplet on the LLM variant supports free-text prompt |
+| cohere-transcribe | NO | API takes model / language / file / temperature only |
+| moonshine | NO | Whisper-style encoder-decoder; no `initial_prompt` either |
+| kyutai-stt | NO | "Contextual accuracy" from delayed-streams modelling, no keyword list API |
+| omniasr (CTC head, Meta) | NO upstream | But our CTC-WS trie would just work — model-agnostic on the logit stream |
+| glm-asr | NO | Plain transformers / vLLM / SGLang inference, no documented hotword field |
+
+### Phased implementation
+
+**Phase A — generic CTC-WS phrase-boost trie** (covers parakeet-ctc /
+parakeet-tdt / fastconformer-ctc / omniasr in one shot)
+
+- New shared helper `src/core/asr_context_bias.{h,cpp}` —
+  Aho-Corasick trie over piece-id sequences with a configurable boost
+  score per matched phrase; emits a per-frame log-prob bias vector that
+  the CTC / TDT decoder shallow-fuses into its argmax / beam scoring.
+- Wire-in points: `parakeet_ctc_decode` and `parakeet_tdt_decode` in
+  `src/parakeet.cpp:999+` and `parakeet.cpp:1670` dispatch. Phrase
+  tokenisation goes through the same SentencePiece model the backend
+  already loads, so users supply human-readable strings.
+- CLI: `--hotwords "Acme Corp,Sandra Berenz,GPU-PB"` and/or
+  `--hotwords-file <path>` (one phrase per line, optional `^N` boost
+  suffix); env var `CRISPASR_HOTWORDS=...` for the OpenAI-server path.
+- Estimated ~250–400 LOC including beam-search rescoring path; pure CPU,
+  no ggml graph needed.
+- Reference impl to mirror: NeMo CTC-WS notebook + the `BoostingTree`
+  C++ in TurboBias (`arxiv.org/html/2508.07014v1`).
+
+**Phase B — `--hotwords` → LLM prompt-prefix helper** (covers funasr,
+granite-plus, voxtral, qwen3-asr)
+
+- Tiny shared helper in `src/core/` that renders a hotword list into
+  the backend's expected prompt format (each backend has a different
+  template — granite uses `Keywords: …`; funasr uses a hotword token
+  block; qwen3 uses free-text context). One template registry, one
+  call site per backend.
+- Wire-in points: `funasr_transcribe_ex` (the LLM-decoder prompt
+  builder we just shipped), `granite_nle_transcribe`, voxtral,
+  qwen3-asr. All four already have a "system prompt" path the helper
+  plugs into.
+- Estimated ~150 LOC + per-backend template strings.
+
+**Phase C — parakeet TDT joint-net boost (Transducer-native)**
+
+- Mirror NeMo's MBS hotwords for Transducer: add a per-step bias on the
+  joint-net output when the partial hypothesis matches a prefix in the
+  trie. More accurate than shallow-fusion at the cost of being
+  TDT-specific (CTC path already covered by Phase A).
+- Defer until Phase A is shipped + benchmarked; only worth the
+  complexity if Phase A on TDT undershoots NeMo's reference numbers.
+
+### Out of scope
+
+- **Whisper `initial_prompt`** — already supported upstream via the
+  whisper.cpp loader. If a user really wants Whisper biasing, the
+  current path is to set `--initial-prompt`; no new CrispASR work.
+- **MiMo PromptASR exposure** — the architecture supports it but
+  upstream doesn't expose a flag and the HF card has no hotword
+  example. Park until upstream ships an API.
+- **Cohere / Moonshine / Kyutai-STT / GLM-ASR** — no upstream support,
+  no architectural hook; would require training a side-channel which
+  is outside this engine's scope.
+
+### Validation
+
+- Add a `tests/test_hotwords.py` that runs a synthetic clip with a
+  rare name (e.g. "Berenz") through each Phase-A backend with and
+  without `--hotwords Berenz`, asserts the unbiased transcript
+  mispells it and the biased one nails it.
+- For Phase B, point at the upstream reference Python and assert the
+  prompt-prefix matches byte-for-byte.
+
+### Effort estimate
+
+- Phase A: 2–3 days (helper + 4 wire-ins + tests + docs).
+- Phase B: 1 day (helper + 4 wire-ins + tests).
+- Phase C: 1–2 days, only if Phase A undershoots on TDT.
+
+Total: ~1 week of work covering 9 of 14 backends.
+
+### Sources
+
+- NeMo CTC-WS tutorial: `tutorials/asr/ASR_Context_Biasing.ipynb`
+- NVIDIA word boosting docs: `docs.nvidia.com/nemo-framework/.../word_boosting.html`
+- Fast Context-Biasing CTC-WS paper: `arxiv.org/html/2406.07096v1`
+- TurboBias / GPU-PB: `arxiv.org/html/2508.07014v1`
+- FunASR Paraformer hotword: `modelscope/FunASR examples/industrial_data_pretraining/paraformer/README.md`
+- Voxtral context_bias: `docs.mistral.ai/studio-api/audio/speech_to_text`
+- Qwen3-ASR-Toolkit: `QwenLM/Qwen3-ASR-Toolkit`
+- Xiaomi PromptASR: `arxiv.org/pdf/2309.07414`
+- icefall shallow-fusion: `k2-fsa/icefall docs/source/decoding-with-langugage-models/shallow-fusion.rst`
 
 ---
 
