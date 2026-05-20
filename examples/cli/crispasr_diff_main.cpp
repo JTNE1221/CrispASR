@@ -2385,6 +2385,144 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ──── Issue #114: per-slice diff mode ────
+        //
+        // The single-shot diff above feeds the whole audio to parakeet in one
+        // pass, which is what `tools/dump_reference.py` does too. That setup
+        // is blind to bugs that only appear once the CLI splits the audio
+        // into VAD slices and processes each one independently — exactly the
+        // class of regression issue #114 was (per-slice acoustic context
+        // extension corrupted the encoder features).
+        //
+        // Opt in with `CRISPASR_DIFF_SLICES=s0:e0,s1:e1,...` (sample
+        // indices). For each slice the harness runs parakeet_compute_mel +
+        // parakeet_run_encoder on `samples[s..e)` and compares the result,
+        // per encoder frame, against the matching slab of the reference
+        // full-audio `encoder_output`. Interior frames should match at
+        // cos ~ 1.0 (full-audio and per-slice encoders are mathematically
+        // equivalent for centered frames); a sharp drop signals that the
+        // per-slice path has done something the reference did not — e.g.
+        // pulled neighbour audio into the encoder context.
+        //
+        // No new reference dump is required: the comparison reuses the
+        // existing full-audio `encoder_output` tensor. The frame mapping is
+        // `enc_start = s / (hop * subsampling)`, where for parakeet hop=160
+        // and subsampling=8, so 1280 samples per encoder frame.
+        if (const char* slice_env = std::getenv("CRISPASR_DIFF_SLICES")) {
+            auto ref_enc_pair = ref.get_f32("encoder_output");
+            auto ref_enc_shp = ref.shape("encoder_output");
+            if (!ref_enc_pair.first || ref_enc_shp.size() < 2) {
+                printf("[ERR ] per-slice diff      ref encoder_output not in archive\n");
+                n_fail++;
+            } else {
+                const int d_model = (int)ref_enc_shp[0];
+                const int T_full = (int)ref_enc_shp[1];
+                const int sr = parakeet_sample_rate(ctx);
+                const int frame_dur_cs = parakeet_frame_dur_cs(ctx);
+                // samples_per_enc_frame = sample_rate * frame_dur_cs / 100.
+                // For parakeet defaults (16000 Hz, 80 ms encoder frame) = 1280.
+                const int samples_per_enc_frame = sr * frame_dur_cs / 100;
+                const float per_slice_threshold = COS_THRESHOLD;
+
+                // Parse "s0:e0,s1:e1,...".
+                std::vector<std::pair<int, int>> slice_ranges;
+                {
+                    std::string s = slice_env;
+                    size_t i = 0;
+                    while (i < s.size()) {
+                        size_t comma = s.find(',', i);
+                        std::string token = s.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+                        size_t colon = token.find(':');
+                        if (colon != std::string::npos) {
+                            int s0 = std::atoi(token.substr(0, colon).c_str());
+                            int e0 = std::atoi(token.substr(colon + 1).c_str());
+                            if (e0 > s0 && s0 >= 0 && e0 <= (int)samples.size())
+                                slice_ranges.emplace_back(s0, e0);
+                        }
+                        if (comma == std::string::npos)
+                            break;
+                        i = comma + 1;
+                    }
+                }
+
+                printf("\nper-slice diff (CRISPASR_DIFF_SLICES, %d slice(s), per-frame cos vs ref)\n",
+                       (int)slice_ranges.size());
+
+                for (size_t i = 0; i < slice_ranges.size(); i++) {
+                    const int s = slice_ranges[i].first;
+                    const int e = slice_ranges[i].second;
+                    auto slice_r = parakeet_encoder_r(ctx, samples.data() + s, e - s);
+                    char label[64];
+                    snprintf(label, sizeof(label), "slice[%zu] %d:%d", i, s, e);
+                    if (!slice_r.ok) {
+                        printf("[ERR ] %-22s %s\n", label, slice_r.note.c_str());
+                        n_fail++;
+                        continue;
+                    }
+                    const int T_slice = (int)slice_r.shape[0];
+                    const int enc_start = s / samples_per_enc_frame;
+                    const int enc_end = std::min(T_full, enc_start + T_slice);
+                    const int n_compare = enc_end - enc_start;
+                    if (n_compare < 1) {
+                        printf("[SKIP] %-22s slice maps outside ref encoder range\n", label);
+                        continue;
+                    }
+                    // Per-frame cosine: each row of length d_model = one encoder
+                    // frame's feature vector. cos_min is the worst frame; the
+                    // interior cos_min skips the first/last `boundary_skip`
+                    // frames, where the conv stack inherently sees less
+                    // context in the per-slice path than in the full-audio
+                    // reference and a cos drop is expected. Issue #114 bugs
+                    // (per-slice path pulled in NEIGHBOUR audio) show up as
+                    // interior frame divergence, not just boundary.
+                    const float* a = slice_r.data.data();
+                    const float* b = ref_enc_pair.first + (size_t)enc_start * d_model;
+                    const int boundary_skip = std::min(4, n_compare / 4);
+                    double cos_min = 1.0, cos_sum = 0.0;
+                    double interior_min = 1.0, interior_sum = 0.0;
+                    int worst_t = -1, n_interior = 0;
+                    for (int t = 0; t < n_compare; t++) {
+                        double dot = 0.0, na = 0.0, nb = 0.0;
+                        for (int k = 0; k < d_model; k++) {
+                            const double av = a[(size_t)t * d_model + k];
+                            const double bv = b[(size_t)t * d_model + k];
+                            dot += av * bv;
+                            na += av * av;
+                            nb += bv * bv;
+                        }
+                        const double denom = std::sqrt(na * nb);
+                        if (denom > 1e-12) {
+                            const double c = dot / denom;
+                            if (c < cos_min) {
+                                cos_min = c;
+                                worst_t = t;
+                            }
+                            cos_sum += c;
+                            if (t >= boundary_skip && t < n_compare - boundary_skip) {
+                                if (c < interior_min)
+                                    interior_min = c;
+                                interior_sum += c;
+                                n_interior++;
+                            }
+                        }
+                    }
+                    const double cos_mean = cos_sum / n_compare;
+                    const double interior_mean = n_interior > 0 ? interior_sum / n_interior : cos_mean;
+                    // Pass on INTERIOR cos: boundary divergence is structural
+                    // (less context at slice edges) and would flag a per-slice
+                    // test even on a clean implementation. Interior divergence
+                    // is the real signal.
+                    const bool pass = (n_interior == 0 ? cos_min : interior_min) >= per_slice_threshold;
+                    printf("[%s] %-22s enc=%d:%d T=%d  cos_min=%.6f (worst frame %d) cos_mean=%.6f  "
+                           "interior_min=%.6f interior_mean=%.6f\n",
+                           pass ? "PASS" : "FAIL", label, enc_start, enc_end, n_compare, cos_min, worst_t, cos_mean,
+                           interior_min, interior_mean);
+                    if (!pass)
+                        n_fail++;
+                }
+            }
+        }
+
         parakeet_free(ctx);
     } else if (backend_name == "canary") {
         auto cp = canary_context_default_params();

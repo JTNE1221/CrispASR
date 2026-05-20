@@ -58,6 +58,22 @@ Note: `drop_last_frame=true` (07cfcffe) is unrelated — both
 true and false produced the regressed output once cad4c28a was
 in. The cos parity at mel/encoder is preserved by this fix.
 
+**Diff harness extension.** The full-audio diff was blind to this
+class of bug because it feeds the model one continuous segment, just
+like `tools/dump_reference.py` does. Added a `CRISPASR_DIFF_SLICES`
+env var to `crispasr-diff` that takes "s0:e0,s1:e1,..." sample
+ranges, runs `parakeet_compute_mel + parakeet_run_encoder` per slice,
+and compares each slice's encoder output against the matching slab
+of the reference's full-audio `encoder_output` on a per-frame basis.
+The output reports both `cos_min` (whole slice) and `interior_min`
+(skipping the first/last 4 frames where lack of cross-slice context
+inherently lowers cos for split-mid-utterance cases). Interior
+divergence is the real bug signal; boundary divergence is structural.
+
+The new mode runs against the existing single-pass reference dump —
+no per-slice reference re-bake required. Future per-slice bugs in
+any backend can plug into the same flag.
+
 ---
 
 ## 2026-05-20 voxcpm2-tts: cache wn_reconstruct across VAE encode/decode calls
