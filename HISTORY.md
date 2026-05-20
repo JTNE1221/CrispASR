@@ -6,6 +6,42 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-20 voxcpm2-tts: parallelise VAE decode hot paths (PLAN #96 follow-on)
+
+**Change.** VAE decode was the dominant remaining wall-clock cost
+(~8 s of the post-Metal 14 s total). The forward `causal_conv1d`
+was already OMP-parallelised, but three hot loops weren't:
+
+- `causal_transposed_conv1d` — scatter-add into shared output (race-
+  prone, hence serial). Rewrote as gather + OMP `collapse(2)` over
+  (out_ch, ot). Also skip directly to the valid kernel taps for each
+  output position via the modulus-progression trick (`k0 = (ot+trim)
+  mod stride`, step `stride`) instead of testing the modulus on
+  every `k`.
+- `snake1d` — per-channel SiLU-like activation, outer loop over C
+  is write-disjoint. Added OMP.
+- VAE per-block SR conditioning (per-channel scale + bias broadcast
+  over time) — outer loop over C, OMP.
+
+**Validation.** Diff harness `voxcpm2-q4_k.gguf` (CPU path): still
+14 pass / 0 fail / 3 skip. "Hello world" zero-shot ASR-roundtrips
+correctly.
+
+**Bench** (M1, OMP=8, "Hello world" zero-shot, 6 AR steps):
+
+| VAE decode | Pre-OMP | Post-OMP (3-run mean) |
+| ---------- | ------: | --------------------: |
+|            | 8 994 ms |             7 734 ms  |
+
+~14 % faster (variance is real — 7.0–8.6 s across runs). Modest
+because the conv work itself dominates, not the loop overhead;
+real Metal-class wins need the full graph rewrite (ggml_conv_1d /
+ggml_conv_transpose_1d / compound snake1d) — that's the remaining
+PLAN #96 item.
+
+---
+
+
 ## 2026-05-20 voxcpm2-tts: multi-bucket TSLM step graph (PLAN #96 follow-on)
 
 **Change.** Replaced the single TSLM-step cgraph cache (Lk=128) with

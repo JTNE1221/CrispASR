@@ -2142,9 +2142,12 @@ static std::vector<float> wn_reconstruct(const float* weight_g, const float* wei
 // ---------------------------------------------------------------------------
 // Snake1d activation: x + (1/alpha) * sin(alpha * x)^2
 // alpha is a per-channel learnable parameter [C].
-// x_in: [C, T]  (in-place safe if x_in == x_out)
+// x_in: [C, T]  (in-place safe if x_in == x_out — each c-row is independent)
 // ---------------------------------------------------------------------------
 static void snake1d(const float* alpha, const float* x_in, float* x_out, int C, int T) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (int c = 0; c < C; c++) {
         float a = alpha[c];
         float inv_a = (std::abs(a) > 1e-8f) ? 1.0f / a : 1.0f;
@@ -2204,40 +2207,45 @@ static void causal_conv1d(const float* weight, const float* bias, const float* x
 // weight: [in_ch, out_ch, ksize]  — note transposed layout
 // x_in:  [in_ch, T_in]
 // x_out: [out_ch, T_out]  T_out = T_in * stride
+//
+// Rewritten as a gather over output positions so the outer (oc, ot) loops
+// are write-disjoint and OMP-parallelisable. Each output position (oc, ot)
+// sums w_k * x[ic, it(k)] for the (it, k) pairs where it * stride + k - trim
+// matches ot — for stride S, that's exactly one (it, k) pair per k modulus,
+// so we just walk k and pick the matching it = (ot + trim - k) / stride.
 // ---------------------------------------------------------------------------
 static void causal_transposed_conv1d(const float* weight, const float* bias, const float* x_in, float* x_out, int in_ch,
                                      int out_ch, int ksize, int T_in, int stride) {
     int T_out = T_in * stride;
-    // Causal transpose conv: output[t] sums weight[k] * x[floor((t-k)/stride)] for
-    // valid positions. We implement via direct scatter-add.
-    std::fill(x_out, x_out + (size_t)out_ch * T_out, 0.0f);
-
-    // Causal padding: trim the first (ksize-1) output samples
-    int trim = ksize - 1;
-
-    for (int ic = 0; ic < in_ch; ic++) {
-        for (int oc = 0; oc < out_ch; oc++) {
-            // weight layout (transposed conv stored as [in_ch, out_ch, ksize]):
-            const float* w_k = weight + ((size_t)ic * out_ch + oc) * ksize;
-            for (int it = 0; it < T_in; it++) {
-                float x_val = x_in[(size_t)ic * T_in + it];
-                // Each input sample it maps to output positions it*stride + k
-                for (int k = 0; k < ksize; k++) {
-                    int ot_raw = it * stride + k;
-                    int ot = ot_raw - trim; // causal: shift left
-                    if (ot < 0 || ot >= T_out)
-                        continue;
-                    x_out[(size_t)oc * T_out + ot] += x_val * w_k[k];
+    int trim = ksize - 1; // causal: shift output left by ksize-1
+#if defined(_OPENMP)
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+    for (int oc = 0; oc < out_ch; oc++) {
+        for (int ot = 0; ot < T_out; ot++) {
+            float acc = bias ? bias[oc] : 0.0f;
+            // For each kernel tap k, the corresponding input position is
+            // it = (ot + trim - k) / stride; the dilated-zero rule says
+            // x is 0 unless (ot + trim - k) is divisible by stride.
+            // The valid k's form an arithmetic progression starting at
+            // k0 = (ot + trim) mod stride with step `stride`, so we walk
+            // those directly instead of testing the modulus on every k.
+            int ot_plus_trim = ot + trim;
+            int k0 = ot_plus_trim % stride;
+            for (int k = k0; k < ksize; k += stride) {
+                int it = (ot_plus_trim - k) / stride;
+                if (it < 0 || it >= T_in) {
+                    continue;
+                }
+                const float* x_col = x_in + (size_t)it; // stride T_in across channels
+                // weight layout [in_ch, out_ch, ksize]: w[ic*out_ch*ksize + oc*ksize + k]
+                for (int ic = 0; ic < in_ch; ic++) {
+                    float x_val = x_col[(size_t)ic * T_in];
+                    float w_val = weight[((size_t)ic * out_ch + oc) * ksize + k];
+                    acc += x_val * w_val;
                 }
             }
-        }
-    }
-    if (bias) {
-        for (int oc = 0; oc < out_ch; oc++) {
-            float b_val = bias[oc];
-            for (int t = 0; t < T_out; t++) {
-                x_out[(size_t)oc * T_out + t] += b_val;
-            }
+            x_out[(size_t)oc * T_out + ot] = acc;
         }
     }
 }
@@ -2473,11 +2481,15 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             const float* se = vae_tensor_f32(T, sr_pfx + ".scale_embed");
             const float* be = vae_tensor_f32(T, sr_pfx + ".bias_embed");
             if (se) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
                 for (int c = 0; c < Cc; c++) {
                     float sc = se[(size_t)c * 4 + sr_bucket];
                     float bi = be ? be[(size_t)c * 4 + sr_bucket] : 0.0f;
+                    float* hc = h.data() + (size_t)c * Tc;
                     for (int t = 0; t < Tc; t++) {
-                        h[(size_t)c * Tc + t] = h[(size_t)c * Tc + t] * sc + bi;
+                        hc[t] = hc[t] * sc + bi;
                     }
                 }
             }
