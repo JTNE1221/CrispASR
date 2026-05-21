@@ -11,15 +11,16 @@ technical deep-dives are in `LEARNINGS.md`.
 **Outcome.** Ported FunASR Paraformer-zh (220M params, non-autoregressive,
 Mandarin Chinese + English) as a new `--backend paraformer`. Character-level
 tokenizer (8404 vocab), single-pass decode via CIF (continuous integrate-and-fire)
-predictor. F16 GGUF (421 MB) produces byte-identical transcripts vs Python on the
-Chinese test audio (66 characters) and recognizable English output on JFK.
+predictor. Published F16 (421 MB), Q4_K (123 MB), Q8_0 (227 MB) at
+`cstr/paraformer-zh-GGUF`; Q4_K is the registry default. All three produce
+byte-identical transcripts vs Python on both Chinese test audio and JFK English.
 
 **Architecture:** 50 SANM encoder blocks (reusing `core_sanm::build_block()`)
 → CIF predictor (Conv1d + sigmoid → accumulation) → 16 NAR decoder blocks
 (FFN → FSMN → cross-attn, note the unusual order) → decoders3 post block
-→ output_layer → argmax.
+→ output_layer → argmax → space insertion between English word tokens.
 
-**Three bugs in initial WIP port:**
+**Four bugs in initial WIP port:**
 1. Decoder block operation order: had FSMN → cross-attn → FFN but upstream
    does FFN → FSMN → cross-attn. Norms (norm1/2/3) were applied to wrong
    sub-layers.
@@ -28,10 +29,14 @@ Chinese test audio (66 characters) and recognizable English output on JFK.
 3. CIF encoder-output transposition: used `enc_out[d*T+t]` instead of
    `enc_out[t*D+d]`. The ggml tensor already stores row-major (T,D), so
    no transpose was needed. Same bug in acoustic_embeds → decoder path.
+4. Missing English word spacing: the vocab has whole English words as tokens
+   with `@@` BPE continuation markers. Argmax loop concatenated tokens without
+   spaces, producing `andsomyfellowamericans...`. Fixed by inserting a space
+   between consecutive Latin-script word-final tokens.
 
 **Diff harness.** Reference backend (`tools/reference_backends/paraformer.py`)
 captures 73 stages. `paraformer_extract_stage()` implemented for all stages.
-generated_text matches byte-for-byte.
+generated_text matches byte-for-byte on both Chinese and English.
 
 ### Files
 
