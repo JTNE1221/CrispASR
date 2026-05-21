@@ -73,13 +73,38 @@ public:
         // sampling state from a prior file.
         parakeet_set_temperature(ctx_, params.temperature, params.seed);
 
-        // Issue #89 / PLAN #104: for long audio (>30 s), use the NeMo-
-        // style streamed pipeline — global z-norm mel + chunked encode +
-        // single-pass TDT decode.  Short audio uses the single-pass path.
-        constexpr int kStreamedThresholdSamples = 30 * 16000; // 30 s
-        parakeet_result* r = (n_samples > kStreamedThresholdSamples)
-                                 ? parakeet_transcribe_streamed(ctx_, samples, n_samples, t_offset_cs, 8, 2)
-                                 : parakeet_transcribe_ex(ctx_, samples, n_samples, t_offset_cs);
+        // Issue #89 / PLAN #104: encoding path selection.
+        //
+        // transcribe_ex (single-pass): best quality — bidirectional encoder
+        // sees full context.  99.5% coverage on the reporter's 60 s JA clip.
+        // Fails past ~60 s on some hardware (z-norm drift on Vulkan/AMD).
+        //
+        // transcribe_streamed (chunked encode): safe for any length — global
+        // z-norm + 8 s encoder chunks + single TDT decode.  ~93% coverage
+        // (encoder sees only 8 s context per chunk → slightly worse features).
+        //
+        // Default: single-pass up to 60 s, streamed above.  Tuneable via env:
+        //   CRISPASR_PARAKEET_STREAM_THRESHOLD=0  → always streamed
+        //   CRISPASR_PARAKEET_STREAM_THRESHOLD=999 → always single-pass
+        //   CRISPASR_PARAKEET_STREAM_CHUNK=16      → 16 s encoder chunks
+        //   CRISPASR_PARAKEET_STREAM_OVERLAP=4     → 4 s encoder overlap
+        int stream_threshold_s = 60;
+        int stream_chunk_s = 8;
+        int stream_overlap_s = 2;
+        if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_THRESHOLD"))
+            stream_threshold_s = std::max(0, atoi(e));
+        if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_CHUNK"))
+            stream_chunk_s = std::max(2, atoi(e));
+        if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_OVERLAP"))
+            stream_overlap_s = std::max(0, atoi(e));
+
+        parakeet_result* r;
+        if (stream_threshold_s > 0 && n_samples > stream_threshold_s * 16000) {
+            r = parakeet_transcribe_streamed(ctx_, samples, n_samples, t_offset_cs,
+                                             stream_chunk_s, stream_overlap_s);
+        } else {
+            r = parakeet_transcribe_ex(ctx_, samples, n_samples, t_offset_cs);
+        }
         if (!r)
             return out;
 
