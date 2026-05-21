@@ -2564,61 +2564,55 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
         return (spk0 >= 0) && (id >= spk0) && (id < spk0 + 16);
     };
 
-    for (int i = 0; i < (int)generated.size(); i++) {
-        int id = generated[i];
-        if (id < 0 || id >= (int)voc.id_to_token.size())
-            continue;
-        const std::string& tok = voc.id_to_token[id];
+    auto hex_nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'A' && c <= 'F')
+            return 10 + c - 'A';
+        if (c >= 'a' && c <= 'f')
+            return 10 + c - 'a';
+        return -1;
+    };
 
-        std::string t;
-        if (tok.front() == '<' && tok.back() == '>') {
-            // SentencePiece byte-fallback pieces: "<0xE6>" → raw byte 0xE6.
-            // These appear for any codepoint that wasn't in the unigram
-            // vocab — most kanji compounds in Japanese (e.g. 漫画 → 漫
-            // is byte-fallback as <0xE6><0xBC><0xAB>, but 画 is a single
-            // piece). Without decoding, the byte sequence is dropped
-            // entirely and only the kanji that survived as single pieces
-            // remain in the transcript (issue #67).
-            if (tok.size() == 6 && tok[1] == '0' && tok[2] == 'x') {
-                auto hex = [](char c) -> int {
-                    if (c >= '0' && c <= '9')
-                        return c - '0';
-                    if (c >= 'A' && c <= 'F')
-                        return 10 + c - 'A';
-                    if (c >= 'a' && c <= 'f')
-                        return 10 + c - 'a';
-                    return -1;
-                };
-                int hi = hex(tok[3]), lo = hex(tok[4]);
-                if (hi >= 0 && lo >= 0) {
-                    t = std::string(1, (char)((hi << 4) | lo));
-                    // fall through: t now holds one raw byte; subsequent
-                    // tokens will append the rest of the UTF-8 codepoint.
-                    goto byte_fallback_decoded;
-                }
-            }
-            // Render diarization tokens; drop all other special tokens
-            if (id == tok_spkchange) {
-                t = " [SPEAKER_TURN]";
-            } else if (is_spk_id(id)) {
-                int spk0 = voc.token_id("<|spk0|>");
-                char buf[32];
-                snprintf(buf, sizeof(buf), " [Speaker %d]", id - spk0);
-                t = buf;
-            } else {
-                continue;
-            }
-        byte_fallback_decoded:;
-        } else {
-            t = tok;
-            size_t pos;
-            while ((pos = t.find("\xe2\x96\x81")) != std::string::npos)
-                t.replace(pos, 3, " ");
+    auto byte_fallback_value = [&](const std::string& tok, unsigned char& byte) -> bool {
+        if (tok.size() != 6 || tok[0] != '<' || tok[1] != '0' || tok[2] != 'x' || tok[5] != '>')
+            return false;
+        int hi = hex_nibble(tok[3]), lo = hex_nibble(tok[4]);
+        if (hi < 0 || lo < 0)
+            return false;
+        byte = (unsigned char)((hi << 4) | lo);
+        return true;
+    };
+
+    auto utf8_expected_len = [](unsigned char lead) -> int {
+        if ((lead & 0x80) == 0)
+            return 1;
+        if ((lead & 0xE0) == 0xC0)
+            return 2;
+        if ((lead & 0xF0) == 0xE0)
+            return 3;
+        if ((lead & 0xF8) == 0xF0)
+            return 4;
+        return 0;
+    };
+
+    auto utf8_complete = [&](const std::string& bytes) -> bool {
+        if (bytes.empty())
+            return false;
+        const int expected = utf8_expected_len((unsigned char)bytes[0]);
+        if (expected <= 0 || (int)bytes.size() != expected)
+            return false;
+        for (int j = 1; j < expected; j++) {
+            if ((((unsigned char)bytes[j]) & 0xC0) != 0x80)
+                return false;
         }
+        return true;
+    };
 
+    auto emit_token = [&](int id, float p, int gen_idx, const std::string& t) {
         cohere_token_data td;
         td.id = id;
-        td.p = gen_probs[i];
+        td.p = p;
         td.t0 = 0;
         td.t1 = 0;
         snprintf(td.text, sizeof(td.text), "%s", t.c_str());
@@ -2638,9 +2632,80 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
             }
         }
         tok_data.push_back(td);
-        tok_to_gen_idx.push_back(i);
+        tok_to_gen_idx.push_back(gen_idx);
         full_text += t;
+    };
+
+    std::string pending_bytes;
+    int pending_id = -1;
+    int pending_gen_idx = -1;
+    float pending_p = 1.0f;
+
+    auto flush_pending_bytes = [&]() {
+        if (pending_bytes.empty())
+            return;
+        emit_token(pending_id, pending_p, pending_gen_idx, pending_bytes);
+        pending_bytes.clear();
+        pending_id = -1;
+        pending_gen_idx = -1;
+        pending_p = 1.0f;
+    };
+
+    for (int i = 0; i < (int)generated.size(); i++) {
+        int id = generated[i];
+        if (id < 0 || id >= (int)voc.id_to_token.size())
+            continue;
+        const std::string& tok = voc.id_to_token[id];
+
+        std::string t;
+        unsigned char byte = 0;
+        if (byte_fallback_value(tok, byte)) {
+            if (pending_bytes.empty()) {
+                pending_id = id;
+                pending_gen_idx = i;
+                pending_p = gen_probs[i];
+            } else {
+                pending_p = std::min(pending_p, gen_probs[i]);
+                pending_gen_idx = i;
+            }
+            pending_bytes.push_back((char)byte);
+            if (utf8_complete(pending_bytes)) {
+                flush_pending_bytes();
+            }
+            continue;
+        }
+
+        flush_pending_bytes();
+
+        if (tok.front() == '<' && tok.back() == '>') {
+            // SentencePiece byte-fallback pieces: "<0xE6>" → raw byte 0xE6.
+            // These appear for any codepoint that wasn't in the unigram
+            // vocab — most kanji compounds in Japanese (e.g. 漫画 → 漫
+            // is byte-fallback as <0xE6><0xBC><0xAB>, but 画 is a single
+            // piece). Without decoding, the byte sequence is dropped
+            // entirely and only the kanji that survived as single pieces
+            // remain in the transcript (issue #67).
+            // Render diarization tokens; drop all other special tokens
+            if (id == tok_spkchange) {
+                t = " [SPEAKER_TURN]";
+            } else if (is_spk_id(id)) {
+                int spk0 = voc.token_id("<|spk0|>");
+                char buf[32];
+                snprintf(buf, sizeof(buf), " [Speaker %d]", id - spk0);
+                t = buf;
+            } else {
+                continue;
+            }
+        } else {
+            t = tok;
+            size_t pos;
+            while ((pos = t.find("\xe2\x96\x81")) != std::string::npos)
+                t.replace(pos, 3, " ");
+        }
+
+        emit_token(id, gen_probs[i], i, t);
     }
+    flush_pending_bytes();
     if (!full_text.empty() && full_text[0] == ' ')
         full_text = full_text.substr(1);
     // Do NOT strip the leading space from tok_data[0].text.
