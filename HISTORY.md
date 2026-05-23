@@ -6,6 +6,38 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-23 Issue #89 cross-backend validation + PLAN #80d/#105 closure
+
+**Validated** the NeMo-style streamed pipeline on current main
+(`0c24178e`). Full chunk-size sweep (4-30 s) and overlap sweep (0-4 s)
+confirm byte-identical output to single-pass across all configurations.
+300 s Japanese: 98.6 % coverage, 0 gaps.
+
+**Extended `CAP_INTERNAL_CHUNKING`** to canary-1b-v2 and
+fastconformer-ctc (`1dd247a7`). Both suffered the same 30 s auto-chunk
+z-norm drift as parakeet:
+
+| backend | coverage (old 30 s chunks) | coverage (new) |
+|---|---:|---:|
+| parakeet-tdt 0.6b JA | 59.7 % | 99.5 % |
+| parakeet-ctc 1.1b EN | 74.6 % | 98.5 % |
+| canary-1b-v2 Q4_K EN | broken | 96.8 % |
+
+**PLAN #80d** (cross-backend chunking audit): audited all 13 AR backends
+— no fixes needed, all use `split_at_energy_minima` via the global
+slicer. Cohere's API path also calls it directly.
+
+**PLAN #105** (WhisperX aligner zoo): confirmed all 10 language-specific
+wav2vec2 CTC aligner GGUFs uploaded and in the registry (fr/es/it/ja/zh/
+nl/uk/pt/ar/cs). Added the full alias table to `docs/cli.md`.
+
+**Issue triage:** closed #115 (hotwords, shipped), #111 (seed, shipped),
+#119 (Mega-ASR, in registry), #120 (max_tokens, shipped). Triaged #121
+(Pentium Gold crash — build artifact exists, likely user error or
+runtime issue). Commented #85 (noise-robust ASR recommendations).
+
+---
+
 ## 2026-05-23 Session beam_size wired for all remaining backends (PLAN #90 complete)
 
 **Commit:** `0c24178e`
