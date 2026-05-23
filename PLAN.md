@@ -37,7 +37,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **PARKED** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | Encoder 85%+ of time; LSTM+joint <0.7s; sequential steps limit GPU benefit |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
-| **MEDIUM** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80a parked (<1 % of wall on Metal); **80b DONE** (energy chunker live in cohere.cpp); **80c DONE**; 80d/80e TODO |
+| **DONE** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80a parked; **80b DONE**; **80c DONE**; **80d DONE** 2026-05-23 (audit: no fixes needed — all backends use energy chunker); 80e low-priority warmup deferred |
 | **DEFERRED** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | NVOML license, ~60–75 % reuse from parakeet/canary; the new bit is cache-aware FastConformer streaming. Wait for `--stream-json` (issue #84) to settle + a second user request (only mention so far is issue #85) before starting. |
 | **DONE** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | — | All backends now route through core helpers (`core_attn`, `core_sanm`, `core_conformer`) that unconditionally use `ggml_flash_attn_ext`. Only t5_translate excluded (T5 rel-pos bias incompatible). |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
@@ -2501,14 +2501,14 @@ verbosity to 2 to print the perf report). One line in
 `examples/cli/crispasr_backend_cohere.cpp`. Side benefit of the
 investigation; without it, 80a couldn't be measured from the CLI.
 
-### 80d. Cross-backend audit of fixed-time chunking (TODO)
+### 80d. Cross-backend audit of fixed-time chunking — DONE 2026-05-23
 
-Survey the long-form chunking strategy in every AR-decoder backend
-(canary, voxtral, voxtral4b, vibevoice, kyutai-stt, gemma4_e2b,
-qwen3-tts-talker). Anything cutting at `N * sample_rate` boundaries
-inherits the same mid-word problem and gains from
-`audio_chunking::split_at_energy_minima`. Investigate-only here; each
-hit is its own one-line change.
+Audited all 13 AR-decoder backends. **No fixes needed.** All backends
+rely on the global slicer (`crispasr_energy_chunk_slices`) which already
+uses `split_at_energy_minima`. Cohere's public API path (line 2084)
+explicitly calls `split_at_energy_minima` too. The only fixed-time loop
+is cohere's internal encoder KV scatter (line 2186), which operates on
+encoder frames not raw audio — not a candidate for energy chunking.
 
 ### 80e. Eager warmup follow-up (TODO, low priority)
 
