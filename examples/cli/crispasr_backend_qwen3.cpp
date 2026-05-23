@@ -228,6 +228,12 @@ public:
                 params.target_lang.empty() ? std::string("English") : iso_to_english(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
         }
+        // PLAN #98 Phase B: hotword prompt injection
+        if (!params.hotwords.empty()) {
+            if (!sys_instruction.empty() && sys_instruction.back() != ' ')
+                sys_instruction += ' ';
+            sys_instruction += "The following words may appear in the audio: " + params.hotwords + ".";
+        }
 
         std::string text = "<|im_start|>system\n" + sys_instruction +
                            "<|im_end|>\n"
