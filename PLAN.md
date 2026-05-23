@@ -1050,8 +1050,8 @@ so existing builds don't regress.
   | de  | clean | 4.08 s |   541 |   44 | ❌ near-silence on long phrases (no German voice — see open #1) |
   | fr  | clean | 3.40 s | 12374 | 1434 | ✅ healthy |
   | ru  | clean | 3.38 s | 11375 | 1506 | ✅ healthy |
-  | cmn | espeak tone numbers (`ni2χˈɑu2…`) | 3.20 s | 11731 | 1627 | ⚠️ audio plays but tones unmodelled — open #2 |
-  | ja  | kanji fallback (`(en)tʃˈaɪniːz(ja)…`) | 8.38 s | 15460 | 1581 | ⚠️ partial — kana works, kanji becomes English — open #3 |
+  | cmn | espeak tone numbers (`ni2χˈɑu2…`) | 3.20 s | 11731 | 1627 | ✅ **FIXED 2026-05-23**: `strip_cmn_tone_numbers` removes digits after phonemization |
+  | ja  | kanji fallback (`(en)tʃˈaɪniːz(ja)…`) | 8.38 s | 15460 | 1581 | ⚠️ partial — kana works, kanji becomes English — needs MeCab/KaKaSi (open #3) |
 
   Short German phrases ("Hallo Welt.", "Guten Morgen.") synthesize
   fine with `af_heart`; the silence collapse only triggers on longer
