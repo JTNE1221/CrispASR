@@ -333,11 +333,16 @@ upstream tools like SubtitleEdit.
 |---|---|
 | `-tp F`, `--temperature F` | Sampling temperature. `0` = pure argmax (default, bit-identical). `> 0` enables multinomial sampling for whisper, voxtral, voxtral4b, qwen3, granite |
 | `--seed N` | RNG seed for sampling. `0` = non-deterministic. Used by temperature-sampling ASR backends and TTS backends that sample; CLI values override backend-specific env seeds |
+| `-bo N`, `--best-of N` | Number of best candidates to keep when temperature > 0 (whisper + some AR backends) |
 | `-bs N`, `--beam-size N` | Beam search width (whisper only) |
 | `-tpi F`, `--temperature-inc F` | Whisper temperature-fallback increment |
+| `-nf`, `--no-fallback` | Disable temperature fallback (equivalent to `--temperature-inc 0`) |
 | `--frequency-penalty F` | Opt-in repeated generated-token penalty for autoregressive ASR backends (`0.0` disabled). Applied to generated output tokens before greedy/sampling selection. |
-| `--grammar FNAME` | GBNF grammar file (whisper only, including `--backend whisper`) |
-| `--grammar-rule NAME` | Top-level rule name in the grammar |
+| `--grammar FNAME` | GBNF grammar file for constrained whisper decoding |
+| `--grammar-rule NAME` | Top-level rule name in the grammar (default: `root`) |
+| `--grammar-penalty F` | Scales down logits of tokens that violate the grammar (default: `100.0`) |
+| `--alt` | Show alternative token candidates with per-token probabilities (whisper) |
+| `--alt-n N` | Number of alternative token candidates per step (whisper, default: `1`) |
 | `--prompt STR` | Initial prompt for whisper |
 
 ## Language detection (LID)

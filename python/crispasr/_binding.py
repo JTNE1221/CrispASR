@@ -1512,6 +1512,192 @@ class Session:
         if rc != 0:
             raise RuntimeError(f"set_frequency_penalty failed (rc={rc})")
 
+    def set_tts_steps(self, steps: int) -> None:
+        """Set the diffusion / CFM step count for diffusion-based TTS backends.
+
+        Soft no-op (rc=-2) when the active backend has no diffusion stage.
+        """
+        if not hasattr(self._lib, "crispasr_session_set_tts_steps"):
+            return
+        self._lib.crispasr_session_set_tts_steps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_tts_steps.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_tts_steps(self._handle, int(steps))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_tts_steps failed (rc={rc})")
+
+    def set_top_p(self, top_p: float) -> None:
+        """Set the top-p nucleus-sampling threshold. Honoured by chatterbox."""
+        if not hasattr(self._lib, "crispasr_session_set_top_p"):
+            return
+        self._lib.crispasr_session_set_top_p.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_top_p.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_top_p(self._handle, float(top_p))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_top_p failed (rc={rc})")
+
+    def set_min_p(self, min_p: float) -> None:
+        """Set the min-p sampling threshold. Honoured by chatterbox."""
+        if not hasattr(self._lib, "crispasr_session_set_min_p"):
+            return
+        self._lib.crispasr_session_set_min_p.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_min_p.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_min_p(self._handle, float(min_p))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_min_p failed (rc={rc})")
+
+    def set_repetition_penalty(self, r: float) -> None:
+        """Set the repetition penalty (1.0 = no penalty). Honoured by chatterbox."""
+        if not hasattr(self._lib, "crispasr_session_set_repetition_penalty"):
+            return
+        self._lib.crispasr_session_set_repetition_penalty.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_repetition_penalty.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_repetition_penalty(self._handle, float(r))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_repetition_penalty failed (rc={rc})")
+
+    def set_cfg_weight(self, cfg_weight: float) -> None:
+        """Set the classifier-free-guidance weight (chatterbox). 0 disables CFG."""
+        if not hasattr(self._lib, "crispasr_session_set_cfg_weight"):
+            return
+        self._lib.crispasr_session_set_cfg_weight.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_cfg_weight.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_cfg_weight(self._handle, float(cfg_weight))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_cfg_weight failed (rc={rc})")
+
+    def set_exaggeration(self, exaggeration: float) -> None:
+        """Set the emotion-exaggeration scalar (chatterbox). 0.5 is the upstream default."""
+        if not hasattr(self._lib, "crispasr_session_set_exaggeration"):
+            return
+        self._lib.crispasr_session_set_exaggeration.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_exaggeration.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_exaggeration(self._handle, float(exaggeration))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_exaggeration failed (rc={rc})")
+
+    def set_max_speech_tokens(self, n: int) -> None:
+        """Set the upper bound on speech tokens per synthesize call (chatterbox). Default 1000 ≈ 20 s."""
+        if not hasattr(self._lib, "crispasr_session_set_max_speech_tokens"):
+            return
+        self._lib.crispasr_session_set_max_speech_tokens.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_max_speech_tokens.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_max_speech_tokens(self._handle, int(n))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_max_speech_tokens failed (rc={rc})")
+
+    def set_length_scale(self, scale: float) -> None:
+        """Set the per-phoneme length-scale / speaking-rate scalar. Honoured by kokoro."""
+        if not hasattr(self._lib, "crispasr_session_set_length_scale"):
+            return
+        self._lib.crispasr_session_set_length_scale.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.crispasr_session_set_length_scale.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_length_scale(self._handle, float(scale))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_length_scale failed (rc={rc})")
+
+    def set_best_of(self, n: int) -> None:
+        """Set the best-of-N sampling count for ASR backends."""
+        if not hasattr(self._lib, "crispasr_session_set_best_of"):
+            return
+        self._lib.crispasr_session_set_best_of.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_best_of.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_best_of(self._handle, int(n))
+        if rc != 0:
+            raise RuntimeError(f"set_best_of failed (rc={rc})")
+
+    def set_beam_size(self, n: int) -> None:
+        """Set the beam-search width for ASR backends that support it."""
+        if not hasattr(self._lib, "crispasr_session_set_beam_size"):
+            return
+        self._lib.crispasr_session_set_beam_size.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_beam_size.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_beam_size(self._handle, int(n))
+        if rc != 0:
+            raise RuntimeError(f"set_beam_size failed (rc={rc})")
+
+    def set_grammar_text(self, gbnf_text: str, root_rule: str = "root", penalty: float = 100.0) -> None:
+        """Set a GBNF grammar for constrained whisper decoding. Pass "" to clear."""
+        if not hasattr(self._lib, "crispasr_session_set_grammar_text"):
+            return
+        self._lib.crispasr_session_set_grammar_text.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_float,
+        ]
+        self._lib.crispasr_session_set_grammar_text.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_grammar_text(
+            self._handle,
+            gbnf_text.encode() if gbnf_text else None,
+            root_rule.encode() if root_rule else None,
+            float(penalty),
+        )
+        if rc == -2:
+            raise ValueError("set_grammar_text: invalid GBNF or root rule not found")
+        if rc != 0:
+            raise RuntimeError(f"set_grammar_text failed (rc={rc})")
+
+    def set_fallback_thresholds(
+        self,
+        entropy_thold: float,
+        logprob_thold: float,
+        no_speech_thold: float,
+        temperature_inc: float,
+    ) -> None:
+        """Set whisper decoder fallback thresholds. temperature_inc=0.0 disables fallback."""
+        if not hasattr(self._lib, "crispasr_session_set_fallback_thresholds"):
+            return
+        self._lib.crispasr_session_set_fallback_thresholds.argtypes = [
+            ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ]
+        self._lib.crispasr_session_set_fallback_thresholds.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_fallback_thresholds(
+            self._handle,
+            float(entropy_thold), float(logprob_thold),
+            float(no_speech_thold), float(temperature_inc),
+        )
+        if rc != 0:
+            raise RuntimeError(f"set_fallback_thresholds failed (rc={rc})")
+
+    def set_alt_n(self, n: int) -> None:
+        """Set per-token top-N alternative-candidate capture for whisper greedy decode. 0 = off."""
+        if not hasattr(self._lib, "crispasr_session_set_alt_n"):
+            return
+        self._lib.crispasr_session_set_alt_n.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_alt_n.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_alt_n(self._handle, int(n))
+        if rc != 0:
+            raise RuntimeError(f"set_alt_n failed (rc={rc})")
+
+    def set_whisper_decode_extras(
+        self,
+        suppress_nst: bool = False,
+        suppress_regex: str = "",
+        carry_initial_prompt: bool = False,
+    ) -> None:
+        """Set whisper-only text-suppression and prompt-carry extras."""
+        if not hasattr(self._lib, "crispasr_session_set_whisper_decode_extras"):
+            return
+        self._lib.crispasr_session_set_whisper_decode_extras.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+        ]
+        self._lib.crispasr_session_set_whisper_decode_extras.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_whisper_decode_extras(
+            self._handle,
+            int(suppress_nst),
+            suppress_regex.encode() if suppress_regex else b"",
+            int(carry_initial_prompt),
+        )
+        if rc != 0:
+            raise RuntimeError(f"set_whisper_decode_extras failed (rc={rc})")
+
+    def set_ask(self, prompt: str) -> None:
+        """Set a free-form prompt passed to the backend on the next transcribe/synthesize call."""
+        if not hasattr(self._lib, "crispasr_session_set_ask"):
+            return
+        self._lib.crispasr_session_set_ask.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._lib.crispasr_session_set_ask.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_ask(self._handle, prompt.encode())
+        if rc != 0:
+            raise RuntimeError(f"set_ask failed (rc={rc})")
+
     def detect_language(self, pcm, lid_model_path: str, method: int = 1) -> tuple:
         """Auto-detect spoken language on raw 16 kHz mono PCM.
 

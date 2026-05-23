@@ -1171,6 +1171,13 @@ int crispasr_run_backend(const whisper_params& params_in) {
             fprintf(stderr, "crispasr[verbose]: resolved aligner   = '%s'\n", resolved_aligner.c_str());
         }
         params.aligner_model = resolved_aligner;
+    } else if (!params.aligner_model.empty()) {
+        const std::string resolved_aligner = crispasr_resolve_model_cli(params.aligner_model, "", params.no_prints,
+                                                                        params.cache_dir, params.auto_download);
+        if (params.verbose && resolved_aligner != params.aligner_model) {
+            fprintf(stderr, "crispasr[verbose]: resolved aligner   = '%s'\n", resolved_aligner.c_str());
+        }
+        params.aligner_model = resolved_aligner;
     }
 
     // Create and init the backend.

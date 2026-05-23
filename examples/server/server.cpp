@@ -652,6 +652,9 @@ void get_req_parameters(const Request& req, whisper_params& params) {
     if (req.has_file("frequency_penalty")) {
         params.frequency_penalty = std::stof(req.get_file_value("frequency_penalty").content);
     }
+    if (req.has_file("seed")) {
+        params.seed = (uint64_t)std::stoull(req.get_file_value("seed").content);
+    }
     if (req.has_file("temperature_inc")) {
         params.temperature_inc = std::stof(req.get_file_value("temperature_inc").content);
     }

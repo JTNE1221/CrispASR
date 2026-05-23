@@ -456,6 +456,19 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         }
         params.model = resolved;
 
+        if (params.aligner_model == "auto" || params.aligner_model == "default") {
+            const std::string resolved_aligner = crispasr_resolve_model_cli(
+                params.aligner_model, "canary-ctc-aligner", params.no_prints, params.cache_dir, params.auto_download);
+            if (resolved_aligner.empty()) {
+                fprintf(stderr, "crispasr-server: failed to resolve aligner '%s'\n", params.aligner_model.c_str());
+                return 1;
+            }
+            params.aligner_model = resolved_aligner;
+        } else if (!params.aligner_model.empty()) {
+            params.aligner_model = crispasr_resolve_model_cli(params.aligner_model, "", params.no_prints,
+                                                              params.cache_dir, params.auto_download);
+        }
+
         backend = crispasr_create_backend(backend_name);
         if (!backend || !backend->init(params)) {
             fprintf(stderr, "crispasr-server: failed to init backend '%s'\n", backend_name.c_str());
@@ -854,6 +867,12 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             rp.tts_instruct = instructions;
         if (body.contains("seed") && body["seed"].is_number_integer())
             rp.seed = body["seed"].get<uint64_t>();
+        if (body.contains("temperature") && body["temperature"].is_number())
+            rp.temperature = body["temperature"].get<float>();
+        if (body.contains("max_new_tokens") && body["max_new_tokens"].is_number_integer())
+            rp.max_new_tokens = body["max_new_tokens"].get<int>();
+        if (body.contains("frequency_penalty") && body["frequency_penalty"].is_number())
+            rp.frequency_penalty = body["frequency_penalty"].get<float>();
 
         // Long-form chunking (PLAN §75d / issue #66): split input on
         // sentence boundaries before dispatching to the backend so each
