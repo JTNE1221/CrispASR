@@ -285,6 +285,13 @@ constexpr Entry k_registry[] = {
     {"parakeet-tdt_ctc-1.1b", "parakeet-tdt_ctc-1.1b-q4_k.gguf",
      "https://huggingface.co/cstr/parakeet-tdt_ctc-1.1b-GGUF/resolve/main/parakeet-tdt_ctc-1.1b-q4_k.gguf",
      "~810 MB", nullptr, nullptr},
+    // parakeet-rnnt-0.6b — standard RNN-Transducer (no TDT duration head).
+    // Same 24-layer FastConformer encoder as TDT variants; 80-mel input;
+    // 1024-token vocab (BPE, lowercase). Runtime auto-detects RNNT via
+    // n_tdt_durations==0 and uses the RNNT greedy decoder.
+    {"parakeet-rnnt-0.6b", "parakeet-rnnt-0.6b-q4_k.gguf",
+     "https://huggingface.co/cstr/parakeet-rnnt-0.6b-GGUF/resolve/main/parakeet-rnnt-0.6b-q4_k.gguf",
+     "~447 MB", nullptr, nullptr},
     // Qwen3-TTS: the talker LM and the codec live in two separate HF
     // repos. Default download is Q8_0 talker (the LEARNINGS-recommended
     // deployment quant — Q4_K drifts noticeably in strict diffs) paired

@@ -1278,6 +1278,94 @@ static std::vector<parakeet_emitted_token> parakeet_tdt_decode(parakeet_context*
 }
 
 // ===========================================================================
+// Standard RNNT greedy decode (n_tdt_durations == 0)
+// ===========================================================================
+// Identical predictor / joint infrastructure to TDT but no duration head:
+//   - joint.out.weight rows = vocab+1 (vocab + blank only)
+//   - blank → advance encoder frame by 1, reset inner counter
+//   - real token → advance predictor, stay on same frame
+//   - max_per_step cap forces frame advance to guarantee progress
+
+static std::vector<parakeet_emitted_token> parakeet_rnnt_decode(parakeet_context* ctx, const float* enc, int T_enc,
+                                                                int d_model) {
+    parakeet_init_pred_weights(ctx);
+    parakeet_init_joint_weights(ctx);
+
+    const auto& hp = ctx->model.hparams;
+    const int blank_id = (int)hp.blank_id; // vocab_size
+    const int n_vocab_blk = blank_id + 1;  // vocab + blank
+    const int max_per_step = 10;
+
+    auto& W = ctx->pred_w;
+    auto& J = ctx->joint_w;
+    if (J.vocab_total != n_vocab_blk) {
+        fprintf(stderr, "parakeet: RNNT joint vocab_total mismatch (%d vs expected %d)\n", J.vocab_total, n_vocab_blk);
+    }
+
+    std::vector<parakeet_emitted_token> emitted;
+    emitted.reserve(256);
+
+    parakeet_lstm_state state;
+    lstm_init_state(state, W.H);
+
+    std::vector<float> pred_out;
+    predictor_step(W, blank_id, state, pred_out);
+
+    std::vector<float> proj_e(J.joint_hidden);
+    std::vector<float> logits(J.vocab_total);
+
+    const bool has_hotwords = !ctx->hotword_trie.empty();
+    core_context_bias::MatchState hw_state;
+
+    int t = 0;
+    while (t < T_enc) {
+        joint_proj_enc(J, enc + (size_t)t * d_model, proj_e);
+
+        int n_inner = 0;
+        while (n_inner < max_per_step) {
+            joint_step(J, proj_e.data(), pred_out.data(), logits);
+
+            if (has_hotwords)
+                core_context_bias::apply_bias(ctx->hotword_trie, hw_state, logits.data(), n_vocab_blk,
+                                              ctx->hotword_boost);
+
+            int tok = 0;
+            float tok_lp = logits[0];
+            for (int v = 1; v < n_vocab_blk; v++) {
+                if (logits[v] > tok_lp) {
+                    tok_lp = logits[v];
+                    tok = v;
+                }
+            }
+
+            if (tok == blank_id) {
+                t++;
+                break;
+            }
+
+            float tok_p = 1.0f;
+            {
+                double sum = 0.0;
+                for (int v = 0; v < n_vocab_blk; v++)
+                    sum += std::exp((double)(logits[v] - tok_lp));
+                tok_p = sum > 0.0 ? (float)(1.0 / sum) : 0.0f;
+            }
+
+            emitted.push_back({tok, t, t, tok_p});
+            if (has_hotwords)
+                core_context_bias::advance(ctx->hotword_trie, hw_state, tok);
+            predictor_step(W, tok, state, pred_out);
+            n_inner++;
+        }
+
+        if (n_inner >= max_per_step)
+            t++;
+    }
+
+    return emitted;
+}
+
+// ===========================================================================
 // CTC greedy decode (for hybrid TDT+CTC models)
 // ===========================================================================
 
@@ -1802,8 +1890,10 @@ extern "C" struct parakeet_result* parakeet_decode_frames(struct parakeet_contex
         return nullptr;
 
     const bool use_ctc = ctx->decode_ctc && ctx->model.has_ctc;
-    auto emitted = use_ctc ? parakeet_ctc_decode(ctx, enc_frames, T_enc, d_model)
-                           : parakeet_tdt_decode(ctx, enc_frames, T_enc, d_model);
+    const bool use_rnnt = !use_ctc && ctx->model.hparams.n_tdt_durations == 0;
+    auto emitted = use_ctc    ? parakeet_ctc_decode(ctx, enc_frames, T_enc, d_model)
+                   : use_rnnt ? parakeet_rnnt_decode(ctx, enc_frames, T_enc, d_model)
+                              : parakeet_tdt_decode(ctx, enc_frames, T_enc, d_model);
 
     // Build result (same as the tail of parakeet_transcribe_ex)
     auto* r = (parakeet_result*)calloc(1, sizeof(parakeet_result));
@@ -1944,11 +2034,16 @@ extern "C" struct parakeet_result* parakeet_transcribe_chunked(struct parakeet_c
     // 2. Single-pass TDT decode over the concatenated encoder output
     const int d_model = (int)ctx->model.hparams.d_model;
     const bool use_ctc = ctx->decode_ctc && ctx->model.has_ctc;
-    auto emitted = use_ctc ? parakeet_ctc_decode(ctx, enc_all.data(), T_enc_total, d_model)
-                           : parakeet_tdt_decode(ctx, enc_all.data(), T_enc_total, d_model);
+    const bool use_rnnt = !use_ctc && ctx->model.hparams.n_tdt_durations == 0;
+    auto emitted = use_ctc    ? parakeet_ctc_decode(ctx, enc_all.data(), T_enc_total, d_model)
+                   : use_rnnt ? parakeet_rnnt_decode(ctx, enc_all.data(), T_enc_total, d_model)
+                              : parakeet_tdt_decode(ctx, enc_all.data(), T_enc_total, d_model);
 
     if (getenv("PARAKEET_DEBUG"))
-        fprintf(stderr, "parakeet: %s decode OK (%d tokens from %d enc frames)\n", use_ctc ? "CTC" : "TDT",
+        fprintf(stderr, "parakeet: %s decode OK (%d tokens from %d enc frames)\n",
+                use_ctc    ? "CTC"
+                : use_rnnt ? "RNNT"
+                           : "TDT",
                 (int)emitted.size(), T_enc_total);
 
     // 3. Build result (reuse the same result-building code as transcribe_ex)
@@ -2125,10 +2220,16 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
 
     // 3. Greedy decode (TDT or CTC)
     const bool use_ctc = ctx->decode_ctc && ctx->model.has_ctc;
-    auto emitted = use_ctc ? parakeet_ctc_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model)
-                           : parakeet_tdt_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model);
+    const bool use_rnnt = !use_ctc && ctx->model.hparams.n_tdt_durations == 0;
+    auto emitted = use_ctc    ? parakeet_ctc_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model)
+                   : use_rnnt ? parakeet_rnnt_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model)
+                              : parakeet_tdt_decode(ctx, enc.data(), T_enc, (int)ctx->model.hparams.d_model);
     if (getenv("PARAKEET_DEBUG"))
-        fprintf(stderr, "parakeet: %s decode OK (%d tokens)\n", use_ctc ? "CTC" : "TDT", (int)emitted.size());
+        fprintf(stderr, "parakeet: %s decode OK (%d tokens)\n",
+                use_ctc    ? "CTC"
+                : use_rnnt ? "RNNT"
+                           : "TDT",
+                (int)emitted.size());
 
     // 4. Build result
     auto* r = (parakeet_result*)calloc(1, sizeof(parakeet_result));
