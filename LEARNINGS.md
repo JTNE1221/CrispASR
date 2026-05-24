@@ -6708,3 +6708,129 @@ after a workaround makes the harness green.
 
 `tools/compare_probe_dumps.py` + `tools/inspect_im2col_dump.py`
 are the diagnostic scripts.
+
+### Round 9 follow-up #5 (2026-05-24, very late) — Bug B narrowed to rc.weight residual conv; root cause still unidentified
+
+Continued the Bug B chase from #4. Did not find root cause but
+eliminated several hypotheses and localized the divergence point.
+
+**Verified (from #4's open questions):**
+
+- Host `ggml_backend_tensor_get(MTL0#unet_input#0)` immediately before
+  the FIRST UNet `im2col` dispatch returns the correct Gaussian-noise
+  bytes (`1.9269 1.4873 …`) at `data=0x159114000 offs=0`. Same buffer
+  and offset across all 4 dispatches observed (cond + uncond × 2
+  steps). The host side is fine.
+
+**New finding — where Bug B actually manifests:**
+
+Used `CRISPASR_S3GEN_UNET_PROBE_BLOCK1=<N>` to compare per-block
+intermediates between Path X (workaround) and Path Y (no-pin):
+
+| Probe target | Stage | cos(Path X vs Y) |
+| - | - | - |
+| Block 0 (`db.0.0.b1`) | after_mul_mat → after_mish | 1.00000 |
+| Block 1 (`db.0.0.b2`) | after_mul_mat → after_mish | 1.00000 |
+| `dump_db_resnet` (resnet block output) | post-residual-add | 0.32261 |
+| `dump_rc_out_db00` (rc conv output, **new probe**) | F32 residual conv | **0.02211** |
+| Block 2 (`mb.0.0.b1`) | after_im2col | 0.36914 |
+| Block 13 (`mb.5.0.b2`) | after_im2col | 0.70562 |
+| Block 27 (`ub.0.0.b2`) | after_im2col | 0.92610 |
+
+So Bug B's first divergence is at the **residual conv** (`rc.weight`)
+inside `causal_resnet_block` at `s3.fd.db.0.0`. b1 and b2's conv1d
+outputs are bit-identical between the two paths — both read from the
+same Metal compute-buffer offset 0 (MTL0#unet_input#0 in Path Y,
+unet_input in Path X). The rc conv reads from the **same** offset
+yet produces output with `rms=0.0645` (Bug B) vs `rms=0.3631`
+(workaround) — a ~5.6× magnitude collapse and `cos=0.022`. Bug B's
+values look like rc.weight × ~zero input; workaround's values look
+like rc.weight × Gaussian-noise input (σ≈1).
+
+**Eliminated hypotheses (all left rms ≈ 16 unchanged):**
+
+1. **CPU store-buffer / cache coherency.**
+   `CRISPASR_FORCE_DMB=1` inserts `__sync_synchronize()` after the
+   shared-buffer host memcpy. No effect — the GPU was already seeing
+   the writes correctly. (The host-side readback proved this from the
+   start; the experiment just rules out a write-buffer race
+   conclusively.)
+2. **GPU-side cache invalidation.** `CRISPASR_FORCE_BLIT_COPY=1`
+   replaces the host memcpy with a Metal blit-encoder copy in its own
+   committed command buffer. No effect — the GPU is performing the
+   copy itself, fully synchronous to subsequent compute. Bug B
+   persists.
+3. **Intra-encoder concurrency.** `GGML_METAL_CONCURRENCY_DISABLE=1`
+   and `GGML_METAL_GRAPH_OPTIMIZE=0` both leave Bug B unchanged.
+4. **Cross-command-buffer race.** Metal splits each
+   `graph_compute_async` across `n_cb+1` command buffers; each cb has
+   its own `mem_ranges`, so cross-cb conflicts are not tracked at the
+   ggml layer. Setting `CRISPASR_METAL_N_CB=2` produces rms=16.217
+   (essentially unchanged from default n_cb=1 rms=16.129). Setting
+   `n_cb=0` is broken (division-by-zero in `n_nodes_per_cb`). So
+   command-buffer fan-out is not the cause.
+5. **Missing or stale `mem_ranges` barrier.**
+   `CRISPASR_METAL_FORCE_BARRIER=1` emits a Metal memory barrier
+   before EVERY metal-op encode (effectively serializing the whole
+   graph). Bug B still produces rms=16.183. So no concurrency hazard
+   inside the encoder is responsible.
+
+**Bug shape — unanswered:**
+
+Same Metal pipeline, same kernel args, same input bytes (verified
+host-side), same Metal buffer offset. b1 and b2's conv1ds read this
+input correctly. rc's conv1d does not. The only differences I can
+think of between b1's im2col and rc's im2col on the same input:
+
+- b1 uses KH=1, KW=3, p0=2 (causal-padded). Threads with `iiw < 0`
+  branch to write `0.0f`.
+- rc uses KH=1, KW=1, p0=0. No padding; all threads enter the
+  data-read branch.
+
+Both use the same `kernel_im2col_f32` template with identical args
+plumbing; there is no KW=1 fast path. Both dispatches are
+`(IC=320, OH=1, OW=T_mel)` threadgroups × `(N=1, KH, KW)` threads.
+
+**Loose lead — alloc-plan aliasing within the buf=0 chunk:**
+
+In the alloc trace (with probe + dump_db_resnet preserved), the
+first UNet pass shows `MTL0#unet_input#0` at offset 0, then
+`node_47 op=IM2COL` (rc's im2col) is allocated at offset 6024704
+while `MTL0#unet_input#0` is **freed** by gallocr the moment node_47
+is registered. Then `node_51 op=MUL_MAT` (rc's mul_mat) is allocated
+**at offset 0**, reusing MTL0#unet_input#0's just-freed slot. The
+same plan exists in Path X (with unet_input itself at offset 0
+instead of MTL0#unet_input#0), and Path X works — so the pure
+aliasing isn't the cause, but the interaction of "sched-injected
+input_cpy at offset 0 vs user-pinned input at offset 0" remains
+suspicious.
+
+**Operational note — dump artifacts:**
+
+`ggml_set_output` on a probe target keeps that one slot live but
+adds new tensors to the graph (the implicit "(transposed) (cont)"
+follow-ups), which **changes the alloc plan downstream**. A run
+configured with `PROBE_BLOCK1=1 + MARK_DB_RESNET=1` broke the
+workaround (rms=17.355). So you cannot freely add probes to compare
+"Path X with marks" vs "Path Y with marks" — the markings perturb
+the graph in their own right. Future investigators: probe one path
+exclusively per run, or accept that mark-induced offset shuffling is
+itself part of the experiment.
+
+**Diagnostic knobs added (env-gated, no runtime impact when unset):**
+
+- `CRISPASR_NO_INPUT_PIN` — disables the unet_input pin workaround,
+  for reproducing Bug B.
+- `CRISPASR_IM2COL_DBG` — logs first 8 host bytes of `op->src[1]` for
+  the first UNet `kernel_im2col_f32` dispatch.
+- `CRISPASR_FORCE_DMB`, `CRISPASR_FORCE_BLIT_COPY`,
+  `CRISPASR_METAL_FORCE_BARRIER`, `CRISPASR_METAL_N_CB` — the
+  hypothesis-elimination knobs above.
+- `CRISPASR_S3GEN_UNET_PROBE_RC_OUT` — dumps rc's residual-conv
+  output at `s3.fd.db.0.0` as `dump_rc_out_db00`.
+
+**Bug B remains open.** Workaround is still shipping. Next step
+would be probing the rc kernel's per-thread reads with a custom Metal
+shader replacement that captures `x[offset_src]` to a side buffer, so
+we can see exactly what the GPU thread sees vs what host_get sees at
+the same byte offset.

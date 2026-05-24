@@ -6,6 +6,78 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-24 PLAN #83 Round 9 follow-up #5 — Bug B narrowed to rc residual conv; root cause still open
+
+Investigated open Bug B from follow-up #4 (workaround in place: pinning
+`unet_input` to GPU when UNet runs GPU-resident). Eliminated five
+hypotheses, localized the divergence point, but did not identify the
+root cause. The workaround keeps shipping.
+
+**Localized the divergence.** Block-by-block probe of the UNet's
+first resnet pass shows b1 and b2 produce bit-identical
+(cos=1.000) intermediates between Path X (pinned) and Path Y
+(no-pin). The first divergent tensor is the **residual conv
+output** (`rc.weight` × `unet_input` inside `causal_resnet_block`
+at `s3.fd.db.0.0`). Added a new probe knob
+`CRISPASR_S3GEN_UNET_PROBE_RC_OUT=1` that dumps it as
+`dump_rc_out_db00`. Comparison:
+
+- Path X (workaround): `rc_out_db00 rms=0.3631`
+- Path Y (Bug B): `rc_out_db00 rms=0.0645`
+- cos(X, Y) = **0.022**
+
+So the rc kernel sees ~zero input in Bug B, even though the host
+`tensor_get` on the same Metal compute-buffer offset returns the
+correct Gaussian-noise bytes. b1 and b2 reading the same offset see
+correct data and produce identical output.
+
+**Eliminated:**
+
+1. CPU store-buffer / cache coherency — `CRISPASR_FORCE_DMB=1`
+   (full `__sync_synchronize` after the memcpy) doesn't help.
+2. GPU-side cache invalidation — `CRISPASR_FORCE_BLIT_COPY=1`
+   (blit-encoder copy in its own committed cb instead of host
+   memcpy) doesn't help.
+3. Intra-encoder concurrency — `GGML_METAL_CONCURRENCY_DISABLE=1`
+   and `GGML_METAL_GRAPH_OPTIMIZE=0` don't help.
+4. Cross-cmd-buf race — `CRISPASR_METAL_N_CB=2` doesn't worsen the
+   bug.
+5. Missing `mem_ranges` barrier — `CRISPASR_METAL_FORCE_BARRIER=1`
+   (emit a Metal `memoryBarrierWithScope:Buffers` before every
+   single op) doesn't help.
+
+All five experiments leave Bug B's smoke at `rms ≈ 16.1` vs the
+workaround's 5.14. No measurable improvement from any of them.
+
+**Operational note discovered along the way.** `ggml_set_output` on
+a probe target preserves that slot but introduces an implicit
+"(transposed) (cont)" follow-up tensor that shifts subsequent
+gallocr offsets — which is enough to BREAK the workaround under
+certain marking patterns (saw `MARK_DB_RESNET + PROBE_BLOCK1=1`
+push the workaround to `rms=17.355`). So future investigators
+should probe Path X and Path Y as separate runs with **identical
+marking config**, and avoid trusting "extra-mark" runs for
+end-to-end correctness.
+
+**Diagnostic knobs added** (env-gated, no runtime impact when
+unset; committed as WIP for the next investigator):
+
+- `CRISPASR_NO_INPUT_PIN` — gates off the `unet_input` pin workaround
+  in `cfm_euler_solve::run_denoiser` to reproduce Bug B.
+- `CRISPASR_IM2COL_DBG` — prints first 8 host bytes of `op->src[1]`
+  at the FIRST UNet `kernel_im2col_f32` dispatch.
+- `CRISPASR_FORCE_DMB`, `CRISPASR_FORCE_BLIT_COPY`,
+  `CRISPASR_METAL_FORCE_BARRIER`, `CRISPASR_METAL_N_CB` — the
+  hypothesis-elimination knobs above.
+- `CRISPASR_S3GEN_UNET_PROBE_RC_OUT` — marks the residual conv output
+  at `s3.fd.db.0.0` as a dump tensor.
+
+LEARNINGS Round 9 follow-up #5 records the full hypothesis table
+and the next experiment to run (custom Metal kernel that captures
+per-thread `x[offset_src]` reads to a side buffer).
+
+---
+
 ## 2026-05-24 PLAN #83 Round 9 follow-up #4 — S3Gen UNet GPU drift: TWO bugs in tandem
 
 Three rounds of bisect (#83 R9 follow-ups #1–#3) had ruled out gallocr,
