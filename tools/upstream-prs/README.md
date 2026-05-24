@@ -13,6 +13,9 @@ Redacted descriptions in own voice.
 | 06 | `ggml-cuda : per-head mask in flash_attn_ext (MMA-F16 path)` | design + kernel-level patch sketch in `06-cuda-fa-perhead-mask.md` (~45 LOC across `fattn.cu` + `fattn-mma-f16.cuh` + test-backend-ops) | drafted on main 2026-05-23, not yet implemented |
 | 07 | `metal : kernel_aa_snake_beta — fused AA SnakeBeta for BigVGAN v2` | drafted from upstream IndexTTS CUDA reference (Apache 2.0) — needs implementation | RFC scope only; new ggml op |
 | 08 | `metal : fix cross-simdgroup reduction in kernel_norm / kernel_rms_norm / kernel_l2_norm` | yours — bisected from kokoro short-input audio regression; see [`tests/test_metal_norm_repro.cpp`](../../tests/test_metal_norm_repro.cpp) | drafted, not yet filed |
+| 09 | `metal : Q8_0 × F32 bit-match mul_mat under GGML_PREC_F32` | yours (752baec) — Q8_0 counterpart to the existing Q4_K bit-match path | drafted, not yet filed |
+| 10 | `metal/ggml-alloc : long F32 GPU graphs accumulate drift sensitive to in-place buffer reuse pattern` | yours — bisected through chatterbox-tts UNet; bug report, no patch | drafted, not yet filed |
+| 11 | `metal/sched : mixed CPU+GPU op pinning produces NaN at large input dimensions` | yours — same UNet repro; bug report, no patch | drafted, not yet filed |
 
 The `.patch` files are clean diffs; they are reference shape, not
 literal `git am` payloads — line numbers are relative to our vendored
