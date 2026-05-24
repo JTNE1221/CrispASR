@@ -112,6 +112,40 @@ See LEARNINGS.md §Qwen3-TTS FUSED_QKV.
 
 ---
 
+## 2026-05-24 PLAN #97 — parakeet-rnnt-0.6b RNNT decoder
+
+**Problem.** `nvidia/parakeet-rnnt-0.6b` is a standard RNN-Transducer (no
+TDT duration head). The existing parakeet decoder only handled TDT + CTC
+variants; RNNT needed a separate greedy loop.
+
+**Fix.** Added `parakeet_rnnt_decode` in `src/parakeet.cpp`:
+- blank token → advance encoder frame by 1 (standard RNNT blank semantics)
+- real token → stay on same frame, emit token, update predictor state
+- `max_per_step=10` per-frame cap prevents infinite loops on degenerate inputs
+- Dispatch: `use_rnnt = !use_ctc && n_tdt_durations==0`; all 3 call sites
+  (frame, chunk, full-file) updated to 3-way CTC/RNNT/TDT.
+
+**Converter** (`models/convert-parakeet-to-gguf.py`) gained:
+- In-memory nemo loading via BytesIO + torch.load (avoids disk extraction of 2.4 GB tarball)
+- RNNT key detection: `joint.joint_net.2.weight` (not `joint.out.weight`)
+- `joint_hidden` priority chain: `joint_hidden` → `encoder_hidden` → 640
+- Q4_K quantization with F16 fallback for LSTM-shaped tensors (last dim not divisible by 256)
+
+**Model:** downloaded `nvidia/parakeet-rnnt-0.6b` (2.3 GB nemo) to internal disk.
+Converted to F16 (1235 MB) then `crispasr-quantize` to Q4_K (447 MB).
+
+**Smoke test:** JFK 11 s → *"and so my fellow americans ask not what your country can do for you ask what you can do for your country"* — correct.
+
+**Upload:** Q4_K + F16 + README to `cstr/parakeet-rnnt-0.6b-GGUF`.
+
+**Registry:** `parakeet-rnnt-0.6b` entry added to `crispasr_model_registry.cpp` (~447 MB).
+
+Committed `48ac6f06` to main. Worktree `CrispASR-parakeet-rnnt` (branch `parakeet-rnnt`) rebased + fast-forwarded into main.
+
+**Still open in #97:** parakeet-rnnt-1.1b (needs disk space on external); realtime-EOU; unified-en-0.6b.
+
+---
+
 ## 2026-05-23 Global diarization timeline (issue #110)
 
 **Problem.** The `sherpa`/`ecapa` diarization path ran the subprocess
