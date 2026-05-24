@@ -1939,6 +1939,14 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
     if (mask)
         x = ggml_mul(ctx0, x, mask);
     ggml_set_name(x, "denoiser_out");
+    // PLAN #83 r9 follow-up #5: env-gated dump of denoiser_out via a
+    // dup-named tensor so the existing DUMP_UNET filter picks it up.
+    if (std::getenv("CRISPASR_S3GEN_UNET_PROBE_DENOISER_OUT") != nullptr) {
+        ggml_tensor* dump_x = ggml_dup(ctx0, x);
+        ggml_set_name(dump_x, "dump_denoiser_out");
+        ggml_set_output(dump_x);
+        ggml_build_forward_expand(gf, dump_x);
+    }
     ggml_build_forward_expand(gf, x);
     ggml_free(ctx0);
     return gf;
@@ -2138,6 +2146,13 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
             if (step == 0) {
                 const char* dump_tag = std::getenv("CRISPASR_S3GEN_DUMP_UNET");
                 if (dump_tag && *dump_tag) {
+                    // PLAN #83 r9 follow-up #5: run_denoiser fires twice per
+                    // CFM step (cond + uncond). Without disambiguation the
+                    // second call overwrites the first. Use a local static
+                    // counter to tag dumps "cond"/"uncond".
+                    static int dump_call_idx = 0;
+                    const char* pass_tag = (dump_call_idx % 2 == 0) ? "cond" : "uncond";
+                    dump_call_idx++;
                     const int n_nodes = ggml_graph_n_nodes(gf);
                     int n_dumped = 0;
                     for (int i = 0; i < n_nodes; ++i) {
@@ -2148,7 +2163,8 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
                         std::vector<char> buf(nb_node);
                         ggml_backend_tensor_get(node, buf.data(), 0, nb_node);
                         char path[256];
-                        std::snprintf(path, sizeof(path), "/tmp/cb-unet-dump-%s-%s.bin", dump_tag, node->name);
+                        std::snprintf(path, sizeof(path), "/tmp/cb-unet-dump-%s-%s-%s.bin", dump_tag, pass_tag,
+                                      node->name);
                         FILE* fp = std::fopen(path, "wb");
                         if (fp) {
                             std::fwrite(buf.data(), 1, nb_node, fp);
@@ -2156,8 +2172,9 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
                             n_dumped++;
                         }
                     }
-                    fprintf(stderr, "s3gen: [DUMP_UNET=%s] dumped %d intermediates to /tmp/cb-unet-dump-%s-*.bin\n",
-                            dump_tag, n_dumped, dump_tag);
+                    fprintf(stderr,
+                            "s3gen: [DUMP_UNET=%s pass=%s] dumped %d intermediates to /tmp/cb-unet-dump-%s-%s-*.bin\n",
+                            dump_tag, pass_tag, n_dumped, dump_tag, pass_tag);
                 }
             }
             ggml_tensor* out = ggml_graph_get_tensor(gf, "denoiser_out");
