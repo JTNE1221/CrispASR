@@ -103,9 +103,9 @@ was a cold-cache artifact (model warmed into RAM by the preceding run,
 making the FUSED_QKV run appear faster). `CP_STEP0_CACHE` also neutral
 at normal load; quiet-machine confirmation still pending.
 
-**Still open:** F16 FUSED_QKV bench (needs F16 talker GGUF locally);
-Q4_K bench; fusing 15 cp steps into one graph; Q8_0 KV cache (blocked
-on Metal `cont(Q8_0)` kernel patch).
+**F16 FUSED_QKV bench 2026-05-24:** F16 GGUF downloaded; resampled jfk.wav to 24 kHz (codec requires 24 kHz voice ref). Interleaved A/B (1 warm-up + 3A + 3B, 73 frames each): warm-up baseline 133 ms/frame; A mean 212 ms/frame, B mean 191 ms/frame, σ≈47 ms/frame — **inconclusive** (machine loaded: model download + build running concurrently dominated variance). Consistent with Q8_0 result (neutral). **Decision: keep F16 FUSED_QKV default-OFF.** Quiet-machine retest still open.
+
+**Still open:** F16 FUSED_QKV quiet-machine bench; Q4_K bench; fusing 15 cp steps into one graph; Q8_0 KV cache (blocked on Metal `cont(Q8_0)` kernel patch).
 
 Updated: PLAN.md #52 perf notes + `src/qwen3_tts.cpp:5023` comment.
 See LEARNINGS.md §Qwen3-TTS FUSED_QKV.

@@ -42,7 +42,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **DONE** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | — | All backends now route through core helpers (`core_attn`, `core_sanm`, `core_conformer`) that unconditionally use `ggml_flash_attn_ext`. Only t5_translate excluded (T5 rel-pos bias incompatible). |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
 | **LOW** | [#95 IndexTTS Chinese TN binary alternative](#95-indextts-15-chinese-tn--binary-alternative-to-the-python-wetext-hook) | survey only | Python `INDEXTTS_TEXT_NORMALIZER` hook shipped 2026-05-19. Hand-roll (#95a) is the right next step *when* a user reports a digit/date prompt that breaks; OpenFST vendoring (#95b) only after #95a grows past ~5 cases. |
-| **LOW** | [#97 More Parakeet variants](#97-more-parakeet-variants) | Small per-variant | Converter-only for TDT / TDT+CTC variants (v2, tdt-1.1b, tdt_ctc-{110m,1.1b}); RNNT / realtime-EOU / unified-en deferred (need new decoder code or arch survey). |
+| **IN PROGRESS** | [#97 More Parakeet variants](#97-more-parakeet-variants) | Small per-variant | TDT/TDT+CTC DONE; **RNNT decoder written 2026-05-24** — `parakeet_rnnt_decode` + converter RNNT detection in `CrispASR-parakeet-rnnt` worktree; model download + smoke test + HF upload + registry entries pending. |
 | **DONE** | [#98 Hotwords / contextual biasing](#98-hotwords--contextual-biasing) | Phased | **Phase A+B DONE.** CTC-WS Aho-Corasick trie wired into parakeet CTC + TDT; LLM prompt injection for qwen3-asr + voxtral. `--hotwords` / `--hotwords-file` / `--hotwords-boost` CLI. 13+4 tests. Phase C deferred. → HISTORY 2026-05-23. |
 | **DONE** | [#110 Global diarization timeline](#110-global-diarization-timeline) | Medium | Sherpa/ecapa now runs once on the full audio (not per-slice). `CrispasrSherpaCache` mirrors the pyannote global-cache pattern. Segments split at speaker-turn boundaries via word-level overlap scoring. 13+8 tests. → HISTORY 2026-05-23. |
 | **LOW** | [#106 TEN-VAD](#106-ten-vad--low-latency-cross-platform-vad) | Small | Technically feasible VAD backend: C-compatible, 16 kHz / 10-16 ms frames, prebuilt libs + ONNX path. License is the gate: Apache 2.0 plus extra no-compete / own-app-only conditions from Agora. |
@@ -133,13 +133,28 @@ Filename-heuristic dispatch in `crispasr_backend.cpp:370-372`
 unchanged — `parakeet-tdt_ctc-*.gguf` matches "parakeet" with the
 `!contains_ci("tdt")` guard preventing accidental fc-ctc routing.
 
-### Deferred — needs new decoder code or arch survey
+### In progress — parakeet-rnnt (2026-05-24)
 
 - **`nvidia/parakeet-rnnt-0.6b`** + **`nvidia/parakeet-rnnt-1.1b`** —
-  standard RNN-Transducer (no duration head). `parakeet_tdt_decode` in
-  `src/parakeet.cpp:999` is the template; an RNNT decoder is "TDT minus
-  the duration argmax." Estimated ~80–150 LOC + a converter branch that
-  doesn't write `parakeet.n_tdt_durations` / `parakeet.tdt_durations`.
+  standard RNN-Transducer (no duration head).
+
+  **Done (worktree `CrispASR-parakeet-rnnt`, branch `parakeet-rnnt`):**
+  - `parakeet_rnnt_decode` in `src/parakeet.cpp:1289` — blank→advance t by 1,
+    real token→stay on same frame, `max_per_step=10` anti-loop cap; hotword
+    biasing wired.
+  - Converter RNNT detection: `joint.out.weight.shape[0] == vocab+1` → sets
+    `n_tdt_durations=0` in GGUF metadata; runtime dispatches via
+    `use_rnnt = !use_ctc && n_tdt_durations==0`.
+  - All 3 dispatch sites (frame/chunk/full) updated to 3-way CTC/RNNT/TDT.
+  - Binary built at `CrispASR-parakeet-rnnt/build-ninja/bin/crispasr`.
+
+  **Pending:**
+  - [ ] Model download (nemo → temp dir on internal disk; `bxo0aor33`)
+  - [ ] Convert to Q4_K GGUF + smoke test on JFK
+  - [ ] Upload Q4_K (+ F16) to `cstr/parakeet-rnnt-0.6b-GGUF`
+  - [ ] Registry entries in `crispasr_model_registry.cpp`
+  - [ ] Repeat for 1.1b
+  - [ ] clang-format v18 + commit + rebase into main + push
 - **`nvidia/parakeet_realtime_eou_120m-v1`** — streaming + end-of-utterance
   head. Needs cache-aware FastConformer streaming (cf. PLAN #81 Nemotron),
   plus an EOU head. Not a converter-only job.
@@ -628,7 +643,7 @@ collection: [Qwen/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
   5. ✓ Codec decoder (Tokenizer-12Hz) — diff harness 8/8 PASS at cos≥0.999983 (`d1f47b1`, `48c6c1a`). Required a Metal `kernel_conv_transpose_1d` patch in our ggml fork (input-range tightening — see LEARNINGS, MUST RE-APPLY on every ggml bump).
   6. ✓ ECAPA speaker_encoder runtime forward — cos=0.999999 (`c0a9cb3`, `8a4c49e`, `38040b4`). C ABI: `qwen3_tts_compute_speaker_embedding(audio, n, sr)` + `qwen3_tts_set_voice_prompt[_with_text]`.
   7. ✓ Codec encoder runtime forward — diff 3 stages cos≥0.999 (`ef11c01`, `10302b4`). Closes the bake-script loop.
-- **Performance pass (in progress, partial wins shipped).** Quiet-bench Q8_0 0.6B with all defaults: ~79 ms/frame (talker ~30 + cp ~49) on a quiet M1 — already under the 80 ms/frame real-time budget at 12.5 fps. Under normal system load ~129 ms/frame; talker and cp scale proportionally with Metal contention. Shipped: **`QWEN3_TTS_O15=1` is default-on** (commit `5e21e4a`) — cp graph reuse saves ~14 ms/frame on cp_pred under contention, ~2-3 ms/frame quiet, bit-identical WAV. Gated, byte-identical, kept default-OFF: `QWEN3_TTS_FUSED_QKV=1` (**Q8_0 bench done 2026-05-23: neutral — interleaved A/B on this M1 shows 129 vs 129 ms/frame; keep default-OFF for Q8_0**; F16 case still open — needs F16 talker GGUF locally); `QWEN3_TTS_LK_BUCKET=1` (talker Lk bucketing, **net loss on M1 Metal Q8_0** — see LEARNINGS); `QWEN3_TTS_CP_STEP0_CACHE=1` (cp T=2 step-0 graph cache, claimed 1-3 ms/frame quiet savings — **loaded-machine bench neutral within noise; quiet-machine confirmation still pending**, bit-identical). Investigated: Q8_0 KV cache — blocked on Metal `cont(Q8_0)` source (only F32/F16/BF16 sources supported); needs Metal kernel patch or KV layout restructure to land. Still open: F16 FUSED_QKV clean quiet-machine bench (needs F16 talker GGUF — not locally available); Q4_K talker fused QKV bench (needs Q4_K talker GGUF); the larger lift of fusing 15 cp steps into one graph (needs on-device top-k sampling, ~3 ms/frame upper bound after O15 since most overhead is already gone).
+- **Performance pass (in progress, partial wins shipped).** Quiet-bench Q8_0 0.6B with all defaults: ~79 ms/frame (talker ~30 + cp ~49) on a quiet M1 — already under the 80 ms/frame real-time budget at 12.5 fps. Under normal system load ~129 ms/frame; talker and cp scale proportionally with Metal contention. Shipped: **`QWEN3_TTS_O15=1` is default-on** (commit `5e21e4a`) — cp graph reuse saves ~14 ms/frame on cp_pred under contention, ~2-3 ms/frame quiet, bit-identical WAV. Gated, byte-identical, kept default-OFF: `QWEN3_TTS_FUSED_QKV=1` (**Q8_0 bench done 2026-05-23: neutral — interleaved A/B on this M1 shows 129 vs 129 ms/frame; keep default-OFF for Q8_0**; **F16 case benched 2026-05-24: inconclusive — interleaved A/B (6 runs) on loaded machine (model DL + build concurrent) shows σ≈47 ms/frame exceeding any signal; mean baseline 212 vs mean fused 191 ms/frame, warm-up baseline 133 ms/frame consistent with Q8_0 quiet result; keep default-OFF for F16 same as Q8_0; clean quiet-machine bench still open**); `QWEN3_TTS_LK_BUCKET=1` (talker Lk bucketing, **net loss on M1 Metal Q8_0** — see LEARNINGS); `QWEN3_TTS_CP_STEP0_CACHE=1` (cp T=2 step-0 graph cache, claimed 1-3 ms/frame quiet savings — **loaded-machine bench neutral within noise; quiet-machine confirmation still pending**, bit-identical). Investigated: Q8_0 KV cache — blocked on Metal `cont(Q8_0)` source (only F32/F16/BF16 sources supported); needs Metal kernel patch or KV layout restructure to land. Still open: F16 FUSED_QKV clean quiet-machine bench (F16 GGUF now at `/Volumes/backups/ai/crispasr/qwen3-tts-12hz-0.6b-base.gguf`; rerun on a quiet machine with no background I/O); Q4_K talker fused QKV bench (needs Q4_K talker GGUF); the larger lift of fusing 15 cp steps into one graph (needs on-device top-k sampling, ~3 ms/frame upper bound after O15 since most overhead is already gone).
 - Debug knobs: `QWEN3_TTS_{BENCH,DEBUG,DUMP_DIR}` env vars; diff harness via `tools/reference_backends/qwen3_tts.py` + `crispasr-diff qwen3-tts`.
 - **Reuse:** the talker is essentially Qwen3-0.6B/1.7B with a
   multi-codebook output head — `core_attn::kv_self_attn` +
