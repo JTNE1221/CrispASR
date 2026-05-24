@@ -1526,20 +1526,74 @@ static ggml_tensor* ggml_mish(ggml_context* ctx, ggml_tensor* x) {
 
 static ggml_tensor* causal_block1d(ggml_context* ctx, ggml_tensor* x, // (C, T)
                                    ggml_tensor* conv_w, ggml_tensor* conv_b, ggml_tensor* ln_w, ggml_tensor* ln_b) {
-    x = causal_conv1d(ctx, x, conv_w, conv_b);
-    // LayerNorm over channel dim: transpose (C, T) → (T, C), norm, transpose back
-    // After conv1d: x is (T, C) in ggml layout
-    // LayerNorm over C dimension (ne[0]=T, ne[1]=C → norm over C)
-    // ggml_norm normalizes over ne[0] by default. We need to normalize over C (ne[1]).
-    // Transpose to (C, T), norm over C (now ne[0]), transpose back.
+    // PLAN #83 r9 follow-up #3: probe intermediates of one specific causal_block1d
+    // call to bisect within the first resnet block. Set
+    // CRISPASR_S3GEN_UNET_PROBE_BLOCK1=<N> where N is the (0-based) sequential
+    // index of the causal_block1d call within ONE UNet graph build. The first
+    // call (db.0.0.b1) is N=0; the second (db.0.0.b2) is N=1; etc. Each call
+    // names + marks 5 intermediates as dump_probe_*; combine with
+    // CRISPASR_S3GEN_DUMP_UNET + CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK to
+    // capture the values without the implicit mark cascade.
+    static int s_block1d_call_idx = 0;
+    const char* probe_env = std::getenv("CRISPASR_S3GEN_UNET_PROBE_BLOCK1");
+    const int probe_target = probe_env ? std::atoi(probe_env) : -1;
+    bool probe_this = (probe_target >= 0 && s_block1d_call_idx == probe_target);
+    s_block1d_call_idx++;
+
+    auto probe_name = [&](ggml_tensor* t, const char* stage) {
+        if (!probe_this) return;
+        char nm[64];
+        std::snprintf(nm, sizeof(nm), "dump_probe_%s", stage);
+        ggml_set_name(t, nm);
+        ggml_set_output(t);
+    };
+
+    if (probe_this) {
+        // Inline causal_conv1d's body to expose im2col + mul_mat intermediates.
+        int K   = (int) conv_w->ne[0];
+        int pad = K - 1;
+        const enum ggml_type im2col_type =
+            (conv_w->type == GGML_TYPE_F32 || x->type == GGML_TYPE_F32) ? GGML_TYPE_F32 : GGML_TYPE_F16;
+        ggml_tensor* im2col = ggml_im2col(ctx, conv_w, x, 1, 0, pad, 0, 1, 0, false, im2col_type);
+        probe_name(im2col, "after_im2col");
+        ggml_tensor* a_mat = (im2col_type == GGML_TYPE_F32 && conv_w->type != GGML_TYPE_F32)
+                                 ? ggml_cast(ctx, conv_w, GGML_TYPE_F32)
+                                 : conv_w;
+        ggml_tensor* mm = ggml_mul_mat(ctx, ggml_reshape_2d(ctx, im2col, im2col->ne[0], im2col->ne[2] * im2col->ne[1]),
+                                       ggml_reshape_2d(ctx, a_mat, a_mat->ne[0] * a_mat->ne[1], a_mat->ne[2]));
+        probe_name(mm, "after_mul_mat");
+        ggml_tensor* y = ggml_reshape_3d(ctx, mm, im2col->ne[1], conv_w->ne[2], im2col->ne[2]);
+        int T_out  = (int) y->ne[0];
+        int T_want = (int) x->ne[0];
+        if (T_out > T_want) {
+            y = ggml_view_2d(ctx, y, T_want, (int) y->ne[1], y->nb[1], 0);
+            y = ggml_cont(ctx, y);
+        }
+        if (conv_b) {
+            ggml_tensor* b2d = ggml_reshape_2d(ctx, conv_b, 1, (int) conv_b->ne[0]);
+            y                = ggml_add(ctx, y, b2d);
+        }
+        x = y;
+    } else {
+        x = causal_conv1d(ctx, x, conv_w, conv_b);
+    }
+    probe_name(x, "after_conv1d");
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (C, T)
+    probe_name(x, "after_transpose_in");
     x = ggml_norm(ctx, x, 1e-5f);
-    if (ln_w)
+    probe_name(x, "after_norm");
+    if (ln_w) {
         x = ggml_mul(ctx, x, ln_w);
-    if (ln_b)
+        probe_name(x, "after_ln_mul");
+    }
+    if (ln_b) {
         x = ggml_add(ctx, x, ln_b);
+        probe_name(x, "after_ln_bias");
+    }
     x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C)
+    probe_name(x, "after_transpose_out");
     x = ggml_mish(ctx, x);
+    probe_name(x, "after_mish");
     return x;
 }
 
@@ -1709,7 +1763,13 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
     // tensors). DUMP_UNET marks every per-resnet/transformer dump
     // point (62) for the diff-bisect.
     const bool preserve_intermediates = std::getenv("CRISPASR_S3GEN_UNET_PRESERVE_INTERMEDIATES") != nullptr;
-    const bool mark_output_all = dump_unet;  // every dump point
+    // CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK lets DUMP_UNET dump only the
+    // tensors that other MARK_* knobs (or PRESERVE_INTERMEDIATES) have kept
+    // live. Useful for narrowing which marks cause the Metal NaN — without
+    // this, DUMP_UNET implicitly marks all 62 dump points and triggers it.
+    const bool dump_unet_auto_mark = dump_unet &&
+                                     std::getenv("CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK") == nullptr;
+    const bool mark_output_all = dump_unet_auto_mark;  // every dump point
     // PLAN #83 r9 sub-bisect (May 2026 session): the 17 extra marks DUMP_UNET adds
     // on top of PRESERVE_INTERMEDIATES tip smoke into NaN. Split everything into
     // 5 groups gated independently to find the minimum trigger set.

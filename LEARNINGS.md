@@ -6471,6 +6471,8 @@ if it's clean, pivot to the backend's kernel/barrier/output paths.
 |---|---|
 | `CRISPASR_GGML_ALLOC_TRACE=1` | One trace line per allocator event |
 | `CRISPASR_GGML_ALLOC_TRACE_MAX_PASSES=N` | Cap to the first N passes (UNet is at pass=37 in the chatterbox CLI smoke path) |
+| `CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK=1` | Lets `DUMP_UNET` dump only tensors kept live by other `MARK_*` knobs — without the implicit "mark every dump point" that triggers the NaN cascade. Required for clean per-stage A/B between CPU and GPU. |
+| `CRISPASR_S3GEN_UNET_PROBE_BLOCK1=<N>` | Inline-probes the N-th `causal_block1d` call within one UNet graph. Names + marks `dump_probe_after_{im2col,mul_mat,conv1d,transpose_in,norm,ln_mul,ln_bias,transpose_out,mish}` so the bug can be bisected within a single resnet block. N=0 is `s3.fd.db.0.0.b1`. |
 
 Trace format:
 ```
@@ -6481,3 +6483,64 @@ ggml-alloc: [TRACE] FREE node=<n> buf=<b> chunk=<c> offset=<o> size=<s>
 ggml-alloc: [TRACE] FREE_SKIP_OUTPUT node=<n> buf=<b> chunk=<c> offset=<o> size=<s>
 ggml-alloc: [TRACE] PASS_END pass=37
 ```
+
+### Round 9 follow-up #3 (2026-05-24, late) — bug localized to the first UNet block; pin workarounds were also a measurement artifact
+
+The new tooling pinned the bug down further. Three things to record:
+
+**1. The bug starts at the very first UNet block.** With
+`CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK=1` and only the marks needed
+to keep `db_resnet` live, the GPU's first `causal_resnet_block`
+output is already wrong: 1280 NaN values across 5 contiguous time
+frames (t=260..264) for every channel (256), in a tensor of shape
+(T=382, C=256). The downstream `set_output`-marked intermediates
+that I previously assumed were the "first" NaN are 100% NaN purely
+by propagation. The PROBE_BLOCK1 path further pins this to inside
+`causal_block1d` (conv1d→norm→mul→add→transpose→mish), and
+because the block2 `causal_conv1d` has `K=3`, its receptive field
+expands the 3-frame NaN slice from block1 conv1d output into a
+5-frame slice at the resnet block boundary.
+
+**2. The bug is not just precision drift; it is structural.** GPU
+vs CPU `db_resnet`: cosine similarity is **-0.09** (essentially
+uncorrelated), magnitude is 10× off (GPU `max_abs=14.6` vs CPU
+`max_abs=1.9`). This is not the kind of error a small FP16
+accumulator drift produces. Setting `GGML_PREC_F32` on conv1d's
+internal `mul_mat` makes no difference (rms 13.938 → 13.942,
+within noise). The wrongness is in the structural arithmetic of
+some Metal kernel chain, not in accumulator precision.
+
+**3. The handover's "pinning any frequent op restores cos = 1.0"
+claim was also a measurement artifact.** Re-tested
+`CRISPASR_S3GEN_UNET_PIN_CPU_OP=norm`, `=mul_mat`, `=add`, `=cont`
+with the fixed `crispasr-diff`. All four now FAIL with
+`non_finite=8160/8160`. The original PASS reports came from the
+pre-`4c2e54c0` harness that silently scored all-NaN as
+`cos=1.000`. So both the "pin to CPU restores baseline" and the
+"set_output on 62 → bit-perfect" claims were the same one
+measurement bug. With it fixed, **no per-op pin currently fixes
+the GPU baseline**. The only working configuration remains the
+production weight-residency split (`s3.fd.*` on CPU).
+
+**4. The bug is layout-dependent and moves with `set_output`.**
+Adding the PROBE_BLOCK1 named outputs cleared the conv1d NaN (its
+intermediates were finite) but pushed the first observable NaN to
+`dump_db_tb_0` (the basic_transformer_block output). The final
+audio was still NaN. This is the classic signal that the bug is a
+GPU kernel correctness issue sensitive to which addresses the
+allocator picks — adding marks shifts addresses and the kernel
+breakage moves.
+
+**Updated lesson (replaces 2'' above):**
+
+2'''. **GPU-residency UNet on Apple Metal is fundamentally broken
+in a way no in-tree workaround addresses.** The production fix
+(weight-residency split) is not just a perf-comparable
+convenience; it is the only configuration that produces correct
+output. Documented per-op pins, single-mark and PRESERVE marks,
+F32 precision hints, and `GGML_METAL_CONCURRENCY_DISABLE` all
+either don't help or actively break it. A real fix needs Metal
+shader-level investigation against the address pattern the
+allocator produces for this graph — out of scope for a normal
+chatterbox session. Until then: `CRISPASR_S3GEN_UNET_GPU_RESIDENCY`
+remains an investigation-only knob, not a user-facing option.

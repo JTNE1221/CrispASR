@@ -114,6 +114,40 @@ staging, or sched/OUTPUT-flag interaction). `tools/upstream-prs/10`
 to be revised; LEARNINGS Round 9 follow-up #2 records the
 methodology and pivots the investigation.
 
+**(2026-05-24 late follow-up #3)** Pushed the bisect inside the
+first UNet block. Added `CRISPASR_S3GEN_DUMP_UNET_NO_AUTO_MARK=1`
+to decouple `DUMP_UNET` from its implicit "mark every dump point"
+behavior, and `CRISPASR_S3GEN_UNET_PROBE_BLOCK1=<N>` to inline-
+probe one specific `causal_block1d` call (names + marks
+intermediate stages: im2col, mul_mat, conv1d, transpose_in, norm,
+ln_mul, ln_bias, transpose_out, mish). With clean A/B against
+CPU: GPU's first `causal_resnet_block` output (`dump_db_resnet`,
+shape (T=382, C=256)) is structurally wrong, not drifted —
+cos similarity to CPU is **-0.09**, magnitude is 10× off. Under
+the 2-mark trigger, 1280 NaN values appear at 5 contiguous time
+frames (t=260..264) × all 256 channels; bisect localizes the
+3-frame NaN slice to the conv1d output in block1 of the very
+first resnet block, then block2's `K=3` conv expands it to 5.
+
+Tested `GGML_PREC_F32` on conv1d's internal `mul_mat` — no effect
+(rms 13.938 → 13.942). Re-tested per-op CPU pin workarounds with
+the fixed `crispasr-diff`: `PIN_CPU_OP=norm/mul_mat/add/cont` all
+FAIL with `non_finite=8160/8160`. The handover's earlier "pinning
+any frequent op restores cos=1.0" was the same `PASS`-of-NaN
+artifact that `4c2e54c0` fixed; with it gone, **no per-op pin
+fixes the GPU baseline**. Only working config remains the
+production weight-residency split.
+
+Conclusion: GPU-residency UNet on Apple Metal is fundamentally
+broken in a way no in-tree workaround addresses. A real fix needs
+shader-level Metal investigation against the address pattern this
+graph produces — out of scope for a normal session. Until then
+`CRISPASR_S3GEN_UNET_GPU_RESIDENCY` remains an investigation-only
+knob; production keeps the `s3.fd.*` split on CPU.
+
+LEARNINGS Round 9 follow-up #3 records the methodology and the
+updated lesson 2'''.
+
 ---
 
 ## 2026-05-23 PLAN #52 — Qwen3-TTS perf bench (FUSED_QKV Q8_0 decision)
