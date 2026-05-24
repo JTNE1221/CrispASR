@@ -126,3 +126,30 @@ issue with input-copy via the shared-buffer path, or yet another
 sched-state issue. We don't have a clean characterisation yet —
 filing this PR for the dangling-pointer half because that one is
 crisp and reproducible.
+
+---
+
+**Update (2026-05-24, late):** The second issue ("the FIRST split's
+sched-copy doesn't always reach the GPU even with this patch") was
+diagnosed in R9 follow-up #5 and turned out to be unrelated to the
+dangling-pointer issue this PR addresses. It was a Metal cache
+coherency issue on shared-storage buffers across back-to-back
+command-buffer submissions where the CPU writes between submissions:
+the default `[cmd_buf_last waitUntilCompleted]` between-submissions
+sync does not invalidate the GPU's L1/L2 cached view of a shared-
+storage `MTLBuffer` the CPU just memcpy'd, so the next compute reads
+stale data.
+
+The fix for that second issue is to construct the sched with
+`ggml_backend_sched_new(..., /*parallel=*/true, ...)`, which uses
+`MTLSharedEvent`-backed `ggml_backend_event_record / event_wait`
+between submissions; the encoded `encodeSignalEvent` /
+`encodeWaitForEvent` commands carry proper GPU cache invalidation.
+Once both `parallel=true` and this PR's dangling-pointer patch are in
+place, the chatterbox app-side workaround (pinning `unet_input`)
+is no longer needed.
+
+This PR's dangling-pointer fix is still independently necessary: the
+mutation-log restoration is correct under either `parallel=false` or
+`parallel=true`, and other ggml users hitting the dangling-src[j]
+behaviour will see correctness problems regardless of `parallel`.
