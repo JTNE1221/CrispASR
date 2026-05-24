@@ -3891,6 +3891,29 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
 
     const uint64_t ntptg0 = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/(KH*KW), N);
 
+    // CrispASR debug (#83 r9 follow-up #5): host-side readback of op->src[1]
+    // for the FIRST UNet im2col call (signature IC==320, KH==1, KW==3).
+    // Confirms whether host can read correct bytes at the kernel's input
+    // buffer address right before dispatch.
+    {
+        static const char * dbg_env = std::getenv("CRISPASR_IM2COL_DBG");
+        static int dbg_n = 0;
+        if (dbg_env && IC == 320 && KH == 1 && KW == 3 && dbg_n < 4) {
+            ggml_tensor * t = op->src[1];
+            ggml_metal_buffer_id bid = ggml_metal_get_buffer_id(t);
+            float host[8] = {0};
+            ggml_backend_tensor_get(t, host, 0, sizeof(host));
+            fprintf(stderr,
+                "[im2col-dbg %d] src1='%s' ne=[%lld,%lld,%lld] data=%p buf=%p offs=%zu host[0..7]= "
+                "%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+                dbg_n, t->name,
+                (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2],
+                t->data, (void*) bid.metal, bid.offs,
+                host[0], host[1], host[2], host[3], host[4], host[5], host[6], host[7]);
+            dbg_n++;
+        }
+    }
+
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);

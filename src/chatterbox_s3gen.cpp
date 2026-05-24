@@ -2062,7 +2062,7 @@ static std::vector<float> cfm_euler_solve(chatterbox_s3gen_context* c,
             // (the CFG uncond pass) silently fails to redeliver remaining
             // CPU→GPU inputs because their consuming nodes' src[j] points
             // at freed input_cpy tensors from the previous call.
-            if (c->unet_on_gpu) {
+            if (c->unet_on_gpu && std::getenv("CRISPASR_NO_INPUT_PIN") == nullptr) {
                 ggml_tensor* ui = ggml_graph_get_tensor(gf, "unet_input");
                 if (ui)
                     ggml_backend_sched_set_tensor_backend(c->sched, ui, c->backend);
