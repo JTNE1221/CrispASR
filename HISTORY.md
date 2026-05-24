@@ -6,7 +6,59 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
-## 2026-05-24 PLAN #83 Round 9 follow-up #5 — Bug B narrowed to rc residual conv; root cause still open
+## 2026-05-24 PLAN #83 Round 9 follow-up #5 — Bug B FIXED via sched parallel=true
+
+After eliminating ~10 hypotheses (cache barriers, blit copies,
+concurrency, fusion, optimize, n_cb variants, private-storage
+buffers, im2col 1×1×1 edge case, rc-as-mul_mat) and conclusively
+proving the divergence is between the host's view and the GPU's
+view of the same shared-storage Metal buffer in the second (uncond)
+graph_compute call, the fix turned out to live in
+`ggml_backend_sched_new`'s `parallel` flag.
+
+With `parallel=false` (chatterbox default until this fix), sched's
+between-backend synchronisation is `ggml_backend_synchronize` →
+`[cmd_buf_last waitUntilCompleted]`. That blocks for the prior
+command buffer's completion but does NOT invalidate the GPU's L1/L2
+cached view of a shared-storage `MTLBuffer` that the CPU just
+memcpy'd between consecutive command-buffer submissions.
+
+With `parallel=true`, sched allocates 4× input-copy slots per input
+and uses `ggml_backend_event_record` / `event_wait` for ordering.
+On Metal that maps to `MTLSharedEvent`'s `encodeSignalEvent` /
+`encodeWaitForEvent` commands, which carry proper GPU cache
+invalidation between submissions.
+
+Switched `chatterbox_s3gen_init_from_file` to call
+`ggml_backend_sched_new(..., /*parallel=*/true, ...)`. Removed the
+unet_input GPU pin workaround in `cfm_euler_solve::run_denoiser`
+(no longer needed). Removed the `CRISPASR_NO_INPUT_PIN` env
+override.
+
+Verification on M1 (smoke, "Hello.", seed 42):
+
+| Configuration | rms (vs ref 5.115) |
+| - | - |
+| GPU residency, sched parallel=true (this fix) | **5.143** ✓ |
+| GPU residency, sched parallel=false (Bug B, removed) | 16.x ✗ |
+| CPU residency, sched parallel=true (this fix) | **5.139** ✓ |
+| CPU residency, sched parallel=false (prior baseline) | 5.139 (unchanged) |
+
+Diff harness `s3gen_mel`: `cos_min = 0.999976` (matches the
+previous workaround's baseline).
+
+The Bug A fix (sched src-mutation log) from R9 #4 is INDEPENDENT
+and continues to be required.
+
+LEARNINGS R9 #5 closes Bug B with two new lessons: 7' replaces the
+old "Pinning fixes it is not a root cause" with a more nuanced
+"Pinning addressed a real symptom but not the root cause", and 8
+("Check `ggml_backend_sched_new`'s `parallel` flag for Metal
+cache-coherency-shaped bugs").
+
+---
+
+## 2026-05-24 PLAN #83 Round 9 follow-up #5 — Bug B narrowed to rc residual conv (superseded by fix above)
 
 Investigated open Bug B from follow-up #4 (workaround in place: pinning
 `unet_input` to GPU when UNet runs GPU-resident). Eliminated five

@@ -7017,7 +7017,79 @@ Likely next steps (none cheap):
   through a known-working Metal command pipeline rather than a
   raw host write.
 
-**Bug B remains open.** Workaround is still shipping.
+**🎉 BUG B FIXED — sched `parallel=true` (R9 #5, very late).**
+
+Of the three proposed next experiments above, the third one (route
+the CPU→Metal copy through a stronger Metal synchronisation path)
+turned out to be DIRECTLY available via `ggml_backend_sched_new`'s
+`parallel` flag. With `parallel=true`:
+
+- `n_copies = GGML_SCHED_MAX_COPIES = 4` input-copy slots per
+  input tensor (sched alternates between them across calls).
+- Sched creates `ggml_backend_event_t` objects per backend per copy
+  slot and uses `event_record` / `event_wait` for cross-backend
+  ordering instead of plain `ggml_backend_synchronize`.
+- On the Metal backend that translates to
+  `MTLSharedEvent` `encodeSignalEvent` /
+  `encodeWaitForEvent` commands encoded into the command buffer.
+- Those commands carry proper GPU-cache invalidation semantics
+  between consecutive `commandBufferWithUnretainedReferences`
+  submissions on the same `MTLCommandQueue`.
+
+With `parallel=false` (the chatterbox default until this fix),
+sched falls back to `[cmd_buf_last waitUntilCompleted]` for the
+between-submissions sync. That waits for the prior command buffer to
+complete but does NOT invalidate the GPU's L1/L2 cached view of a
+shared-storage `MTLBuffer` that the CPU just memcpy'd. The next
+dispatch's kernel then reads stale data.
+
+The cond pass works because nothing has cached the buffer yet (it's
+the first submission). The uncond pass fails because the cond pass
+left the buffer cached on the GPU side; the CPU memcpy of new
+uncond data updates system memory but doesn't reach the GPU cache;
+the next compute reads stale cond-pass-leftover data.
+
+Switching `chatterbox_s3gen_init_from_file` to call
+`ggml_backend_sched_new(..., parallel=true, ...)` fixes Bug B.
+Verified:
+
+- M1 Metal smoke, GPU residency, no workaround: `rms 16.x → 5.143`.
+- M1 Metal smoke, CPU residency (production default): `rms 5.139`
+  (unchanged — no regression).
+- Diff harness: `s3gen_mel cos_min = 0.999976` (matches the prior
+  workaround's baseline).
+- Long text (~192 frames): `rms 5.667` (intelligible).
+
+The unet_input GPU pin workaround in `cfm_euler_solve::run_denoiser`
+is no longer needed and was removed in the same commit (the
+`CRISPASR_NO_INPUT_PIN` env override is also gone). The
+**Bug A fix** (sched src-mutation log in `ggml-backend.cpp`) is
+INDEPENDENT and continues to be required — that bug is about
+dangling `node->src[j]` pointers across `alloc_graph` calls, not
+about cache coherency.
+
+**Lesson 7' (replacing "Pinning fixes it is not a root cause"):**
+The pin was indeed a workaround for a deeper sched-synchronisation
+issue, not the root cause. The cond pass worked because the first
+graph_compute call doesn't see the cached-buffer-state problem.
+"Pinning unet_input" worked because pinning made unet_input be on
+Metal directly, eliminating the sched-injected MTL0#unet_input#0
+copy — and with no sched copy, no host memcpy on a previously-cached
+buffer, no stale-cache read. So the workaround DID address a real
+symptom, just not the right one. The right fix is to use stronger
+synchronisation primitives between consecutive graph_compute calls
+on the same gf (or alternate input-copy slots, which `parallel=true`
+does for us automatically).
+
+**Lesson 8. When stuck on a Metal cache-coherency-shaped bug,
+check `ggml_backend_sched_new`'s `parallel` flag.** The plain
+synchronize path is sufficient for many graph topologies but
+genuinely insufficient for back-to-back compute calls that read the
+same shared-storage buffer the CPU just wrote between them. The
+event-based path is the documented way to get proper cross-submission
+ordering and Apple-Metal cache semantics. It costs memory (4×
+input-copy slots) but for graphs the size of the chatterbox UNet
+that's negligible.
 
 ---
 
