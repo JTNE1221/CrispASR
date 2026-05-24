@@ -7114,6 +7114,84 @@ overhead per se. The gate is a real but small CPU-residency win
 (~8 s saved by avoiding 4× input-copy slots + event allocation
 when Bug B can't manifest).
 
+### Diff-harness `t3_prefill_emb` FAIL is a tokenizer mismatch, not a bug (2026-05-24, very late)
+
+While closing out R9 #5 we looked into the long-standing
+`[FAIL] t3_prefill_emb[0]  cos_min≈0.02 cos_mean≈0.81`
+result in `crispasr-diff chatterbox`. Per-row debug shows:
+
+- Rows 0–33 (cond rows from the perceiver + speaker proj): all pass
+  at `cos > 0.9999`. The C++ cond builder is correct.
+- Rows 34–36 (first 3 text rows = BOS + 2 text tokens): pass.
+- Rows 37+ (rest of the text rows) and the `speech_start` row: fail
+  at `cos < 0.5`, dropping to `cos ≈ 0.1`–`0.02`.
+
+Two sub-issues stack here:
+
+1. **Default `CHATTERBOX_SYN_TEXT` mismatch.** The crispasr-diff
+   harness defaults to `"Hello world."` but the python ref archive
+   (`chatterbox-ref.gguf`) was generated with
+   `"Hello there, this is chatterbox speaking."` (stored in the
+   archive as `crispasr.ref.chatterbox_syn_text`). Running the diff
+   with `CHATTERBOX_SYN_TEXT="Hello there, this is chatterbox speaking."`
+   removes the obvious text mismatch but doesn't fix the failure —
+   it just shifts the divergence pattern.
+
+2. **Tokenizer algorithm mismatch.** Chatterbox-base's
+   `chatterbox.t3.text_tokens` vocab in the GGUF has 704 entries
+   including `[STOP]`, `[UNK]`, `[SPACE]` plus lowercase a–z plus
+   multi-char tokens (`th`, `in`, `the`, `er`, `ou`, …) — i.e. the
+   vocab is BPE-like. But the GGUF stores **no `merges` array**, so
+   `cb_tokenizer::has_bpe` is false and the C++ code falls through to
+   the legacy char-by-char `tokenize_text`, which:
+   - **skips uppercase letters** (vocab is lowercase only);
+   - **skips space characters** (vocab uses `[SPACE]`, not `' '`);
+   - **never tries multi-char vocab entries.**
+
+   We tried replacing `tokenize_text` with a normalising
+   (lowercase + `' '`→`[SPACE]`) **greedy-longest-match**
+   tokenizer. It produces a token sequence with the right *shape*
+   (matches python ref's length of 25 text tokens for the
+   reference text instead of the legacy 38) and the diff goes
+   from `cos_mean=0.55` to `cos_mean=0.66` — still failing because
+   greedy longest-match isn't python's BPE-with-merges algorithm.
+   We also observed that the production audio for the same text
+   sounds slightly different (T=138 frames vs T=162 with the
+   legacy tokenizer, rms 4.02 vs 5.07; the *legacy* output is
+   actually closer to the python reference's mel rms ≈ 5.12).
+
+   So the legacy char-level fallback, despite being structurally
+   wrong, happens to drive the t3 LLM to a state that produces
+   audio whose final rms is closer to python's than our
+   greedy-longest-match tokenizer does. The t3 model is robust
+   enough to "ignore" the bad tokens. Both produce intelligible
+   audio.
+
+**Conclusion.** The `t3_prefill_emb` FAIL is real but not a
+production correctness bug: the audio works, just from a different
+token sequence than python's. To make the diff pass we would
+need to either (a) ship `chatterbox.t3.merges` in the GGUF
+converter and the C++ loader, and use the proper BPE path in
+`tokenize_text_bpe`, or (b) port python's exact tokenizer
+algorithm to C++ (`EnTokenizer` from the chatterbox repo, which
+uses the HF `tokenizers` library and a `tokenizer.json` config).
+
+**Not done this session.** The legacy char-level tokenizer
+keeps shipping because flipping to greedy-longest-match measurably
+shifts production audio (and not toward python's output). The
+diff harness should mark this case as a known limitation rather
+than gating CI on it. Recommended follow-up:
+
+- Re-export the chatterbox-base GGUF with `chatterbox.t3.merges`
+  populated from the chatterbox tokenizer.json so the BPE path
+  becomes usable.
+- Then either: switch `chatterbox_dump_t3_prefill_emb` to call the
+  BPE tokenizer when merges are available, or keep the legacy
+  path and accept the diff failure.
+- Optionally: have `crispasr-diff` read the
+  `crispasr.ref.chatterbox_syn_text` metadata key from the ref
+  archive so the default text matches the reference.
+
 ---
 
 ## FA per-head additive mask CUDA kernel — what the upstream signature already gave us (issue #81 #06, May 2026)
