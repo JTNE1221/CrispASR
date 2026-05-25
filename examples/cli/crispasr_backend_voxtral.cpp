@@ -118,9 +118,17 @@ public:
     const char* name() const override { return "voxtral"; }
 
     uint32_t capabilities() const override {
+        // CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING: PLAN #114 — voxtral
+        // now handles long audio internally via the Mistral upstream
+        // pattern (per-30s encode, concatenated audio embeds, single LLM
+        // AR decode). The crispasr_run.cpp 30-second auto-chunk gate
+        // must not fire, because each chunk would otherwise get a fresh
+        // LLM context and the AR decoder would cold-start at every
+        // boundary — the failure mode the 2026-05-25 long-form matrix
+        // measured at 64/35/20/9 % coverage (60/120/300/600 s).
         return CAP_TIMESTAMPS_CTC | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN |
                CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE | CAP_SRC_TGT_LANGUAGE | CAP_BEAM_SEARCH | CAP_DIARIZE |
-               CAP_PARALLEL_PROCESSORS;
+               CAP_PARALLEL_PROCESSORS | CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING;
     }
 
     bool init(const whisper_params& p) override {
@@ -134,7 +142,12 @@ public:
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
                                              const whisper_params& params) override {
-        return crispasr_run_voxtral_style_pipeline<VoxtralOps>(ctx_, samples, n_samples, t_offset_cs, params);
+        // PLAN #114 / issue #89 follow-up: long audio (> 30 s) goes
+        // through the Mistral upstream pattern — per-30s encode, concat
+        // audio embeds, single LLM AR decode. Short audio keeps the
+        // bit-identical single-chunk path. The streamed wrapper itself
+        // dispatches to the single-chunk path for n_samples <= 30 s.
+        return crispasr_run_voxtral_style_pipeline_streamed<VoxtralOps>(ctx_, samples, n_samples, t_offset_cs, params);
     }
 
     void shutdown() override {

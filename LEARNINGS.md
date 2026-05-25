@@ -7590,3 +7590,30 @@ VAD-default is the right answer only when the released model genuinely isn't des
 - PERFORMANCE.md "Multi-backend long-form Japanese — 120 s sweep" + the in-progress 60/120/300/600 s × all-backends matrix
 - HISTORY 2026-05-24 "Issue #89 reopened" — the parakeet Class A fix that started this
 - `core_lcs::merge_overlapping_hypotheses` (PLAN #80c) — the existing LCS-dedup helper for the Class B fix
+
+---
+
+## Always rebuild the box-under-test before benchmarking (2026-05-25)
+
+The 2026-05-25 morning "Cross-length × cross-backend matrix" landed in PERFORMANCE.md with v1 numbers showing voxtral at 9 % coverage on a 600 s clip and cohere at 62 %. Those numbers were *real* — the matrix script ran cleanly — but they measured the **wrong binary**. The VPS had `bd8b98cf` (May 24) on disk, and the per-backend opt-out fixes for cohere (`dc2295b2`), gemma4-e2b / glm-asr (`46f6848d`), kyutai-stt (`eaee2319`), and voxtral (`6fef8790`) had landed locally that same morning — but the VPS hadn't been rebuilt. Matrix v2 (post-opt-out rebuild to `13059e0c`) showed voxtral and cohere at **96-100 %** at every length.
+
+The whole "voxtral drops the middle of 80 s of audio at 120 s" diagnosis in HISTORY 2026-05-25 morning + LEARNINGS "Long-form ASR has three distinct failure classes" Class B was *correct in shape* but vastly overstated in *current severity* — voxtral default chunking with the opt-out applied is fine. The matrix v1 numbers measured the pre-opt-out behavior, which the parallel #114 worker had already fixed by the time we wrote them up.
+
+### How to not do this again
+
+1. **`git ls-remote --heads origin main` + `git rev-parse origin/main` on the VPS *before* a matrix run.** Compare to local `main`. If they don't match, push first.
+2. **Rebuild the binary on the VPS before any benchmark run.** A skipped `cmake --build` because "the binary is already there" silently locks the matrix to whatever state the disk happens to be in.
+3. **Record the binary's `--version` line at the top of every matrix CSV.** The harness already writes `wall_s` per cell — also write the git sha. Saves the "wait, which commit was this measuring?" forensic step later.
+4. **When the matrix shows a backend doing wildly worse than upstream's reported behaviour, suspect a stale binary before suspecting a real model regression.** Voxtral at 9 % on a 600 s clip should have been a "huh, that's surprising — let me check the build" signal, not a "voxtral is broken" signal.
+
+The lesson generalises beyond CrispASR — it's the "two-tab development" failure mode: a passing local test against an unbuilt remote binary. Same family as cache-poisoning, ccache-hit-on-stale-object, "I'm sure I rebuilt that," etc.
+
+### Side benefit: matrix v1 + v2 side by side
+
+PERFORMANCE.md now keeps both matrices so the reader can see the cost of the missing opt-out — the same models, the same audio, the same matrix script, just an `kBlocked` flag in `crispasr_chunk_context_gate.h` between them. It's a clean visualisation of why the per-backend long-audio story isn't "model architecture" but "external overlap-save context wrapping that the LLM-decoder backends couldn't trim back from correctly."
+
+### Cross-refs
+
+- `[[feedback_check_performance_learnings]]` — the broader "check what's already there before benchmarking" rule
+- HISTORY 2026-05-25 "PLAN #114 voxtral streamed + matrix re-interpretation"
+- `examples/cli/crispasr_chunk_context_gate.h` `kBlocked` list — the mechanism behind the opt-out fixes

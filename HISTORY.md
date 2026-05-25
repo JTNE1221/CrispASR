@@ -6,6 +6,55 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-25 PLAN #114 — voxtral streamed (Mistral apply_transcription_request pattern) + matrix re-interpretation
+
+Two things landing together:
+
+### 1. Voxtral streamed implementation (option A — single LLM context over the whole clip)
+
+`crispasr_run_voxtral_style_pipeline_streamed` in `examples/cli/crispasr_llm_pipeline.h`: matches what `transformers.models.voxtral.processing_voxtral.VoxtralProcessor.apply_transcription_request` does upstream. For audio > 30 s:
+
+1. Loop 30 s chunks: `voxtral_compute_mel` + `voxtral_run_encoder` → per-chunk audio embeds (375 × 3072).
+2. Concatenate all chunks' audio embeds into one buffer.
+3. Build prompt with `n_chunks × 375` audio-pad placeholder tokens.
+4. Embed + splice audio embeds into placeholders, **single LLM AR decode** over the whole prompt.
+
+Differs from CrispASR's previous per-slice-LLM-call shape: there, each 30 s slice got its own LLM context, the AR decoder cold-started at every chunk boundary, and boundary words / sentence carries could drop. With the streamed path the LLM sees one continuous audio sequence, no cold-starts.
+
+`crispasr_backend_voxtral.cpp`: voxtral now declares `CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING` so `crispasr_run.cpp`'s 30 s auto-chunk gate doesn't fire — long audio routes inside the backend via the new template. Short audio (≤ 30 s) still goes through the single-chunk pipeline (bit-identical to today).
+
+KV cache budget bumped from the fixed 4096 to `T_prompt + max_new_tokens + 64` so the longer prompt fits. On the M1 Metal smoke test (60 s clip): 2 chunks → 750 audio tokens → single decode → 11 segments / ~470 chars / full 0:00 → 1:00 coverage. Compare to the per-slice path on the same clip: 3 segments / 280 chars (still correct content, less segmentation granularity).
+
+Voxtral-Mini-3B's 32 768-token context fits up to ~30 min of audio (60 chunks × 375 = 22 500 audio tokens + ~6 000 decoded). Beyond that the CLI's `--vad` or explicit `--chunk-seconds` paths remain available as fallback.
+
+### 2. The cross-length matrix was measuring the pre-opt-out binary; v2 retells the story
+
+The 2026-05-25 morning "Cross-length × cross-backend matrix" in PERFORMANCE.md was collected on VPS binary `bd8b98cf` (May 24), which **predates** the per-backend opt-out fixes for cohere (`dc2295b2`), gemma4-e2b / glm-asr (`46f6848d`), kyutai-stt (`eaee2319`), and voxtral (`6fef8790`) that landed during the matrix run. Those fixes remove an external overlap-save context wrap that the LLM-decoder backends couldn't trim back from correctly. The wrap's word-timestamp trim was discarding most of the LLM's output because the LLM's emitted timestamps don't honor the original slice frame.
+
+Matrix v1 (pre-opt-out) numbers I committed earlier today (cohere 59 %/62 % at 300/600 s, voxtral 20 %/9 % at 300/600 s) **were the wrap's victim, not the model architecture**. Matrix v2 (post-opt-out, VPS rebuilt to `13059e0c`) — running while this commit lands — shows the corrected picture:
+
+| backend / mode               |  60 s |  120 s |   300 s |   600 s (still running) |
+|---|---:|---:|---:|---:|
+| **voxtral-mini-3b** (default chunking, post-opt-out) | **100.0** | **100.0** | **100.0** | TBD |
+| **voxtral-mini-3b** streamed (this PR — single LLM context) | full 0:00→1:00, 11 segs / 470 chars | running | running | running |
+| **cohere-transcribe** (default chunking, post-opt-out) | 96.3 | 97.9 | 98.1 | TBD |
+
+PERFORMANCE.md updated to keep matrix v1 *and* v2 side by side so the reader can see the cost of the missing opt-out — the same models, the same audio, just an `kBlocked` flag in `crispasr_chunk_context_gate.h` between them.
+
+### Implication for PLAN #114 priority order
+
+- **P1 (cohere VAD-default):** ~~planned~~ obsolete. `dc2295b2` already gets cohere to 96-98 % default-chunked. `--vad` remains available but no longer required for coverage parity.
+- **P2 (voxtral / qwen3 / granite / mimo chunk + LCS dedup):** Reframed. Default coverage is already there for voxtral via opt-out. The voxtral streamed path in *this* commit is an architectural improvement, not a coverage rescue. Same audit pending for qwen3 / granite / mimo (Class B LLM-AR backends).
+- **P3 (canary lang-prompt + streamed-encode port):** unchanged. Canary still hallucinates English at every JA length — separate bug, work proceeds.
+- **P4 (fastconformer-ctc):** unchanged.
+
+Cross-refs:
+- HISTORY 2026-05-25 (above) "Long-form ASR — cross-backend survey" for the matrix-v1 numbers and the failure-class breakdown.
+- LEARNINGS new "Always rebuild the test box before benchmarking" note from this session.
+- `examples/cli/crispasr_chunk_context_gate.h` `kBlocked` list — the actual mechanism behind the opt-out.
+
+---
+
 ## 2026-05-25 Long-form ASR — cross-backend survey and per-backend roadmap (PLAN #114)
 
 Follow-up to the 2026-05-24 "Issue #89 reopened" entry that made the streamed encode default for parakeet. The 120 s multi-backend sweep that came out of that work showed parakeet was the loudest failure on lenhone's audio but not the only one; this entry collects the empirical state across every multilingual / JA-capable ASR backend and the prioritised fix order.

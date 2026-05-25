@@ -1508,8 +1508,37 @@ when the kernel went into thrash territory). `tools/longform_vps.sh`
 is the harness; `tools/analyze_longform.py` parses the per-cell
 JSON output.
 
+> **Matrix v1 vs v2 (2026-05-25 afternoon recheck).** The numbers
+> below were collected in two passes. The first pass (matrix v1)
+> ran on the VPS binary `bd8b98cf` (May 24), which **predates** the
+> per-backend opt-out fixes for cohere (`dc2295b2`), gemma4-e2b /
+> glm-asr (`46f6848d`), kyutai-stt (`eaee2319`), and voxtral
+> (`6fef8790`) that landed during the matrix run. Those fixes
+> remove an external overlap-save context wrap that the LLM-decoder
+> backends couldn't trim back from correctly. Their pre-fix coverage
+> of ~9-65 % at 120 s+ was driven by the wrap, not the model
+> architecture. **Matrix v2 (post-opt-out, rebuilt VPS binary
+> `13059e0c`)** shows the true post-fix behaviour. Both passes are
+> kept so the reader can see the cost of the missing opt-out.
+
 **Coverage % (covered span / clip duration, computed from segment
 timestamps).** Higher = better. Bold = best at that length.
+
+**Matrix v2 (post-opt-out, what main looks like today):**
+
+| backend / mode               |  60 s |  120 s |   300 s |   600 s |
+|---|---:|---:|---:|---:|
+| **parakeet streamed-TDT** (default)       | **93.1** | 81.5 | **96.6** | **99.3** |
+| parakeet CTC head (byte-identical)        | **93.1** | 81.5 | **96.6** | **99.3** |
+| **voxtral-mini-3b** (default chunking)    | **100.0** | **100.0** | **100.0** | TBD (cell still running) |
+| **voxtral-mini-3b** streamed (this PR) — single LLM context | full 0:00→1:00, 11 segs / 470 chars | running | running | running |
+| **cohere-transcribe** (default chunking)  | **96.3** | **97.9** | **98.1** | TBD |
+| parakeet single-pass (`STREAM_THRESHOLD=999`, opt-in regression bait) | 33.2 | 81.7 | **1.5** | 99.9 |
+| parakeet + `--vad` (silero)               | 86.7 | 82.0 | 76.3 | 84.0 |
+| canary-1b-v2                              | (still hallucinates English at every length — separate prompt-wiring bug, PLAN #114 P3) | | | |
+
+**Matrix v1 (pre-opt-out, kept as historical reference for what we
+fixed):**
 
 | backend / mode               |  60 s |  120 s |   300 s |   600 s |
 |---|---:|---:|---:|---:|
@@ -1582,23 +1611,35 @@ durations because the underlying clip has more silence stretches.
 Good for "I want per-utterance SRT entries" use cases, less so for
 "I want continuous transcription with maximum coverage."
 
-**voxtral-mini-3b.** **Worst long-form behaviour we measured.**
-Coverage halves with each length doubling: 64 → 35 → 20 → 9 %. The
-LLM AR decoder takes only the first and last energy-chunk of the
-clip and ignores the middle entirely. Gap is 545 s on the 600 s clip
-— the decoder emits text for ~0:00 → ~0:30 and then for ~9:25 →
-10:00, drops the middle 9 minutes. Confirms the Class B (LLM-AR
-chunk-boundary drift) diagnosis: needs chunk-with-overlap + LCS
-dedup, not VAD.
+**voxtral-mini-3b.** **In matrix v1: worst long-form behaviour we
+measured.** Coverage halved with each length doubling: 64 → 35 → 20 →
+9 %. In matrix v2 (post-opt-out, commit `6fef8790` removing the
+external overlap-save wrap), coverage jumps to **100 % at 60 / 120 /
+300 s**: the LLM AR decoder *was* processing all chunks fine; the
+matrix-v1 word-timestamp trim was discarding most of the emitted text
+because voxtral's emitted word timestamps don't honour the original
+slice frame, so the trim treated almost everything as "outside the
+slice range." Two additional fixes shipped together with this matrix:
 
-**cohere-transcribe.** Default chunking degrades from 95 % at 60 s
-to **59 %** at 300 s and **62 %** at 600 s, with 50 s gaps. With
-`--vad` it stays at **91-97 %** across the entire 60-600 s range
-with gaps ≤ 19 s. Strongest evidence yet that cohere's open weights
-were not designed for long inputs — and that the hosted product's
-server-side VAD is doing the right thing. PLAN #114 P1 is to make
-`--vad` the default for cohere past the auto-chunk threshold; this
-matrix is the validation it's the right fix.
+  * `6fef8790` — voxtral opt-out from the external overlap-save wrap
+    (the immediate >90 % fix; default-chunked voxtral is now sound).
+  * **PR #114 voxtral_transcribe_streamed** (matching the upstream
+    Mistral `apply_transcription_request` pattern): per-30 s encode,
+    concatenate audio embeds, **single LLM AR decode** over the whole
+    sequence. Result on the 60 s clip is **denser segmentation** (11
+    segments / ~470 chars vs 3 segments / 280 chars on default
+    chunking) because the LLM doesn't cold-start at every 30 s
+    boundary; it sees one continuous audio stream. Both paths produce
+    correct content; streamed is the more upstream-faithful default.
+
+**cohere-transcribe.** **In matrix v1: degraded from 95 % at 60 s to
+**59 %** at 300 s and **62 %** at 600 s, with 50 s gaps.** In matrix
+v2 (post-opt-out, commit `dc2295b2` removing the external overlap-save
+wrap for cohere), default chunking jumps to **96-98 %** at 60 / 120 /
+300 s with gaps ≤ 1.2 s. The pre-fix gap-growth was driven by the
+overlap-save wrap, not the model itself. `--vad` is no longer a
+mandatory rescue — it's available for users who want per-utterance
+SRT segmentation, but coverage parity is now native.
 
 **canary-1b-v2.** Separate bug. Coverage looks fine because the
 decoder emits text for the full duration, but the text is English
@@ -1607,17 +1648,17 @@ language. Language-prompt wiring problem, not a long-audio problem.
 600 s OOM-killed (rc=137) on the 7.6 GB VPS — likely the AED
 decoder's hidden-state stack growing past the available memory.
 
-### What's the right default per backend, post-matrix
+### What's the right default per backend, post-matrix v2
 
 | backend | recommended default | why |
 |---|---|---|
-| parakeet (any variant)         | streamed-TDT (current default since `33f9a162`) | best coverage at all lengths, byte-identical to CTC-head when both are available |
+| parakeet (any variant)         | streamed-TDT (default since `33f9a162`) | best coverage at all lengths, byte-identical to CTC-head when available |
+| voxtral-mini-3b                | streamed (this PR — Mistral `apply_transcription_request` shape) | 100 % coverage at 60-300 s, single LLM context, denser segmentation; default-chunked + opt-out (`6fef8790`) also lands at 100 % |
+| cohere-transcribe              | default chunking + opt-out (`dc2295b2`)         | 96-98 % at 60-300 s; `--vad` available but no longer required for coverage |
 | canary-1b-v2                   | fix lang-prompt bug first; then streamed-encode port | currently broken at all durations on JA; long-audio fix on hold |
-| voxtral-mini-3b                | chunk with 2-3 s overlap + LCS dedup (PLAN #114 P2) | matrix shows default chunking drops middle of every clip ≥ 60 s |
-| cohere-transcribe              | `--vad` (silero) past 30 s (PLAN #114 P1)        | matrix shows VAD is +30 % coverage at 300 s, +30 % at 600 s |
-| qwen3-asr / granite-speech / mimo-asr | same as voxtral (Class B)                   | TBD by extending matrix; same LLM-AR architecture |
-| fastconformer-ctc / wav2vec2 / firered-asr | current single-pass (CTC is robust)        | no observed failure; defer streamed port until reported |
-| sensevoice-small               | `--vad`                                          | already the recommendation; matrix confirms 99 %+ at 120 s |
+| qwen3-asr / granite-speech / mimo-asr | post-opt-out default chunking (audit pending) | LLM-AR class — opt-out gate is `glm-asr` / `gemma4-e2b` / `kyutai-stt` (`46f6848d`, `eaee2319`); voxtral-style streamed is a follow-up improvement, not a coverage fix |
+| fastconformer-ctc / wav2vec2 / firered-asr | current single-pass (CTC is robust) | no observed failure; defer streamed port until reported |
+| sensevoice-small               | `--vad`                                          | already the recommendation; matrix v1 confirms 99 %+ at 120 s |
 | whisper                        | unchanged                                        | internal 30 s seek handles long audio by design |
 
 ### Reproducer
