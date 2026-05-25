@@ -58,6 +58,9 @@ TEST_CASE("backend_allows_chunk_context: known offenders opt out, others do not"
     REQUIRE_FALSE(backend_allows_chunk_context("gemma4-e2b"));
     REQUIRE_FALSE(backend_allows_chunk_context("glm-asr"));
     REQUIRE_FALSE(backend_allows_chunk_context("kyutai-stt"));
+    REQUIRE_FALSE(backend_allows_chunk_context("voxtral"));
+    // voxtral4b is a different model architecture and is NOT affected.
+    REQUIRE(backend_allows_chunk_context("voxtral4b"));
 
     // Spot-check a few known-safe ASR backends from --list-backends-json.
     REQUIRE(backend_allows_chunk_context("whisper"));
