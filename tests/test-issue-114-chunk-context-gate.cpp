@@ -58,6 +58,7 @@ TEST_CASE("backend_allows_chunk_context: known offenders opt out, others do not"
     REQUIRE_FALSE(backend_allows_chunk_context("gemma4-e2b"));
     REQUIRE_FALSE(backend_allows_chunk_context("glm-asr"));
     REQUIRE_FALSE(backend_allows_chunk_context("kyutai-stt"));
+    REQUIRE_FALSE(backend_allows_chunk_context("qwen3"));
     REQUIRE_FALSE(backend_allows_chunk_context("voxtral"));
     // voxtral4b is a different model architecture and is NOT affected.
     REQUIRE(backend_allows_chunk_context("voxtral4b"));
@@ -69,7 +70,6 @@ TEST_CASE("backend_allows_chunk_context: known offenders opt out, others do not"
     REQUIRE(backend_allows_chunk_context("funasr"));
     REQUIRE(backend_allows_chunk_context("sensevoice"));
     REQUIRE(backend_allows_chunk_context("moonshine"));
-    REQUIRE(backend_allows_chunk_context("qwen3"));
 
     // Unknown backend names default to allowed (the gate is opt-out, not allow-list).
     REQUIRE(backend_allows_chunk_context("some-future-backend"));

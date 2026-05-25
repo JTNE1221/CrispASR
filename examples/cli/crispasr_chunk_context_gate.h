@@ -29,17 +29,18 @@ namespace crispasr_chunk_context {
 // Backends whose own transcribe() does additional internal chunking near a
 // ~30 s boundary. Wrapping their fallback chunks in extra acoustic context
 // pushes the per-call input over that boundary, with backend-specific bad
-// outcomes: cohere and voxtral drop follow-up chunks via word-timestamp
-// trimming (voxtral collapses a 5 min clip down to ~60 s of output);
+// outcomes: cohere, voxtral, and qwen3 drop follow-up chunks via word-
+// timestamp trimming (voxtral collapses a 5 min clip down to ~60 s of
+// output; qwen3 truncates a 90 s clip mid-sentence in chunk 1);
 // gemma4-e2b, glm-asr, and kyutai-stt blow past a 15 min wallclock on a
 // 5 min clip (LLM-decode retry loop on the over-long buffer). voxtral4b
 // is not affected — different model architecture despite the shared name.
-// All five were caught by the A/B sweep in tools/check-overlap-save-bug.sh.
+// All six were caught by the A/B sweep in tools/check-overlap-save-bug.sh.
 inline bool backend_allows_chunk_context(const char* backend_name) {
     if (backend_name == nullptr) {
         return true;
     }
-    static const char* const kBlocked[] = {"cohere", "gemma4-e2b", "glm-asr", "kyutai-stt", "voxtral"};
+    static const char* const kBlocked[] = {"cohere", "gemma4-e2b", "glm-asr", "kyutai-stt", "qwen3", "voxtral"};
     for (const char* b : kBlocked) {
         if (std::strcmp(backend_name, b) == 0) {
             return false;
