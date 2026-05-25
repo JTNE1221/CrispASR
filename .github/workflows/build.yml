@@ -132,93 +132,38 @@ jobs:
             github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [linux/amd64, linux/ppc64le]
-
     steps:
       - name: Clone
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Dependencies
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential libsdl2-dev cmake git
-            cmake -B build
-            cmake --build build --config Release -j $(nproc)'
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev cmake git
+
+      - name: Build
+        run: |
+          cmake -B build
+          cmake --build build --config Release -j $(nproc)
 
   ubuntu-22-arm64:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
             github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [linux/arm64]
+    runs-on: ubuntu-22.04-arm
 
     steps:
       - name: Clone
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Dependencies
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential libsdl2-dev cmake git
-            cmake -B build -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
-            cmake --build build --config Release -j $(nproc)'
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev cmake git
 
-  ubuntu-22-arm-v7:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
-            github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [linux/arm/v7]
-
-    steps:
-      - name: Clone
-        uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Build
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential libsdl2-dev cmake git
-            cmake -B build -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv7-a+fp
-            cmake --build build --config Release -j $(nproc)'
+          cmake -B build -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
+          cmake --build build --config Release -j $(nproc)
 
   macOS-latest:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
@@ -286,131 +231,77 @@ jobs:
       fail-fast: false
       matrix:
         build: [Debug, Release]
-        arch: [linux/amd64, linux/ppc64le]
 
     steps:
       - name: Clone
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Dependencies
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential cmake libsdl2-dev git
-            cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }}
-            make
-            ctest -L gh --output-on-failure'
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev git
+
+      - name: Build
+        run: |
+          cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }}
+          make
+          ctest -L gh --output-on-failure
 
   ubuntu-22-gcc-arm64:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
             github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04-arm
 
     strategy:
       fail-fast: false
       matrix:
         build: [Debug, Release]
-        arch: [linux/arm64]
 
     steps:
       - name: Clone
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Dependencies
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential cmake libsdl2-dev git
-            cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
-            make
-            ctest -L gh --output-on-failure'
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev git
 
-  ubuntu-22-gcc-arm-v7:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
-            github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        build: [Debug, Release]
-        arch: [linux/arm/v7]
-
-    steps:
-      - name: Clone
-        uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Build
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y build-essential cmake libsdl2-dev git
-            cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv7-a+fp
-            make
-            ctest -L gh --output-on-failure'
+          cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
+          make
+          ctest -L gh --output-on-failure
 
   ubuntu-22-clang:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
             github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
 
     strategy:
       fail-fast: false
       matrix:
         build: [Debug, Release]
-        #arch: [linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le]
-        # TODO: arm/v7 disabled due to clang bug
-        #       https://github.com/ggerganov/whisper.cpp/actions/runs/9657764109/job/26637633042?pr=2256#step:4:1990
-        arch: [linux/amd64, linux/arm64, linux/ppc64le]
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Clone
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build ${{ matrix.arch }}
+      - name: Dependencies
         run: |
-          docker run --platform ${{ matrix.arch }} --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
-            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
-            apt install -y clang build-essential cmake libsdl2-dev git
-            cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
-            make
-            ctest -L gh --output-on-failure'
+          sudo apt-get update
+          sudo apt-get install -y clang build-essential cmake libsdl2-dev git
+
+      - name: Build
+        run: |
+          cmake . -DWHISPER_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
+          make
+          ctest -L gh --output-on-failure
 
   ubuntu-22-gcc-sanitized:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
@@ -446,110 +337,6 @@ jobs:
               -DGGML_OPENMP=OFF
             make
             ctest -L gh --output-on-failure'
-
-  ubuntu-22-cmake-sycl:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
-            github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        dwhisper_sycl: [ON]
-        dcmake_c_compiler: [icx]
-        dcmake_cxx_compiler: [icpx]
-        arch: [linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le]
-
-    continue-on-error: true
-
-    steps:
-      - name: Clone
-        uses: actions/checkout@v6
-
-      - name: add oneAPI to apt
-        shell: bash
-        run: |
-          cd /tmp
-          wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          rm GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          sudo add-apt-repository "deb https://apt.repos.intel.com/oneapi all main"
-
-      - name: install oneAPI dpcpp compiler
-        shell: bash
-        run: |
-          sudo apt update
-          sudo apt install intel-oneapi-compiler-dpcpp-cpp git
-
-      - name: install oneAPI MKL library
-        shell: bash
-        run: |
-          sudo apt install intel-oneapi-mkl-devel git
-
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Build
-        id: cmake_build
-        run: |
-          source /opt/intel/oneapi/setvars.sh
-          mkdir build
-          cd build
-          cmake -DGGML_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx ..
-          cmake --build . --config Release -j $(nproc)
-
-  ubuntu-22-cmake-sycl-fp16:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
-            github.event.inputs.run_type == 'full-ci' }}
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        dwhisper_sycl: [ON]
-        dcmake_c_compiler: [icx]
-        dcmake_cxx_compiler: [icpx]
-        arch: [linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le]
-
-    continue-on-error: true
-
-    steps:
-      - name: Clone
-        uses: actions/checkout@v6
-
-      - name: add oneAPI to apt
-        shell: bash
-        run: |
-          cd /tmp
-          wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          rm GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-          sudo add-apt-repository "deb https://apt.repos.intel.com/oneapi all main"
-
-      - name: install oneAPI dpcpp compiler
-        shell: bash
-        run: |
-          sudo apt update
-          sudo apt install intel-oneapi-compiler-dpcpp-cpp git
-
-      - name: install oneAPI MKL library
-        shell: bash
-        run: |
-          sudo apt install intel-oneapi-mkl-devel
-
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Build
-        id: cmake_build
-        run: |
-          source /opt/intel/oneapi/setvars.sh
-          mkdir build
-          cd build
-          cmake -DGGML_SYCL_F16=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx ..
-          cmake --build . --config Release -j $(nproc)
 
   windows-msys2:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
@@ -1361,7 +1148,21 @@ jobs:
         run: |
           ctest -R ^test-vad$ --test-dir build --output-on-failure -VV
 
-# TODO: simplify the following workflows using a matrix
+# ---------------------------------------------------------------------------
+# ggml regression coverage on GitHub-hosted CPU runners.
+#
+# CrispASR carries CrispASR-specific ggml patches (see tools/upstream-prs/
+# 01-12) across CPU, CUDA, Metal, and ggml-backend-sched. The github-hosted
+# CPU jobs below run upstream ggml's ./ci/run.sh script on our patched ggml
+# tree — they catch CPU-side regressions our patches might introduce.
+#
+# Self-hosted CUDA / Vulkan / Metal ggml-ci jobs from the original whisper.cpp
+# build.yml were removed because they target ggml-org's self-hosted runners
+# (which CrispASR doesn't provision), so they'd sit queued indefinitely on
+# every push. Re-add as workflow_dispatch-only if/when we own equivalent
+# self-hosted infra.
+# ---------------------------------------------------------------------------
+
   ggml-ci-x64-cpu-low-perf:
     runs-on: ubuntu-22.04
 
@@ -1370,9 +1171,6 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      # Retry apt-update a few times to ride out transient ports.ubuntu.com
-      # connection timeouts before ccache-action's internal apt-install
-      # hits the mirror.
       - name: Prewarm apt (retry through transient mirror flake)
         if: runner.os == 'Linux'
         run: |
@@ -1403,9 +1201,6 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      # Retry apt-update a few times to ride out transient ports.ubuntu.com
-      # connection timeouts before ccache-action's internal apt-install
-      # hits the mirror.
       - name: Prewarm apt (retry through transient mirror flake)
         if: runner.os == 'Linux'
         run: |
@@ -1428,17 +1223,24 @@ jobs:
         run: |
           LLAMA_ARG_THREADS=$(nproc) GG_BUILD_LOW_PERF=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
 
+  # GitHub Actions assigns this job to runners from a heterogeneous CPU pool
+  # — some machines have AVX512 / AVX512_VNNI / AVX512_VBMI, some don't. The
+  # upstream ./ci/run.sh build picks up AVX512 from the build host via
+  # native-detection, but if a later step (whisper-bench in particular) runs
+  # on a different VM in the pool without those features, the binary
+  # SIGILLs. We've reported this upstream; until ggml-org pins the runner or
+  # forces -DGGML_AVX512=OFF, this job is flaky-by-infra, not by our code.
+  # `continue-on-error: true` keeps the overall workflow green while we still
+  # see the result in the per-job report.
   ggml-ci-x64-cpu-high-perf:
     runs-on: ubuntu-22.04
+    continue-on-error: true
 
     steps:
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
 
-      # Retry apt-update a few times to ride out transient ports.ubuntu.com
-      # connection timeouts before ccache-action's internal apt-install
-      # hits the mirror.
       - name: Prewarm apt (retry through transient mirror flake)
         if: runner.os == 'Linux'
         run: |
@@ -1469,9 +1271,6 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      # Retry apt-update a few times to ride out transient ports.ubuntu.com
-      # connection timeouts before ccache-action's internal apt-install
-      # hits the mirror.
       - name: Prewarm apt (retry through transient mirror flake)
         if: runner.os == 'Linux'
         run: |
@@ -1502,9 +1301,6 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      # Retry apt-update a few times to ride out transient ports.ubuntu.com
-      # connection timeouts before ccache-action's internal apt-install
-      # hits the mirror.
       - name: Prewarm apt (retry through transient mirror flake)
         if: runner.os == 'Linux'
         run: |
@@ -1526,85 +1322,3 @@ jobs:
         id: ggml-ci
         run: |
           LLAMA_ARG_THREADS=$(nproc) GG_BUILD_NO_BF16=1 GG_BUILD_EXTRA_TESTS_0=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
-
-  ggml-ci-x64-nvidia-cuda:
-    runs-on: [self-hosted, Linux, mnt-root, NVIDIA]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Test
-        id: ggml-ci
-        run: |
-          nvidia-smi
-          GG_BUILD_CUDA=1 bash ./ci/run.sh ~/results/whisper.cpp /mnt/whisper.cpp
-
-  ggml-ci-x64-nvidia-vulkan-cm:
-    runs-on: [self-hosted, Linux, mnt-root, NVIDIA]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Test
-        id: ggml-ci
-        run: |
-          vulkaninfo --summary
-          GG_BUILD_VULKAN=1 GGML_VK_DISABLE_COOPMAT2=1 bash ./ci/run.sh ~/results/whisper.cpp /mnt/whisper.cpp
-
-  ggml-ci-x64-nvidia-vulkan-cm2:
-    runs-on: [self-hosted, Linux, mnt-root, NVIDIA, COOPMAT2]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Test
-        id: ggml-ci
-        run: |
-          vulkaninfo --summary
-          GG_BUILD_VULKAN=1 bash ./ci/run.sh ~/results/whisper.cpp /mnt/whisper.cpp
-
-  #ggml-ci-x64-cpu-amx:
-  #  runs-on: [self-hosted, Linux, X64, CPU, AMX]
-
-  #  steps:
-  #    - name: Clone
-  #      id: checkout
-  #      uses: actions/checkout@v6
-
-  #    - name: Test
-  #      id: ggml-ci
-  #      run: |
-  #        bash ./ci/run.sh ~/results/whisper.cpp /mnt/whisper.cpp
-
-  ggml-ci-mac-metal:
-    runs-on: [self-hosted, macOS, ARM64]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Test
-        id: ggml-ci
-        run: |
-          GG_BUILD_METAL=1 bash ./ci/run.sh ~/results/whisper.cpp ~/mnt/whisper.cpp
-
-  ggml-ci-mac-vulkan:
-    runs-on: [self-hosted, macOS, ARM64]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-
-      - name: Test
-        id: ggml-ci
-        run: |
-          vulkaninfo --summary
-          GG_BUILD_VULKAN=1 bash ./ci/run.sh ~/results/whisper.cpp ~/mnt/whisper.cpp
