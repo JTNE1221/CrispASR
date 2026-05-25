@@ -48,6 +48,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **LOW** | [#106 TEN-VAD](#106-ten-vad--low-latency-cross-platform-vad) | Small | Technically feasible VAD backend: C-compatible, 16 kHz / 10-16 ms frames, prebuilt libs + ONNX path. License is the gate: Apache 2.0 plus extra no-compete / own-app-only conditions from Agora. |
 | **MEDIUM** | [#114 Long-form transcribe — chunking-default ladder for voxtral / cohere / canary](#114-long-form-transcribe--make-chunkingstreamed-the-default-for-all-asr-backends-issue-89-follow-up) | Medium | **Parakeet portion DONE 2026-05-24 via `33f9a162`** (always-streamed default; HISTORY 2026-05-24 "Issue #89 reopened"). 120 s multi-backend sweep on lenhone's fresh `yt-dlp` audio confirmed the failure isn't parakeet-specific: voxtral drops ~80 s in the middle, cohere only emits ~4 segments across 120 s with tens-of-seconds gaps, canary hallucinates English. Open architectural question for the remaining backends: VAD-default everywhere vs parakeet-style streamed-encode trick per backend vs LLM-decoder chunking + LCS dedup. See PERFORMANCE.md "Multi-backend long-form Japanese — 120 s sweep" for the numbers. |
 | **DONE** | [#105 WhisperX word alignment models](#105-whisperx-word-alignment-models-wav2vec2-ctc-zoo) | Phased | **DONE 2026-05-23.** All 10 WhisperX common languages (fr/es/it/ja/zh/nl/uk/pt/ar/cs) converted, uploaded to `cstr/*-GGUF`, registry aliases wired. Only benchmarking + docs remain. |
+| **HIGH** | [#115 mimo-asr baseline broken](#115-mimo-asr-baseline-broken-silent-empty-on-short-segfault-on-long) | Small-Medium | Discovered 2026-05-25 by `tools/check-overlap-save-bug.sh`. `crispasr -m mimo-asr-q4_k.gguf --backend mimo-asr -f samples/jfk.wav` (11 s) runs to exit 0 producing **no output**; on 5 min audio it segfaults at ~159 s. Both pre-overlap and post-overlap configs reproduce, so it is **NOT** the overlap-save bug — it's a baseline mimo-asr regression. Last known good in HISTORY §56 (Q4_K shipped + 49.4 % WER on librispeech subset). Bisect candidates: anything touching `src/mimo_asr.cpp` since the Q4_K landing; `tools/check-overlap-save-bug.sh mimo-asr` is the cheap repro. |
 
 **Recently completed** (full write-ups in HISTORY.md): **Issue #89 reopened — parakeet streamed-encode is now the default → HISTORY 2026-05-24** (lenhone's `yt-dlp` clip reproduced 33 % coverage where the cached MP3 derivation gave 99.5 %; same TDT model collapses on the bad audio in NeMo's stock `transcribe()` too; encoder is bit-for-bit to NeMo via the diff harness; root cause is model-level TDT-single-pass instability that bidirectional attention amplifies past ~20 s; `33f9a162` makes the streamed path the default for any duration). **#81 FA per-head additive mask → HISTORY 2026-05-24** (CUDA MMA-F16 kernel patch +87 LOC behind `GGML_CUDA_CRISPASR_FA_PERHEAD_MASK` default-OFF; byte-identical JFK transcript, 0 CPU FA splits, -37 % short-clip on A1000; `tools/upstream-prs/06-cuda-fa-perhead-mask.md` + `872303bf` write-up). **CI cleanup → HISTORY 2026-05-25** (test #148 catch_discover_tests CLI-parser fix `4fda4be5`; build.yml trimmed 1610 → 1324 lines and arm64 switched to native runners `80ac00d1`; `GG_BUILD_NO_AVX512` knob added to `ci/run.sh` and enabled on `ggml-ci-x64-cpu-high-perf` `565b16af` so the AVX512 SIGILL is structurally fixed instead of `continue-on-error`-papered; `tools/upstream-prs/13-ci-no-avx512-knob.{md,patch}` for upstream submission). **#110 Global diarization timeline → HISTORY 2026-05-23** (sherpa/ecapa runs once on full audio; `CrispasrSherpaCache` mirrors pyannote pattern; segment splitting at speaker turns; 21 tests). **#98 Hotwords A+B → HISTORY 2026-05-23** (CTC-WS Aho-Corasick trie for parakeet CTC/TDT; LLM prompt injection for qwen3-asr/voxtral; `--hotwords` CLI; 17 tests). **Paraformer-zh NAR-ASR → HISTORY 2026-05-21** (220M params, single-pass NAR decode; F16/Q4_K/Q8_0 at `cstr/paraformer-zh-GGUF`; byte-identical on Chinese + English; 4 integration tests). **#86 Flash-attn → DONE** (all backends already wired via core helpers). **#90 Session beam_size all backends → HISTORY 2026-05-23** (qwen3-asr, granite, voxtral wired via `core_beam_decode::run_with_probs`; commit `0c24178e`). **#74 Feature-matrix uplift round 2 → HISTORY 2026-05-23** (74a chatterbox lang routing, 74b cap regression tests, 74c qwen3-tts base voice-cloning cap, 74d matrix regen; commit `b848152a`). **#111 TTS `--seed` parity → HISTORY 2026-05-23** (qwen3-tts, chatterbox, vibevoice realtime/base all show same-seed reproducibility and different-seed divergence on the local backup models; qwen3 env precedence fixed so CLI/request seed wins; IndexTTS stays effectively deterministic on the tested prompt/reference). **#99 funasr MLT-Nano hallucination fix → HISTORY 2026-05-21** (root cause: `use_low_frame_rate` hardcoded true in C++, but MLT-Nano's upstream config omits it (default false) — only 23/183 adaptor frames were spliced into the LLM prompt, truncating 87% of audio context; fix: converter reads the flag from config.yaml into a GGUF KV, runtime reads it at load time; also fixed `ada_n_heads` 16→8 in converter; GGUFs re-uploaded to `cstr/funasr-{nano,mlt-nano}-GGUF`). **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -3937,3 +3938,51 @@ Considered earlier as Option 1. Rejected because:
 - `tests/test-issue-89-long-audio-fallback.cpp` — extend
 - `tests/benchmark_asr.py` — multi-backend long-form scoring against the same 60/120/300/600 s fixtures (`longform_vps.sh` is the prototype)
 - `PERFORMANCE.md` — per-duration cross-backend table
+
+---
+
+## 115. mimo-asr baseline broken — silent empty on short, segfault on long
+
+**Status (2026-05-25):** found while running `tools/check-overlap-save-bug.sh` (the A/B sweep that surfaced the cohere/gemma4/glm-asr/kyutai-stt/voxtral opt-outs). mimo-asr was flagged `BOTH_EMPTY` because *both* arms produced zero output, so the bug is not in the overlap-save path — it's in the backend itself.
+
+### What we see
+
+```
+$ ./build/bin/crispasr -m /Volumes/backups/ai/crispasr/mimo-asr-q4_k.gguf \
+    --backend mimo-asr -f samples/jfk.wav -of /tmp/out -otxt
+... whisper LID detects 'en' p=0.977 ...
+mimo_tokenizer: loaded 569 tensors  encoder=32L/1280  rvq=20 stages
+mimo_asr_transcribe: audio 176000 samples -> 276 code frames
+mimo_asr_transcribe: prompt T_total=388 (T_groups=97)
+mimo_asr: kv cache 51 MiB k=f16 v=f16 (on gpu, head_dim=128 max_ctx=369 n_kv=8 n_layers=36)
+$ echo $?
+0
+$ ls /tmp/out*
+# (nothing)
+```
+
+Two failure modes, same backend:
+
+- **11 s JFK:** exit 0, no `.txt` / `.srt` produced, no error printed. Last log line is the kv-cache allocation; whatever happens inside the decode either returns an empty segment list silently or the segment-emission path is broken.
+- **5 min audio:** segfault at ~159 s wallclock (`Segmentation fault: 11`, exit 139), well after the same init sequence.
+
+Logs in `/Volumes/backups/ai/bench-results/overlap-bug-check/mimo-asr.{default,nooverlap}.log`.
+
+### Why this is its own item, not part of #114
+
+PLAN #114 already covers mimo-asr in the LLM-AR chunk-boundary class ("loses track at chunk boundaries"). That's the long-audio content-loss failure mode. This is different — the 11 s JFK case can't possibly trigger chunk-boundary loss (single chunk, single decode), and it still produces zero text. The backend can't transcribe *anything* in its current state.
+
+### Suspected blast radius
+
+mimo-asr is the only backend out of the 16 we A/B-swept that exhibits this. The other LLM-class backends (qwen3, voxtral, gemma4-e2b, granite) all transcribe short audio fine; only their long-audio behaviour was affected. So whatever regressed in mimo-asr is mimo-specific, not a shared-helper change.
+
+### Next steps
+
+1. `git bisect` on `src/mimo_asr.cpp` since HISTORY §56 (last known good: Q4_K shipped + ~50 % WER on a librispeech subset). Bisect harness: `crispasr -m mimo-asr-q4_k.gguf -f samples/jfk.wav -of /tmp/x -otxt && [ -s /tmp/x.txt ]`.
+2. If the bisect fingers a refactor on the segment-emission side, check whether `mimo_asr_transcribe` is now returning early without writing into the segments vector.
+3. If it's the kv-cache or decoder graph, see whether `max_ctx=369` is being exceeded silently.
+4. For the 5-min segfault: separate question, may be the same root cause (loop overruns when more decode iterations execute) or genuinely independent. Triage after the JFK-emit case is fixed.
+
+### Effort
+
+Small if the bug is in segment emission (one missing `.push_back`-shaped fix). Medium if the decoder graph itself is wrong. The repro is trivial and runs in under a minute.
