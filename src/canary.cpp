@@ -33,6 +33,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "core/attention.h"
+#include "core/crispasr_lcs.h"
 #include "core/fastconformer.h"
 
 #ifndef M_PI
@@ -1456,6 +1457,12 @@ extern "C" struct canary_result* canary_transcribe_streamed(struct canary_contex
     std::vector<canary_word_data> all_words;
     int chunks_processed = 0;
 
+    // LCS dedup window: bound how far into the previous chunk we look for
+    // boundary duplication. Conservative — overlap_seconds at ~3 tok/s
+    // (canary's average emission rate on en/de/fr/es) gives ~6 tokens for
+    // a 2 s overlap; cap at 30 to leave headroom for slower regimes.
+    const int delay_tokens = std::min(30, std::max(8, overlap_seconds * 5));
+
     for (int mel_offset = 0; mel_offset < T_mel; mel_offset += shift_mel_frames) {
         const int chunk_end = std::min(T_mel, mel_offset + chunk_mel_frames);
         const int chunk_T = chunk_end - mel_offset;
@@ -1472,19 +1479,61 @@ extern "C" struct canary_result* canary_transcribe_streamed(struct canary_contex
         if (!part)
             continue;
 
-        // Accumulate text with a space separator between chunks. The AED
-        // decoder doesn't add leading whitespace per chunk because each
-        // chunk's transcript begins with spiece_to_text(first non-prompt
-        // token), which already prepends a space in NeMo's BPE convention.
-        if (part->text && part->text[0]) {
-            if (!full_text.empty() && full_text.back() != ' ' && part->text[0] != ' ')
-                full_text += ' ';
-            full_text += part->text;
+        // PLAN #114 P3 polish: boundary-overlap dedup via LCS-merge across
+        // adjacent chunks. NeMo's `streaming_utils.longest_common_subsequence_merge`
+        // (the same primitive `core/crispasr_lcs::lcs_dedup_prefix_count`
+        // wraps) finds the LCS between the tail of accumulated tokens and
+        // the head of the current chunk's tokens. If the LCS length >=
+        // kMinMergeSubsequenceLen (default 3), the matched prefix of the
+        // current chunk is dropped before accumulation.
+        int n_skip = 0;
+        if (chunks_processed > 0 && part->n_tokens > 0 && !all_tokens.empty()) {
+            const int tail_size = std::min(delay_tokens, (int)all_tokens.size());
+            std::vector<int32_t> prev_tail;
+            prev_tail.reserve((size_t)tail_size);
+            for (int i = (int)all_tokens.size() - tail_size; i < (int)all_tokens.size(); i++)
+                prev_tail.push_back(all_tokens[(size_t)i].id);
+            std::vector<int32_t> curr_ids;
+            curr_ids.reserve((size_t)part->n_tokens);
+            for (int i = 0; i < part->n_tokens; i++)
+                curr_ids.push_back(part->tokens[i].id);
+            n_skip = crispasr_lcs::lcs_dedup_prefix_count(prev_tail, curr_ids);
         }
-        for (int i = 0; i < part->n_tokens; i++)
+
+        // Rebuild text for this chunk from surviving tokens (so the
+        // dedupe matches the token vector exactly; trusting part->text
+        // would leak the dropped prefix as a string).
+        std::string part_text;
+        for (int i = n_skip; i < part->n_tokens; i++)
+            part_text += part->tokens[i].text;
+        if (!part_text.empty() && part_text[0] == ' ')
+            part_text.erase(0, 1);
+
+        if (!part_text.empty()) {
+            if (!full_text.empty() && full_text.back() != ' ' && part_text[0] != ' ')
+                full_text += ' ';
+            full_text += part_text;
+        }
+        for (int i = n_skip; i < part->n_tokens; i++)
             all_tokens.push_back(part->tokens[i]);
-        for (int i = 0; i < part->n_words; i++)
-            all_words.push_back(part->words[i]);
+
+        // Words: drop leading ones whose t1 is at or before the last
+        // surviving token's t0 (best-effort — words and tokens don't have
+        // a strict 1:1 mapping but adjacent boundary-overlap words should
+        // share timing with the dropped tokens).
+        if (n_skip > 0 && part->n_tokens > 0) {
+            const int64_t cutoff_t0 =
+                (n_skip < part->n_tokens) ? part->tokens[(size_t)n_skip].t0 : part->tokens[(size_t)n_skip - 1].t1;
+            for (int i = 0; i < part->n_words; i++) {
+                if (part->words[i].t1 <= cutoff_t0)
+                    continue;
+                all_words.push_back(part->words[i]);
+            }
+        } else {
+            for (int i = 0; i < part->n_words; i++)
+                all_words.push_back(part->words[i]);
+        }
+
         canary_result_free(part);
         chunks_processed++;
     }
