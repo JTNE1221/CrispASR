@@ -49,13 +49,31 @@ public:
         // Best-of-N: when temperature > 0 and best_of > 1, run N seeded
         // decodes (process-global libc rand reseeded per run) and keep the
         // highest mean prob across the per-token probs in the result.
+
+        // PLAN #125 P6a: kyutai's causal LM needs a tail of audio to flush
+        // its final-token state. The batch wrapper passes raw samples and
+        // stops, so the model emits the partial token id for the last word
+        // (e.g. "c" for "country") but never receives the audio it needs
+        // to commit "ountry." + EOS. Append ~500 ms of zero-frame silence
+        // so the LM walks forward and finishes the word. Tokens emitted
+        // during the silence-tail keep their t_offset_cs arithmetic and
+        // simply land a few cs past the original input end — acceptable
+        // for word-timestamps. Pre-allocate once; reuse across best-of-N.
+        constexpr int kTailSilenceSamples = 8000; // 500 ms @ 16 kHz
+        std::vector<float> padded;
+        padded.reserve((size_t)n_samples + kTailSilenceSamples);
+        padded.assign(samples, samples + n_samples);
+        padded.resize((size_t)n_samples + kTailSilenceSamples, 0.0f);
+        const float* pad_ptr = padded.data();
+        const int pad_n = (int)padded.size();
+
         const int n_runs = (params.temperature > 0.0f && params.best_of > 1) ? params.best_of : 1;
         kyutai_stt_result_ex* r = nullptr;
         double best_score = -1.0;
         for (int run = 0; run < n_runs; run++) {
             if (n_runs > 1)
                 kyutai_stt_set_seed(ctx_, (unsigned int)(params.seed ^ (run * 0x9E3779B9u + 1u)));
-            kyutai_stt_result_ex* cand = kyutai_stt_transcribe_ex(ctx_, samples, n_samples, t_offset_cs);
+            kyutai_stt_result_ex* cand = kyutai_stt_transcribe_ex(ctx_, pad_ptr, pad_n, t_offset_cs);
             if (!cand)
                 continue;
             double sum = 0.0;
