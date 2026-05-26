@@ -6,6 +6,20 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-26 (P114-P3 second half) `canary_transcribe_streamed` lands
+
+`7177c931` ships the parakeet-pattern long-audio path for canary. Refactor extracts the post-encode body of `canary_transcribe_ex` (cross-KV + prompt + greedy decode + DTW timestamps + word grouping, ~300 lines) into a static `canary_finish_from_encoder` helper. The existing `canary_transcribe_ex` becomes a thin shim (mel + single-pass encode + helper) and the new `canary_transcribe_streamed` is a parallel shim (full-mel + 8 s/2 s chunked encode + concat + helper). Zero duplication; both entry points share the decoder.
+
+Backend wrapper routes through streamed for n_samples > 30 s, `CANARY_STREAM_THRESHOLD_S` overrides. Matches the parakeet backend's `PARAKEET_STREAM_THRESHOLD_S` knob shape (default 0 = always streamed on parakeet; canary is more conservative at 30 because of the AED-boundary issue below).
+
+**Known limitation.** On synthetic concatenated short clips (`jfk × 8 = 88 s`) the streamed path emits `<eos>` at the chunk boundary after producing one full JFK transcript. JFK forced streamed (`CANARY_STREAM_THRESHOLD_S=0`) truncates to the first sentence. Cause: canary's AED was trained on single-utterance audio and treats the splice point as an utterance end. NeMo handles this in `FrameBatchMultiTaskAED` via per-chunk prompt re-injection; we don't yet. For natural long-form audio (one continuous utterance, no internal silences) the streamed path should produce a coherent transcript because there's no mid-stream `<eos>` signal — but this needs a real long en/de/fr/es clip to validate.
+
+**Decision.** Ship at `CANARY_STREAM_THRESHOLD_S=30` with the caveat documented. Per-chunk prompt re-injection is the proper fix and is queued for a future session.
+
+**Lesson.** Porting a streaming pattern that works for one decoder family (RNN-T / TDT) doesn't transfer 1:1 to a different family (AED). The encoder side ports cleanly — chunked encode + overlap trim + concat reproduces the global feature view. The decoder side does not — AED's `<eos>` is implicit ("the utterance ended") and chunk boundaries can look like utterance ends if the model has no other signal. RNN-T / TDT decoders are frame-synchronous and don't have this problem because there's no "end of utterance" token; the blank-runaway pattern is the same class of failure on the other end.
+
+---
+
 ## 2026-05-26 (P114-P3 + harness kernel) canary lang-whitelist + Kaggle audit kernel
 
 Two more landings this session:
