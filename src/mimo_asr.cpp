@@ -321,20 +321,30 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
-    if (!ctx->backend)
-        ctx->backend = ctx->backend_cpu;
-
-    // PLAN #115: weights pinned to CPU backend. The PLAN #72 attempt to
-    // load on `ctx->backend` (GPU when use_gpu=true) silently broke the
-    // prefill graph: on M1 Metal the runtime produced exit 0 with no
-    // segments emitted on JFK (11 s) and segfaulted at ~159 s on 5 min
-    // audio. CPU-residency was verified working on Kaggle Linux x86_64
-    // CPU build on 2026-05-26 (JFK transcript matches HISTORY §56
-    // reference verbatim). The deeper GPU graph fix is queued as PLAN
-    // #115 option C; until that lands, mimo runs on CPU even when
-    // --gpu is selected (loses the documented 22% Metal speedup but
-    // restores correctness, which is the higher priority).
+    // PLAN #115: force the whole mimo-asr pipeline to CPU until option C
+    // lands. Two failure modes regress on M1 Metal otherwise:
+    //   - weights on GPU (PLAN #72 commit 89111260): prefill graph
+    //     silently emits no tokens, exit 0 with no .txt; segfault at
+    //     ~159 s on 5 min audio.
+    //   - weights on CPU + compute on GPU (the §56 working config):
+    //     `ggml_metal_buffer_get_id: error: tensor 'llm.embed.weight'
+    //     buffer is nil` — the Metal scheduler can't find weight
+    //     buffers for the embed lookup. The scheduler has tightened
+    //     cross-backend tensor resolution since §56, and mimo's graph
+    //     builder doesn't emit the per-tensor backend tagging the new
+    //     ggml needs.
+    // Both verified empirically on M1 Metal 2026-05-26 with current
+    // HEAD (95d74455 incl. the sched-restore hardening). Kaggle
+    // Linux x86_64 CPU build at HEAD verified working: JFK matches
+    // HISTORY §56 reference (prefill 15.8 s, decode 7.0 s over 26
+    // steps). Force-CPU is the cheapest path to correctness; the
+    // proper GPU graph fix is tracked as PLAN #115 option C and
+    // belongs in `mimo_asr_build_prefill_graph`.
+    ctx->backend = ctx->backend_cpu;
+    // params.use_gpu intentionally ignored — see PLAN #115
+    if (params.use_gpu && params.verbosity >= 1) {
+        fprintf(stderr, "mimo_asr: --gpu honored as CPU (PLAN #115 — GPU prefill broken)\n");
+    }
     // PLAN #69a: when CRISPASR_N_GPU_LAYERS is set and < total LLM
     // layers, the split loader still works against ctx->backend_cpu —
     // both halves of the split go to CPU buffers because the GPU half
