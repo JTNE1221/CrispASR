@@ -4,6 +4,7 @@
 #include "gemma4_e2b.h"
 #include "whisper_params.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -68,18 +69,40 @@ public:
         // PLAN #125 P4: gemma4-e2b is trained on ~30 s windows. Beyond
         // that the encoder embeddings collapse and the LM hits <eos>
         // immediately after the prompt, then continues autoregressively
-        // into unrelated commentary (issue #125 report 02). Refuse
-        // silently-wrong long inputs with a clear error so the user
-        // routes via --vad or a chunking wrapper instead.
+        // into unrelated commentary (issue #125 report 02).
+        //
+        // Default: refuse the slice with a clear error so the user routes
+        // via --vad. Opt-in: set CRISPASR_GEMMA4_AUTO_CHUNK=1 to chunk
+        // internally at the training-window boundary. Auto-chunking is
+        // off by default because we haven't validated quality at chunk
+        // boundaries on long audio yet.
         constexpr int kMaxSamples = 30 * 16000;
         if (n_samples > kMaxSamples) {
-            fprintf(stderr,
-                    "crispasr[gemma4-e2b]: input is %.1f s (> %.0f s training window). "
-                    "Use --vad to segment, or chunk externally. Aborting this slice.\n",
-                    (double)n_samples / 16000.0, (double)kMaxSamples / 16000.0);
+            const bool auto_chunk = std::getenv("CRISPASR_GEMMA4_AUTO_CHUNK") != nullptr;
+            if (!auto_chunk) {
+                fprintf(stderr,
+                        "crispasr[gemma4-e2b]: input is %.1f s (> %.0f s training window). "
+                        "Use --vad to segment, chunk externally, or set "
+                        "CRISPASR_GEMMA4_AUTO_CHUNK=1 to chunk internally "
+                        "(quality at chunk boundaries not yet validated). Aborting this slice.\n",
+                        (double)n_samples / 16000.0, (double)kMaxSamples / 16000.0);
+                return out;
+            }
+            for (int start = 0; start < n_samples; start += kMaxSamples) {
+                const int this_n = std::min(kMaxSamples, n_samples - start);
+                const int64_t chunk_offset_cs = t_offset_cs + (int64_t)((double)start / 16000.0 * 100.0);
+                auto chunk_segs = transcribe_one(samples + start, this_n, chunk_offset_cs, params);
+                for (auto& s : chunk_segs)
+                    out.push_back(std::move(s));
+            }
             return out;
         }
+        return transcribe_one(samples, n_samples, t_offset_cs, params);
+    }
 
+    std::vector<crispasr_segment> transcribe_one(const float* samples, int n_samples, int64_t t_offset_cs,
+                                                 const whisper_params& params) {
+        std::vector<crispasr_segment> out;
         const std::string src =
             !params.source_lang.empty() ? params.source_lang : (!params.language.empty() ? params.language : "");
         const std::string tgt = !params.target_lang.empty() ? params.target_lang : std::string("en");
