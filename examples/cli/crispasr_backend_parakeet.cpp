@@ -31,9 +31,23 @@ public:
         // (crispasr_run.cpp:`!has_native_lid`), so users wanting LID
         // get nothing. With the cap absent, `-dl` correctly routes
         // through the whisper-tiny pre-step.
+        //
+        // CAP_INTERNAL_CHUNKING intentionally NOT declared (2026-05-26,
+        // PLAN #114 follow-up). The backend's own
+        // `parakeet_transcribe_streamed` does handle long audio
+        // internally (chunked encode + concat + single TDT decode), but
+        // the empirical option matrix in PERFORMANCE.md shows that the
+        // dispatcher's chunk-30 + overlap-save + LCS-merge dedup path
+        // produces materially more content on long audio (v3+EN60:
+        // 520→755 chars +45 %; ja+JA60: 1674→1942 +16 %; v3+JA60:
+        // 605→660 +9 %). Without this flag the dispatcher's
+        // auto-chunk-at-30s fallback fires for audio > 30 s. Short audio
+        // (< 30 s) is unaffected — the dispatcher only auto-chunks past
+        // the threshold, so 11 s JFK still gets one backend call on the
+        // full audio.
         return CAP_TIMESTAMPS_NATIVE | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE | CAP_FLASH_ATTN |
                CAP_PUNCTUATION_TOGGLE | CAP_TEMPERATURE | CAP_DIARIZE | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD |
-               CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING;
+               CAP_UNBOUNDED_INPUT;
     }
 
     bool init(const whisper_params& p) override {
