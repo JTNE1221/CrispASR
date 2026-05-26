@@ -1766,3 +1766,72 @@ python tools/benchmark_vitw_beam.py \
     --n 8 --beams 1,2,4 \
     --json tools/vitw_beam_results.json
 ```
+
+## Multi-backend long-form comparison — 2026-05-26 (PLAN #114 P3 closeout)
+
+Live runs on M1 Metal with the post-PLAN-#114-P3 binaries. Inputs from
+`/Volumes/backups/code/audio_samples/` (mirrored from VPS — see that
+dir's CLAUDE.md). All backends invoked with `-l <lang>`, `-np`, `-nt`,
+default settings (`CANARY_STREAM_THRESHOLD_S=0` after `10c2fba5`).
+
+### EN 60 s (FLEURS English, narration)
+
+```
+audio_samples/en/fleurs_60s.wav  (60 s, 16 kHz mono)
+```
+
+| Backend | Chars | Notes |
+|---|---|---|
+| parakeet-tdt-0.6b-v3 | ~217 | **Truncated** — misses middle segment ("All nouns alongside the words say for you"). Returns only the first + last sentences. The single TDT decode over the chunked-encode concat dropped continuity at one boundary. Worth investigating; not addressed in this session. |
+| canary-1b-v2 | ~735 | Full content but visible artifacts: `"twenty five. to thirty"` (model splits a number), `"Save for You"` (AED re-emits with different capitalization → after case-insensitive LCS the dup is dropped but the leftover `"Save for You"` reads as a sentence start), `"Yeah, yeah, ×14"` (degenerate-loop guard fired at the configured 14-token window). |
+| voxtral-mini-3b-2507 | **~826** | **Clean.** Includes extra content like `"in which was made famous to foreigners after a glowing account of its splendorous recorded by Lord Byron"` that canary missed entirely. No boundary artifacts. |
+| cohere-transcribe | **~864** | **Clean.** Similar coverage to voxtral, `"world's"` instead of `"world"` (model preference), `"Northern Marianas"` instead of `"Northern Mariana's"`. |
+
+### DE 60 s (FLEURS German, narration)
+
+```
+audio_samples/de/fleurs_60s.wav  (60 s, 16 kHz mono)
+```
+
+| Backend | Notes |
+|---|---|
+| canary-1b-v2 | Full content but boundary dups: `"Geld-Technologie-Technologie-Technologie-Technologie"` (early-chunk loop, partly caught by the guard at 4 reps before the window opened), `"T-Rex war war"`, `"Rückseite der der Unabhängigkeitserklärung"`, `"Männer und Frauen. Frauen"`, `"Spitze. der Spitze"`. The LCS-merge + word-snap + case-insensitive LCS pipeline caught some but not all — these are exact-token re-emissions across chunks that an LCS strict-prefix match still leaks. |
+| voxtral-mini-3b-2507 | **Clean, single-pass-quality.** No boundary artifacts visible. Catches `"Juden und Nicht-Juden gleichermaßen"` (post-segment continuation) that canary missed. |
+| cohere-transcribe | **Clean.** `"Tri-Rex"` is a minor model error (not a boundary artifact), otherwise identical-shape transcript to voxtral. |
+
+### Architectural takeaway
+
+The data confirms the design-notes table in PLAN #114 ("Streaming-pattern
+design"): the **voxtral-pattern backends** (voxtral, cohere — 30 s
+disjoint chunks → audio embeds concat → one LLM AR decode) produce
+cleaner long-form output than the **NeMo-pattern backends** (canary —
+8 s overlap chunks → per-chunk decode → LCS-merge + word-snap +
+case-insensitive LCS dedup). The voxtral pattern's lack of overlap means
+no duplication enters the input, so no dedup is needed; the NeMo
+pattern's overlap (necessary for bidirectional encoder context) requires
+dedup, and any imperfect dedup pass leaves visible artifacts.
+
+This is not a universal win for the voxtral pattern though — it requires
+a long-context AR LLM (voxtral's 3 B, cohere's 1.3 B). Canary's AED was
+trained on 8–30 s clips and cannot absorb a full 5 min in a single decode
+(`<eos>` lands at the first internal utterance boundary). Parakeet's TDT
+could in principle use the voxtral pattern but doesn't currently —
+something to revisit if parakeet's truncation behaviour on the EN 60 s
+clip turns out to be a streamed-path bug rather than a one-off.
+
+### Six-commit canary thread that produced the "full content" column above
+
+| SHA | What |
+|---|---|
+| `dfe1af3b` | lang-whitelist (en/de/fr/es only) — refused unsupported langs before they could hallucinate |
+| `7177c931` | `canary_transcribe_streamed` first cut (concat-then-decode → truncated at AED `<eos>`) |
+| `63fdbe46` | NeMo `FrameBatchMultiTaskAED` analogon — per-chunk AED decode with prompt re-injection |
+| `62766dae` | LCS boundary dedup |
+| `10c2fba5` | splice-punct cleanup + `CANARY_STREAM_THRESHOLD_S=0` default |
+| `361df3e2` | window-based degenerate-loop guard |
+| `935ffbee` | word-snap heuristic (extend LCS drop to next word-start) |
+| `5e402ee9` | case-insensitive LCS (ASCII lowercase canonical id) |
+
+Before this thread canary truncated to ~460 chars on the 1.3 m
+De-Abwasch article and ~360 chars on EN FLEURS 60 s; after, full
+coverage (~1196 chars and ~735 chars respectively).
