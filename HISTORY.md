@@ -6,6 +6,20 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-26 (P114-P3 closeout) splice-punct cleanup + always-streamed default + degenerate-loop guard
+
+Three follow-ons close PLAN #114 P3:
+
+- **`10c2fba5` splice-punctuation cleanup + always-streamed default.** After LCS dedup the chunk boundary can land between a mid-sentence punctuation in the previous chunk (`,;:`) and a sentence-end punctuation in the surviving prefix (`.?!`), producing `"for you, . Ask..."` on JFK forced streamed. The chunk-1 comma was the model's best guess for the continuation point; chunk-2 produced a period because the LCS-dropped middle ended that sentence. At the splice, if `full_text.back() ∈ {',', ';', ':'}` and the first non-whitespace char of `part_text` ∈ {`.`, `?`, `!`}, drop the mid-sentence punctuation + trailing spaces from `full_text`, strip leading whitespace from `part_text`, and attach directly. JFK now reads `"...for you. Ask what you can do for your country."` — semantically equivalent to single-pass, only the splice rendering differs. With the cosmetic regression closed, flipped `CANARY_STREAM_THRESHOLD_S` default to `0` (always streamed) — matches parakeet.
+
+- **`361df3e2` window-based degenerate-loop guard.** The user pointed at the 60 s Japanese clip output: ~85 "yeah"s in a row mid-transcript. The funasr `!`-loop guard from PLAN #125 P1 (bail after consecutive id repeats > 20) missed it because canary's BPE emits `▁yeah` + `,` alternating — a 2-token cycle, no consecutive-id repeat. Switched the canary AED greedy loop to a window-based check: count distinct ids in the last 40 generated tokens (including the candidate); if ≤ 3 distinct, abort that chunk's decode with a clear stderr message. Normal speech has ~25-30 unique ids per 40-token window, well above the trigger; 1/2/3-cycle degeneracies all fire. 60 s clip: ~14 yeahs before the guard fires (down from ~85), wall time 12 s (down from 18 s).
+
+**Lesson — degenerate-loop guards must match the BPE granularity.** A consecutive-id check is right for vocab-collision loops (funasr's `!`); a window-based distinct-id check is right for multi-token cycle loops (canary's `▁yeah,▁yeah,`). The window/threshold pair (40 tokens / 3 distinct) covers both — funasr would also hit this trigger at step 40. Next backend with a degenerate-loop report should default to the window approach; the consecutive-id check is a special case worth keeping in funasr only because it's lighter and was already shipped.
+
+**P3 fully closed.** Canary's long-audio path is now: lang-whitelist (`dfe1af3b`) → mel+chunked-encode (`7177c931`) → per-chunk AED with prompt re-injection (`63fdbe46`) → LCS boundary dedup (`62766dae`) → splice-punct cleanup (`10c2fba5`) → degenerate-loop guard (`361df3e2`). Always-streamed by default; six commits, no regression on short audio, full long-audio coverage for canary-1b-v2's 4 supported languages.
+
+---
+
 ## 2026-05-26 (P114-P3 LCS dedup) canary streamed boundary-dup polish
 
 `62766dae` lands the LCS-merge dedup inside `canary_transcribe_streamed`. Per-chunk re-injection (`63fdbe46`) closed the AED-boundary `<eos>` bug but left a boundary-duplication artifact (each chunk re-decoded the overlap_seconds of audio in the previous chunk's tail). NeMo handles this in `streaming_utils.longest_common_subsequence_merge`; we already exposed the primitive at `core/crispasr_lcs::lcs_dedup_prefix_count` for voxtral PLAN #114 P2 at the dispatcher layer. Wire it INSIDE the streamed function: for each new chunk, find the longest matching prefix against the previous chunk's tail tokens, drop it, rebuild text from surviving tokens, peel words whose `t1` ≤ surviving-tokens[0].t0.
