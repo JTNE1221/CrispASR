@@ -131,13 +131,18 @@ public:
         }
 
         // PLAN #114 P3 second half: route to canary_transcribe_streamed
-        // for long audio. Same parakeet pattern — single-pass over a
-        // long buffer lets the bidirectional Conformer attention
-        // amplify acoustic noise past the ~30 s training window.
-        // CANARY_STREAM_THRESHOLD_S overrides the default; 0 = always
-        // streamed (matches the parakeet backend, where streamed is
-        // bit-equivalent to single-pass on short audio).
-        int stream_threshold_s = 30;
+        // for all audio (matches the parakeet backend default). Single-pass
+        // over a long buffer lets the bidirectional Conformer attention
+        // amplify acoustic noise past the ~30 s training window. The
+        // streamed path (per-chunk AED decode with prompt re-injection
+        // + LCS-merge boundary dedup + splice-punctuation cleanup) is
+        // semantically equivalent to single-pass on short audio — JFK
+        // single-pass is "...for you, ask..." and JFK streamed is
+        // "...for you. Ask..." (LCS-dedup correctly converts the
+        // mid-sentence comma to a sentence boundary at the chunk
+        // splice). Set CANARY_STREAM_THRESHOLD_S=N to force single-pass
+        // for inputs ≤ N seconds.
+        int stream_threshold_s = 0;
         if (const char* e = std::getenv("CANARY_STREAM_THRESHOLD_S")) {
             stream_threshold_s = std::max(0, atoi(e));
         }

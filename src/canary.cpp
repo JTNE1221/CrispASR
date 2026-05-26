@@ -1510,7 +1510,40 @@ extern "C" struct canary_result* canary_transcribe_streamed(struct canary_contex
             part_text.erase(0, 1);
 
         if (!part_text.empty()) {
-            if (!full_text.empty() && full_text.back() != ' ' && part_text[0] != ' ')
+            // PLAN #114 P3 polish — splice-punctuation cleanup. After LCS
+            // dedup the chunk boundary can land between a mid-sentence
+            // punctuation in the previous chunk (`,` `;` `:`) and a
+            // sentence-end punctuation in the surviving prefix of the new
+            // chunk (`.` `?` `!`), producing e.g. "for you, . Ask...".
+            // The chunk-1 comma was the model's best guess for the
+            // continuation point; chunk-2 produced a period because the
+            // LCS-dropped middle ended that sentence. Collapse the
+            // mid-sentence punctuation in favour of the sentence-end
+            // punctuation that survived LCS.
+            bool attach_directly = false;
+            if (!full_text.empty()) {
+                const char last_punct = full_text.back();
+                size_t first_nws = 0;
+                while (first_nws < part_text.size() && (part_text[first_nws] == ' ' || part_text[first_nws] == '\t'))
+                    first_nws++;
+                if (first_nws < part_text.size()) {
+                    const char first_punct = part_text[first_nws];
+                    if ((last_punct == ',' || last_punct == ';' || last_punct == ':') &&
+                        (first_punct == '.' || first_punct == '?' || first_punct == '!')) {
+                        full_text.pop_back();
+                        while (!full_text.empty() && full_text.back() == ' ')
+                            full_text.pop_back();
+                        // Strip leading whitespace from part_text so the
+                        // surviving punctuation attaches directly:
+                        //   "for you" + ". Ask..."  →  "for you. Ask..."
+                        // (instead of "for you . Ask..." with a stray
+                        // space before the period).
+                        part_text.erase(0, first_nws);
+                        attach_directly = true;
+                    }
+                }
+            }
+            if (!attach_directly && !full_text.empty() && full_text.back() != ' ' && part_text[0] != ' ')
                 full_text += ' ';
             full_text += part_text;
         }
