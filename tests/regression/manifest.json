@@ -225,6 +225,8 @@
       "backend_id": "parakeet",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 from docs/diff-harness-coverage.md gap inventory; rebake-pending. See handover-prompts/extend-coverage-via-kaggle.md for the bring-up flow. expected_transcript is a guess until first capture; replace after rebake prints the captured value.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "nvidia/parakeet-tdt-1.1b",
       "source_model_note": "HF id for tools/reference_backends/parakeet.py. Only needed for re-bake. NeMo 2.x compatibility patched in 2684d601 (EncDecHybridRNNTCTCBPEModel fallback) — verify the parakeet-tdt-1.1b variant uses the same concrete class.",
       "gguf": {
@@ -243,6 +245,8 @@
       "backend_id": "parakeet",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — rebake-pending. See handover-prompts/extend-coverage-via-kaggle.md.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "nvidia/parakeet-tdt_ctc-1.1b",
       "source_model_note": "HF id for tools/reference_backends/parakeet.py. Hybrid TDT+CTC variant — same EncDecHybridRNNTCTCBPEModel class as the existing parakeet-tdt-0.6b-ja entry.",
       "gguf": {
@@ -261,6 +265,8 @@
       "backend_id": "parakeet",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — rebake-pending. RNN-T-only variant (no CTC head); needs verifying that parakeet.py's EncDecHybridRNNTCTCBPEModel fallback handles RNN-T-only models, or that we add an EncDecRNNTBPEModel fallback. See handover-prompts/extend-coverage-via-kaggle.md.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "nvidia/parakeet-rnnt-0.6b",
       "source_model_note": "HF id for tools/reference_backends/parakeet.py. RNN-T-only — different concrete class than the hybrid TDT+CTC variants.",
       "gguf": {
@@ -279,6 +285,8 @@
       "backend_id": "parakeet",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — rebake-pending. RNN-T-only variant — same concrete-class caveat as parakeet-rnnt-0.6b.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "nvidia/parakeet-rnnt-1.1b",
       "source_model_note": "HF id for tools/reference_backends/parakeet.py. RNN-T-only.",
       "gguf": {
@@ -297,6 +305,8 @@
       "backend_id": "paraformer",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — rebake-pending. Chinese paraformer; needs a Chinese sample WAV — TODO confirm which sample to use (samples/zh/ may not exist; could store in cstr/crispasr-regression-fixtures and reference via fixture_sample_path).",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "funasr/paraformer-zh",
       "source_model_note": "HF id for tools/reference_backends/paraformer.py. Loaded via funasr's automodel.",
       "gguf": {
@@ -316,6 +326,8 @@
       "backend_id": "voxtral",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — rebake-pending. Voxtral mini 3B; the larger 24B variant is not on cstr yet.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "mistralai/Voxtral-Mini-3B-2507",
       "source_model_note": "HF id for tools/reference_backends/voxtral.py.",
       "gguf": {
@@ -334,6 +346,8 @@
       "backend_id": "mimo-asr",
       "skip_diff": true,
       "_skip_diff_note": "Added 2026-05-25 — local ref archive exists at /Volumes/backups/ai/mimo-asr-ref.gguf (mtime 2026-05-01) but cstr/crispasr-regression-fixtures doesn't have a frozen copy yet. Rebake will upload it; then bump fixtures.revision and flip skip_diff. NOTE: tests/regression/manifest.json _comment + plan(#115) flag mimo-asr baseline as broken (silent empty on short audio, segfault on long) — verify the runtime works on samples/jfk.wav before enabling the diff.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
       "source_model": "XiaomiMiMo/MiMo-V2.5-ASR",
       "source_model_note": "HF id for tools/reference_backends/mimo_asr.py. Needs MIMO_TOKENIZER_DIR env to point at the sibling tokenizer snapshot during rebake.",
       "gguf": {
