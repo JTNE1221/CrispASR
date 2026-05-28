@@ -39,6 +39,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_funasr_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_paraformer_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_sensevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxcpm2_tts_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_cosyvoice3_tts_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -104,6 +105,9 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_kokoro_backend();
     if (name == "voxcpm2-tts" || name == "voxcpm2" || name == "voxcpm" || name == "voxcpm2_tts")
         return crispasr_make_voxcpm2_tts_backend();
+    if (name == "cosyvoice3" || name == "cosyvoice3-tts" || name == "cosyvoice3_tts" || name == "cv3" ||
+        name == "cv3-tts")
+        return crispasr_make_cosyvoice3_tts_backend();
     if (name == "m2m100" || name == "m2m-100" || name == "translate" || name == "m2m100-wmt21" || name == "wmt21" ||
         name == "m2m100-1.2b")
         return crispasr_make_m2m100_backend();
@@ -173,6 +177,7 @@ std::vector<std::string> crispasr_list_backends() {
         "indextts",
         "kokoro",
         "voxcpm2-tts",
+        "cosyvoice3-tts",
         "m2m100",
         "m2m100-wmt21",
         "madlad",
@@ -424,6 +429,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "kokoro";
     if (contains_ci("voxcpm2") || contains_ci("voxcpm"))
         return "voxcpm2-tts";
+    if (contains_ci("cosyvoice3") || contains_ci("cosyvoice-3") || contains_ci("cv3"))
+        return "cosyvoice3-tts";
     if (contains_ci("granite") && contains_ci("nar"))
         return "granite-4.1-nar";
     if (contains_ci("granite") && contains_ci("speech"))
@@ -488,6 +495,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "kokoro";
             else if (a == "voxcpm2" || a == "voxcpm2_tts" || a == "voxcpm2-tts")
                 result = "voxcpm2-tts";
+            else if (a == "cosyvoice3" || a == "cosyvoice3-tts" || a == "cosyvoice3_tts" || a == "cosyvoice3-llm")
+                result = "cosyvoice3-tts";
             else if (a == "chatterbox" || a == "chatterbox_turbo" || a == "kartoffelbox")
                 result = "chatterbox";
             else if (a == "m2m100" || a == "m2m_100")

@@ -653,10 +653,24 @@ work in 4 phases**.
     for vocoder; we're well above). Together with the LM (phase 2) +
     flow Euler (phase 3) this completes the full TTS pipeline modulo
     audio-rate orchestration in the CLI adapter (phase 5).
-- **Phase 5 — CLI adapter + model registry + HF upload + docs**.
-  Open. Phase-2-then-3-then-4 then this.
+- **Phase 5a — CLI adapter + voice-clone bundle**. DONE.
+  `models/convert-cosyvoice3-voices-to-gguf.py` bakes per-voice
+  `prompt_speech_tokens` (speech_tokenizer_v3.onnx) + `spk_emb`
+  (campplus.onnx CAMPPlus 192-D) + `ref_mel` (matcha mel @ 24 kHz)
+  + `prompt_text` into a `voices.gguf` blob. Runtime API
+  `cosyvoice3_tts_init_voices_from_file` + `cosyvoice3_tts_synth`
+  composes the full text→audio pipeline (BPE → AR speech tokens →
+  pre_la + repeat_interleave → flow Euler → HiFT). CLI backend
+  `cosyvoice3-tts` wires it into the unified dispatcher with sibling
+  auto-discovery of flow / hift / voices GGUFs (env-var overrides:
+  `COSYVOICE3_HIFT_PATH`, `COSYVOICE3_VOICES_PATH`).
+- **Phase 5b — HF upload + docs + quant**. Open. Upload the three
+  GGUFs + voices.gguf to `cstr/cosyvoice3-0.5b-2512-GGUF`; add Q4_K
+  LLM + Q8_0 flow variants; README + feature-matrix entry.
 - **Phase 6 (deferred)** — S3Tokenizer V3 for arbitrary-WAV cloning.
-  MVP uses baked-in voice references.
+  MVP uses baked-in voice references via the Python converter; this
+  phase moves the tokenizer + CAMPPlus + matcha-mel front-end into
+  C++ so runtime callers can clone from any 24 kHz WAV.
 
 ### Voice cloning strategy
 

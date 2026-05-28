@@ -31,6 +31,7 @@
 #include "cosyvoice3_tts.h"
 
 #include "core/attention.h"
+#include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "ggml-alloc.h"
@@ -48,6 +49,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -205,6 +207,35 @@ struct cv3_hift_resblock {
     ggml_tensor* a2_alpha[3] = {nullptr, nullptr, nullptr};
 };
 
+// Qwen2 BPE vocab loaded from the LLM GGUF's
+// `tokenizer.ggml.tokens` + `tokenizer.ggml.merges` (the converter
+// writes the gpt2-byte-encoded vocab.json verbatim). Plus the small
+// set of CV3 special tokens (`<|endoftext|>`, `<|im_start|>`,
+// `<|im_end|>`, `<|endofprompt|>`) that the BlankEN vocab.json does
+// not include but the model was trained against.
+struct cv3_vocab {
+    std::vector<std::string> id_to_token;
+    std::unordered_map<std::string, int32_t> token_to_id;
+    std::unordered_map<std::string, int32_t> merge_rank;
+};
+
+// One baked voice for zero-shot cloning. The runtime keeps these
+// resident in CPU memory — they're at most a few hundred KB each.
+struct cv3_voice {
+    std::string name;
+    std::vector<int32_t> prompt_speech_tokens;
+    std::string prompt_text;
+    std::vector<float> spk_emb; // size 192
+    std::vector<float> ref_mel; // (T_ref_mel, 80) row-major
+    int t_ref_mel = 0;
+};
+
+struct cv3_voices {
+    bool loaded = false;
+    std::vector<cv3_voice> voices;
+    std::unordered_map<std::string, int> by_name;
+};
+
 struct cv3_hift {
     bool loaded = false;
     cv3_hift_hp hp;
@@ -287,6 +318,13 @@ struct cosyvoice3_tts_context {
     // cosyvoice3_tts_init_hift_from_file(). Stays empty if HiFT was
     // not loaded (`hift.loaded == false`).
     cv3_hift hift{};
+
+    // Phase 5 — Qwen2 BPE vocab + voice-clone bundle. The vocab is
+    // populated alongside the LLM init (the LLM GGUF already carries
+    // `tokenizer.ggml.tokens` + `tokenizer.ggml.merges`); the voices
+    // table is populated separately via init_voices_from_file().
+    cv3_vocab vocab{};
+    cv3_voices voices{};
 };
 
 namespace {
@@ -558,6 +596,50 @@ extern "C" struct cosyvoice3_tts_context* cosyvoice3_tts_init_from_file(const ch
     hp.max_pos = cv3_kv_u32(gctx, "cosyvoice3.llm.max_pos", hp.max_pos);
     hp.speech_vocab = cv3_kv_u32(gctx, "cosyvoice3.llm.speech_vocab_size", hp.speech_vocab);
     hp.speech_codebook = cv3_kv_u32(gctx, "cosyvoice3.llm.speech_token_codebook", hp.speech_codebook);
+
+    // BPE vocab. The CV3 LLM converter writes the Qwen2 vocab.json
+    // verbatim (gpt2-byte-encoded), but vocab.json caps out at id
+    // 151642. The CV3 chat-style prompt depends on a handful of
+    // special tokens added on top of that — register them here so
+    // `<|endofprompt|>` etc. tokenise to the correct ids.
+    auto tok = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
+    if (!tok.empty()) {
+        ctx->vocab.id_to_token = std::move(tok);
+        ctx->vocab.token_to_id.reserve(ctx->vocab.id_to_token.size() + 8);
+        for (int i = 0; i < (int)ctx->vocab.id_to_token.size(); i++) {
+            ctx->vocab.token_to_id[ctx->vocab.id_to_token[i]] = i;
+        }
+    }
+    {
+        // CV3 added_special_tokens (from upstream tokenizer.py
+        // CosyVoice3Tokenizer): ids 151643..151645 are the universal
+        // chat markers, 151646 is `<|endofprompt|>` (asserted on by
+        // upstream `Qwen2LM.inference`). We only need to register the
+        // ones referenced by our prompt_text — keeping the table
+        // small avoids accidentally shadowing trained vocab entries.
+        const struct {
+            int id;
+            const char* text;
+        } specials[] = {
+            {151643, "<|endoftext|>"},
+            {151644, "<|im_start|>"},
+            {151645, "<|im_end|>"},
+            {151646, "<|endofprompt|>"},
+        };
+        int max_id = 151646;
+        if ((int)ctx->vocab.id_to_token.size() <= max_id) {
+            ctx->vocab.id_to_token.resize((size_t)max_id + 1);
+        }
+        for (const auto& sp : specials) {
+            ctx->vocab.id_to_token[sp.id] = sp.text;
+            ctx->vocab.token_to_id[sp.text] = sp.id;
+        }
+    }
+    auto merges = core_gguf::kv_str_array(gctx, "tokenizer.ggml.merges");
+    for (size_t i = 0; i < merges.size(); i++) {
+        ctx->vocab.merge_rank[merges[i]] = (int32_t)i;
+    }
+
     gguf_free(gctx);
 
     // ---- Backend init ----
@@ -3835,4 +3917,506 @@ extern "C" int cosyvoice3_tts_init_hift_from_file(struct cosyvoice3_tts_context*
                 hp.upsample_kernels[0], hp.upsample_kernels[1], hp.upsample_kernels[2]);
     }
     return 0;
+}
+
+// ===========================================================================
+// Phase 5 — Voice cloning + end-to-end synth
+// ===========================================================================
+
+namespace {
+
+// Tokenise a CV3 prompt fragment. The only special marker we expect in
+// user-supplied prompt_text is `<|endofprompt|>`; everything around it
+// is regular Qwen2 BPE. Splits on the literal substring and emits the
+// special id (151646) between chunks.
+std::vector<int32_t> cv3_tokenise_prompt(const cv3_vocab& v, const std::string& text) {
+    std::vector<int32_t> ids;
+    const std::string delim = "<|endofprompt|>";
+    auto it_eop = v.token_to_id.find(delim);
+    const int32_t eop_id = (it_eop != v.token_to_id.end()) ? it_eop->second : -1;
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t q = text.find(delim, p);
+        if (q == std::string::npos) {
+            auto chunk = core_bpe::tokenize_simple(v.token_to_id, v.merge_rank, text.substr(p));
+            ids.insert(ids.end(), chunk.begin(), chunk.end());
+            break;
+        }
+        if (q > p) {
+            auto chunk = core_bpe::tokenize_simple(v.token_to_id, v.merge_rank, text.substr(p, q - p));
+            ids.insert(ids.end(), chunk.begin(), chunk.end());
+        }
+        if (eop_id >= 0)
+            ids.push_back(eop_id);
+        p = q + delim.size();
+    }
+    return ids;
+}
+
+// Find a voice by name (case-sensitive). Returns nullptr if absent.
+const cv3_voice* cv3_find_voice(const cv3_voices& vs, const std::string& name) {
+    auto it = vs.by_name.find(name);
+    if (it == vs.by_name.end())
+        return nullptr;
+    return &vs.voices[(size_t)it->second];
+}
+
+// Look up a tensor in `vs_tensors` and read its raw F32 / I32 data into
+// the provided buffer. The voices.gguf converter writes everything as
+// either F32 or I32 (no quantisation) so we can copy straight out of
+// the backend buffer.
+template <typename T>
+bool cv3_voice_read_tensor(const std::map<std::string, ggml_tensor*>& tens, const std::string& name,
+                           std::vector<T>& out) {
+    auto it = tens.find(name);
+    if (it == tens.end())
+        return false;
+    ggml_tensor* t = it->second;
+    const size_t n = (size_t)ggml_nelements(t);
+    if (ggml_nbytes(t) != n * sizeof(T))
+        return false;
+    out.resize(n);
+    ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(T));
+    return true;
+}
+
+} // namespace
+
+extern "C" int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_context* ctx, const char* path) {
+    if (!ctx || !path) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: bad args\n");
+        return -1;
+    }
+
+    // ---- Metadata pass — read `voice.names` + per-voice prompt_text strings ----
+    ggml_context* gctx_dummy = nullptr;
+    gguf_init_params gp = {/*no_alloc=*/true, &gctx_dummy};
+    gguf_context* gctx = gguf_init_from_file(path, gp);
+    if (!gctx) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: failed to read GGUF '%s'\n", path);
+        return -1;
+    }
+    auto names = core_gguf::kv_str_array(gctx, "voice.names");
+    if (names.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: missing `voice.names` array in '%s'\n", path);
+        gguf_free(gctx);
+        return -1;
+    }
+    std::vector<std::string> prompt_texts(names.size());
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string key = std::string("voice.") + names[i] + ".prompt_text";
+        prompt_texts[i] = core_gguf::kv_str(gctx, key.c_str(), "");
+    }
+    gguf_free(gctx);
+
+    // ---- Weight pass — load all `voice.*.{prompt_speech_tokens,spk_emb,ref_mel}` tensors ----
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, ctx->backend_cpu, "cosyvoice3_tts:voices", wl)) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: load_weights failed for '%s'\n", path);
+        return -1;
+    }
+
+    ctx->voices.voices.clear();
+    ctx->voices.by_name.clear();
+    ctx->voices.voices.reserve(names.size());
+    for (size_t i = 0; i < names.size(); i++) {
+        cv3_voice v;
+        v.name = names[i];
+        v.prompt_text = prompt_texts[i];
+        const std::string prefix = "voice." + v.name;
+        std::vector<int32_t> tokens;
+        std::vector<float> spk_emb;
+        std::vector<float> ref_mel;
+        if (!cv3_voice_read_tensor(wl.tensors, prefix + ".prompt_speech_tokens", tokens) ||
+            !cv3_voice_read_tensor(wl.tensors, prefix + ".spk_emb", spk_emb) ||
+            !cv3_voice_read_tensor(wl.tensors, prefix + ".ref_mel", ref_mel)) {
+            fprintf(stderr, "cosyvoice3_tts: init_voices: missing tensors for voice '%s'\n", v.name.c_str());
+            core_gguf::free_weights(wl);
+            return -1;
+        }
+        if (spk_emb.size() != 192) {
+            fprintf(stderr, "cosyvoice3_tts: init_voices: voice '%s' spk_emb len=%zu, expected 192\n", v.name.c_str(),
+                    spk_emb.size());
+            core_gguf::free_weights(wl);
+            return -1;
+        }
+        if (ref_mel.size() % 80 != 0) {
+            fprintf(stderr, "cosyvoice3_tts: init_voices: voice '%s' ref_mel size %zu not divisible by mel_dim=80\n",
+                    v.name.c_str(), ref_mel.size());
+            core_gguf::free_weights(wl);
+            return -1;
+        }
+        v.prompt_speech_tokens = std::move(tokens);
+        v.spk_emb = std::move(spk_emb);
+        v.t_ref_mel = (int)(ref_mel.size() / 80);
+        v.ref_mel = std::move(ref_mel);
+        ctx->voices.by_name[v.name] = (int)ctx->voices.voices.size();
+        ctx->voices.voices.push_back(std::move(v));
+    }
+    // The data is now in std::vector<>; we can drop the ggml ctx/buf.
+    core_gguf::free_weights(wl);
+    ctx->voices.loaded = true;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "cosyvoice3_tts:voices loaded %zu voice(s):", ctx->voices.voices.size());
+        for (const auto& v : ctx->voices.voices) {
+            fprintf(stderr, " %s(T_tok=%zu,T_mel=%d)", v.name.c_str(), v.prompt_speech_tokens.size(), v.t_ref_mel);
+        }
+        fprintf(stderr, "\n");
+    }
+    return 0;
+}
+
+extern "C" int cosyvoice3_tts_n_voices(struct cosyvoice3_tts_context* ctx) {
+    if (!ctx)
+        return 0;
+    return (int)ctx->voices.voices.size();
+}
+
+extern "C" const char* cosyvoice3_tts_voice_name(struct cosyvoice3_tts_context* ctx, int idx) {
+    if (!ctx || idx < 0 || (size_t)idx >= ctx->voices.voices.size())
+        return nullptr;
+    return ctx->voices.voices[(size_t)idx].name.c_str();
+}
+
+// ---------------------------------------------------------------------------
+// Synth pipeline glue
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Concatenate token-embed lookups [sos_emb | text_embeds | task_id_emb |
+// prompt_speech_embeds] into a single row-major (T_total, d_model) F32
+// buffer that `cosyvoice3_tts_generate_tokens_from_embeds` can consume.
+//
+// Upstream CosyVoice3LM uses:
+//   sos     = speech_embedding[speech_token_size + 0]  (id 6561)
+//   task_id = speech_embedding[speech_token_size + 2]  (id 6563)
+// — i.e. the SOS/task markers live in the SPEECH embedding table, not
+// the text embedding table. (Vanilla Qwen2LM uses `llm_embedding`,
+// which is a separate 2-row embedding that CosyVoice3LM drops.)
+bool cv3_build_lm_input_embeds(cosyvoice3_tts_context* ctx, const std::vector<int32_t>& text_ids,
+                               const std::vector<int32_t>& prompt_speech_ids, std::vector<float>& out_embeds,
+                               int& out_n_tokens) {
+    const int d = (int)ctx->hp.d_model;
+    const int speech_codebook = (int)ctx->hp.speech_codebook;
+    const int sos_id = speech_codebook + 0;  // 6561
+    const int task_id = speech_codebook + 2; // 6563
+
+    auto lookup_text = [&](const std::vector<int32_t>& ids, std::vector<float>& dst) -> bool {
+        if (ids.empty()) {
+            dst.clear();
+            return true;
+        }
+        float* e = cosyvoice3_tts_embed_text(ctx, ids.data(), (int)ids.size());
+        if (!e)
+            return false;
+        dst.assign(e, e + (size_t)ids.size() * (size_t)d);
+        free(e);
+        return true;
+    };
+    auto lookup_speech = [&](const std::vector<int32_t>& ids, std::vector<float>& dst) -> bool {
+        if (ids.empty()) {
+            dst.clear();
+            return true;
+        }
+        float* e = cosyvoice3_tts_embed_speech(ctx, ids.data(), (int)ids.size());
+        if (!e)
+            return false;
+        dst.assign(e, e + (size_t)ids.size() * (size_t)d);
+        free(e);
+        return true;
+    };
+
+    std::vector<int32_t> sos = {(int32_t)sos_id};
+    std::vector<int32_t> taskv = {(int32_t)task_id};
+    std::vector<float> sos_emb, text_emb, task_emb, prompt_emb;
+    if (!lookup_speech(sos, sos_emb))
+        return false;
+    if (!lookup_text(text_ids, text_emb))
+        return false;
+    if (!lookup_speech(taskv, task_emb))
+        return false;
+    if (!lookup_speech(prompt_speech_ids, prompt_emb))
+        return false;
+
+    const int n_total = (int)(1 + text_ids.size() + 1 + prompt_speech_ids.size());
+    out_embeds.resize((size_t)n_total * (size_t)d);
+    size_t off = 0;
+    auto append = [&](const std::vector<float>& src) {
+        std::memcpy(out_embeds.data() + off, src.data(), src.size() * sizeof(float));
+        off += src.size();
+    };
+    append(sos_emb);
+    append(text_emb);
+    append(task_emb);
+    append(prompt_emb);
+    out_n_tokens = n_total;
+    return true;
+}
+
+// Stop-floor variant of cosyvoice3_tts_generate_tokens_from_embeds: AR
+// decodes speech tokens until the sampled id is >= `stop_floor`. CV3's
+// upstream considers every id in [speech_codebook, speech_vocab) a
+// stop marker (the canonical set is [6561, 6760]). The greedy path is
+// already restricted to the codebook range inside
+// `cosyvoice3_tts_generate_tokens_from_embeds`, but the RAS sampler
+// can land on a stop id — and we want to break on that.
+std::vector<int32_t> cv3_generate_tokens_with_stop_floor(cosyvoice3_tts_context* ctx, const float* embeds, int n_tokens,
+                                                         int max_tokens, int stop_floor) {
+    std::vector<int32_t> out;
+    const int speech_codebook = (int)ctx->hp.speech_codebook;
+    const int speech_vocab = (int)ctx->hp.speech_vocab;
+    const int max_steps = max_tokens > 0 ? max_tokens : (ctx->params.max_tokens > 0 ? ctx->params.max_tokens : 1500);
+
+    cosyvoice3_tts_reset_kv(ctx);
+    float* logits = cosyvoice3_tts_prefill_with_embeds(ctx, embeds, n_tokens, /*n_past*/ 0);
+    if (!logits)
+        return out;
+
+    const bool greedy = !(ctx->params.temperature > 0.0f);
+    int n_past = n_tokens;
+    for (int step = 0; step < max_steps; step++) {
+        int32_t pick = -1;
+        if (greedy) {
+            // Greedy in full vocab — let the model end naturally.
+            int n_pick = speech_vocab;
+            float bv = logits[0];
+            pick = 0;
+            for (int i = 1; i < n_pick; i++)
+                if (logits[i] > bv) {
+                    bv = logits[i];
+                    pick = i;
+                }
+        } else {
+            pick = cosyvoice3_tts_sample_ras(ctx, logits, out.empty() ? nullptr : out.data(), (int)out.size());
+        }
+        free(logits);
+        if (pick < 0)
+            break;
+        if (pick >= stop_floor)
+            break;
+        if ((int32_t)pick >= speech_codebook) {
+            // Defensive: pick is past codebook but below stop_floor —
+            // shouldn't happen but skip rather than emit garbage.
+            break;
+        }
+        out.push_back(pick);
+        if (n_past + 1 > ctx->kv_max_ctx)
+            break;
+        logits = cosyvoice3_tts_step_speech(ctx, pick, n_past);
+        if (!logits)
+            break;
+        n_past++;
+    }
+    return out;
+}
+
+// pre_la + repeat_interleave(token_mel_ratio=2) for a full token
+// sequence. Returns mu = (T_mel = 2 * T_tok, mel_dim) row-major F32.
+std::vector<float> cv3_run_pre_la_and_interleave(cosyvoice3_tts_context* ctx, const std::vector<int32_t>& tokens) {
+    std::vector<float> mu;
+    if (tokens.empty())
+        return mu;
+    const int mel = (int)ctx->flow.hp.mel_dim;
+    const int T_tok = (int)tokens.size();
+    const int ratio = (int)ctx->flow.hp.token_mel_ratio;
+    float* pre_out = cv3_extract_pre_la_stage(ctx, tokens.data(), T_tok, "pre_la_out");
+    if (!pre_out)
+        return mu;
+    // pre_out layout is (mel, T_tok) ggml ne == (T_tok, mel) row-major
+    // flat buffer (per-time-step strides of `mel` floats).
+    mu.resize((size_t)T_tok * (size_t)ratio * (size_t)mel);
+    for (int t = 0; t < T_tok; t++) {
+        for (int r = 0; r < ratio; r++) {
+            int dst_t = t * ratio + r;
+            std::memcpy(mu.data() + (size_t)dst_t * (size_t)mel, pre_out + (size_t)t * (size_t)mel,
+                        (size_t)mel * sizeof(float));
+        }
+    }
+    free(pre_out);
+    return mu;
+}
+
+// Run F.normalize(spk_emb) → spk_affine via the existing in_pipe graph
+// builder. We pass T_mel=1 + dummy zero buffers for the other inputs
+// because the named output `in_pipe_spk` only depends on the spk input.
+std::vector<float> cv3_run_spk_proj(cosyvoice3_tts_context* ctx, const std::vector<float>& spk_emb) {
+    std::vector<float> out;
+    const int mel = (int)ctx->flow.hp.mel_dim;
+    std::vector<float> dummy_mel((size_t)mel, 0.0f);
+    float* spk = cv3_extract_in_pipe_stage(ctx, dummy_mel.data(), /*T_mel*/ 1, spk_emb.data(), dummy_mel.data(),
+                                           dummy_mel.data(), "in_pipe_spk");
+    if (!spk)
+        return out;
+    out.assign(spk, spk + ctx->flow.hp.spk_dim_out);
+    free(spk);
+    return out;
+}
+
+// Seeded uniform[0, 1) noise buffer for the HiFT SineGen source path.
+// Upstream calls `set_all_random_seed(0)` once per inference call, so
+// we use seed=0 here for determinism.
+std::vector<float> cv3_seeded_uniform_noise(size_t n_samples, uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> v(n_samples);
+    for (size_t i = 0; i < n_samples; i++)
+        v[i] = dist(rng);
+    return v;
+}
+
+// Seeded standard-normal noise buffer for the CFM Euler ODE init.
+// Upstream uses `torch.manual_seed(0); randn(1, 80, 50*300)[..., :T_mel]`.
+// We do NOT match PyTorch's RNG bit-for-bit (different Box-Muller stream),
+// but for inference quality this is irrelevant — the 10-step ODE
+// converges to the same audio modulo a tiny perceptual jitter.
+std::vector<float> cv3_seeded_gaussian(size_t n_samples, uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> v(n_samples);
+    for (size_t i = 0; i < n_samples; i++)
+        v[i] = dist(rng);
+    return v;
+}
+
+} // namespace
+
+extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const char* text, const char* voice_name,
+                                       int* out_n_samples) {
+    if (!ctx || !text || !out_n_samples)
+        return nullptr;
+    *out_n_samples = 0;
+    if (!ctx->flow.loaded || !ctx->hift.loaded || !ctx->voices.loaded) {
+        fprintf(stderr, "cosyvoice3_tts: synth requires LLM + flow + hift + voices to be loaded\n");
+        return nullptr;
+    }
+    if (ctx->vocab.id_to_token.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: synth: LLM vocab not loaded (was the GGUF written without "
+                        "tokenizer.ggml.tokens?)\n");
+        return nullptr;
+    }
+    std::string vname = voice_name ? voice_name : ctx->voices.voices.front().name;
+    const cv3_voice* voice = cv3_find_voice(ctx->voices, vname);
+    if (!voice) {
+        fprintf(stderr, "cosyvoice3_tts: synth: voice '%s' not found (have %zu)\n", vname.c_str(),
+                ctx->voices.voices.size());
+        return nullptr;
+    }
+
+    // ---- 1. Tokenise [prompt_text + " " + text] ----
+    // Upstream prepends prompt_text to the user text BEFORE BPE. The
+    // delimiter is a single space; the model has plenty of training
+    // signal for the concatenation pattern.
+    std::string full_text = voice->prompt_text;
+    if (!full_text.empty() && !text[0])
+        ; // empty user text — keep prompt only (unusual but harmless)
+    else if (!full_text.empty() && full_text.back() != ' ' && text[0] && text[0] != ' ')
+        full_text += ' ';
+    full_text += text;
+    std::vector<int32_t> text_ids = cv3_tokenise_prompt(ctx->vocab, full_text);
+    if (text_ids.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: synth: empty text after tokenisation\n");
+        return nullptr;
+    }
+    if (ctx->params.verbosity >= 2) {
+        fprintf(stderr, "cosyvoice3_tts: synth: voice='%s' text_ids=%zu prompt_speech_tokens=%zu\n",
+                voice->name.c_str(), text_ids.size(), voice->prompt_speech_tokens.size());
+    }
+
+    // ---- 2. Build LM input embeddings + AR-decode speech tokens ----
+    std::vector<float> lm_embeds;
+    int n_lm = 0;
+    if (!cv3_build_lm_input_embeds(ctx, text_ids, voice->prompt_speech_tokens, lm_embeds, n_lm))
+        return nullptr;
+
+    // CV3 stop tokens are [speech_codebook, speech_vocab) = [6561, 6761).
+    const int stop_floor = (int)ctx->hp.speech_codebook;
+    // Heuristic max-token cap from upstream: text_len * max_token_text_ratio (20).
+    int max_steps = ctx->params.max_tokens > 0 ? ctx->params.max_tokens : (int)text_ids.size() * 20;
+    if (max_steps < 16)
+        max_steps = 16;
+    std::vector<int32_t> gen_tokens =
+        cv3_generate_tokens_with_stop_floor(ctx, lm_embeds.data(), n_lm, max_steps, stop_floor);
+    if (gen_tokens.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: synth: AR decode produced 0 tokens\n");
+        return nullptr;
+    }
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "cosyvoice3_tts: synth: generated %zu speech tokens\n", gen_tokens.size());
+    }
+    if (const char* dump = std::getenv("COSYVOICE3_DUMP_TOKENS")) {
+        FILE* f = std::fopen(dump, "w");
+        if (f) {
+            std::fprintf(f, "text_ids(%zu):", text_ids.size());
+            for (int32_t id : text_ids)
+                std::fprintf(f, " %d", id);
+            std::fprintf(f, "\nprompt_speech_tokens(%zu):", voice->prompt_speech_tokens.size());
+            for (int32_t id : voice->prompt_speech_tokens)
+                std::fprintf(f, " %d", id);
+            std::fprintf(f, "\ngenerated_tokens(%zu):", gen_tokens.size());
+            for (int32_t id : gen_tokens)
+                std::fprintf(f, " %d", id);
+            std::fprintf(f, "\n");
+            std::fclose(f);
+            fprintf(stderr, "cosyvoice3_tts: synth: wrote token dump to %s\n", dump);
+        }
+    }
+
+    // ---- 3. Compose full speech-token sequence + run pre_la + repeat_interleave ----
+    std::vector<int32_t> full_tokens;
+    full_tokens.reserve(voice->prompt_speech_tokens.size() + gen_tokens.size());
+    full_tokens.insert(full_tokens.end(), voice->prompt_speech_tokens.begin(), voice->prompt_speech_tokens.end());
+    full_tokens.insert(full_tokens.end(), gen_tokens.begin(), gen_tokens.end());
+    std::vector<float> mu = cv3_run_pre_la_and_interleave(ctx, full_tokens);
+    if (mu.empty())
+        return nullptr;
+    const int mel = (int)ctx->flow.hp.mel_dim;
+    const int T_mel_total = (int)(full_tokens.size() * (size_t)ctx->flow.hp.token_mel_ratio);
+    // T_ref_mel: upstream's `prompt_feat.shape[1]`. Our converter aligns
+    // T_ref_mel = 2 × T_prompt_tok, but if the wav was edge-truncated
+    // the stored value may be different — use the actual.
+    const int T_ref_mel = voice->t_ref_mel;
+    if (T_ref_mel > T_mel_total) {
+        fprintf(stderr, "cosyvoice3_tts: synth: voice ref_mel (%d) longer than full T_mel (%d) — corrupt voice\n",
+                T_ref_mel, T_mel_total);
+        return nullptr;
+    }
+
+    // ---- 4. Project speaker embedding ----
+    std::vector<float> spks_proj = cv3_run_spk_proj(ctx, voice->spk_emb);
+    if (spks_proj.empty())
+        return nullptr;
+
+    // ---- 5. Build cond: leading T_ref_mel slots = ref_mel, rest = 0 ----
+    std::vector<float> cond((size_t)T_mel_total * (size_t)mel, 0.0f);
+    if (T_ref_mel > 0) {
+        std::memcpy(cond.data(), voice->ref_mel.data(), (size_t)T_ref_mel * (size_t)mel * sizeof(float));
+    }
+
+    // ---- 6. Seed x_init for the CFM Euler ODE ----
+    std::vector<float> x_init = cv3_seeded_gaussian((size_t)T_mel_total * (size_t)mel, /*seed*/ 0);
+
+    // ---- 7. Run flow Euler → mel ----
+    float* mel_full =
+        cosyvoice3_tts_solve_flow_euler(ctx, mu.data(), T_mel_total, spks_proj.data(), cond.data(), x_init.data(),
+                                        /*n_steps*/ 10, ctx->flow.hp.cfm_inference_cfg_rate);
+    if (!mel_full)
+        return nullptr;
+
+    // ---- 8. Slice off the prompt-mel prefix ----
+    const int T_mel_out = T_mel_total - T_ref_mel;
+    std::vector<float> mel_out((size_t)T_mel_out * (size_t)mel);
+    std::memcpy(mel_out.data(), mel_full + (size_t)T_ref_mel * (size_t)mel,
+                (size_t)T_mel_out * (size_t)mel * sizeof(float));
+    free(mel_full);
+
+    // ---- 9. HiFT inference → 24 kHz audio ----
+    // noise_buf shape: T_mel * 480 * 9 (8 harmonics + 1 unvoiced).
+    std::vector<float> noise_buf = cv3_seeded_uniform_noise((size_t)T_mel_out * 480 * 9, /*seed*/ 0);
+    float* audio = cosyvoice3_tts_run_hift_inference(ctx, mel_out.data(), T_mel_out, noise_buf.data());
+    if (!audio)
+        return nullptr;
+
+    *out_n_samples = T_mel_out * 480;
+    return audio;
 }

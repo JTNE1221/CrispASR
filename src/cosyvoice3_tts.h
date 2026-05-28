@@ -220,6 +220,41 @@ float* cosyvoice3_tts_run_hift_source(struct cosyvoice3_tts_context* ctx, const 
 float* cosyvoice3_tts_run_hift_inference(struct cosyvoice3_tts_context* ctx, const float* mel, int T_mel,
                                          const float* noise_buf);
 
+// ---------------------------------------------------------------------------
+// Phase 5 — Voice cloning + end-to-end synth
+// ---------------------------------------------------------------------------
+//
+// Load a `voices.gguf` produced by `models/convert-cosyvoice3-voices-to-gguf.py`.
+// Per voice the loader reads:
+//   prompt_speech_tokens [T_prompt_tok]  int32  speech_tokenizer_v3 output
+//   prompt_text          UTF-8 string           tokenised at synth time
+//   spk_emb              float[192]             CAMPPlus speaker embedding
+//   ref_mel              float[T_ref_mel, 80]   matcha mel @ 24 kHz
+// plus a top-level `voice.names` array.
+//
+// Returns 0 on success, -1 on failure.
+int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_context* ctx, const char* path);
+
+// Number of voices loaded (0 if init_voices_from_file was not called).
+int cosyvoice3_tts_n_voices(struct cosyvoice3_tts_context* ctx);
+
+// Name of the i-th voice (0 <= i < n_voices). Lifetime: as long as the
+// context is valid. Returns nullptr for out-of-range indices.
+const char* cosyvoice3_tts_voice_name(struct cosyvoice3_tts_context* ctx, int idx);
+
+// End-to-end synth: text → 24 kHz mono PCM, using the named voice for
+// zero-shot cloning.
+//
+// `voice_name`: must match one of the loaded voice names (NULL falls
+// back to the first voice). `out_n_samples` receives the number of
+// f32 audio samples. Returns a malloc'd float buffer (caller frees with
+// free()) or nullptr on failure.
+//
+// Requires init_from_file + init_flow_from_file + init_hift_from_file +
+// init_voices_from_file to all have been called first.
+float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const char* text, const char* voice_name,
+                            int* out_n_samples);
+
 // Diff-harness stage extractor. Returns malloc'd float[*out_n].
 // Phase 2 supports:
 //   "lm_step0_logits"   — single-step logits after prefilling on
