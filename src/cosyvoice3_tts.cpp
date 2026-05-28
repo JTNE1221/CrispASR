@@ -97,13 +97,27 @@ std::string json_escape(const std::string& s) {
     out.reserve(s.size() + 8);
     for (unsigned char c : s) {
         switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
         default:
             if (c < 0x20) {
                 char buf[7];
@@ -4572,12 +4586,9 @@ extern "C" float* cosyvoice3_tts_synth_from_wav(struct cosyvoice3_tts_context* c
     }
 
     std::ostringstream cmd;
-    cmd << default_python_exe() << " models/convert-cosyvoice3-voices-to-gguf.py"
-        << " --manifest " << manifest_path
-        << " --upstream-base " << default_upstream_base()
-        << " --onnx-cache " << default_onnx_cache()
-        << " --output " << baked_voices_path
-        << " >/dev/null 2>&1";
+    cmd << default_python_exe() << " models/convert-cosyvoice3-voices-to-gguf.py" << " --manifest " << manifest_path
+        << " --upstream-base " << default_upstream_base() << " --onnx-cache " << default_onnx_cache() << " --output "
+        << baked_voices_path << " >/dev/null 2>&1";
 
     int rc = std::system(cmd.str().c_str());
     std::remove(manifest_path.c_str());

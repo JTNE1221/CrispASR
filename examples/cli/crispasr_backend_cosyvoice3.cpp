@@ -62,13 +62,27 @@ std::string json_escape(const std::string& s) {
     out.reserve(s.size() + 8);
     for (unsigned char c : s) {
         switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
         default:
             if (c < 0x20) {
                 char buf[7];
@@ -247,6 +261,7 @@ public:
             ctx_ = nullptr;
         }
     }
+
 private:
     struct cosyvoice3_tts_context* ctx_ = nullptr;
 };
