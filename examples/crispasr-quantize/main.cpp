@@ -266,7 +266,8 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
             // there cascades through the 10-step CFM ODE.
             !(is_cosyvoice3 &&
               (sname == "cosyvoice3.speech_embd.weight" || sname == "cosyvoice3.speech_lm_head.weight" ||
-               sname == "cosyvoice3.flow.input_embd.w" || sname == "cosyvoice3.flow.spk_affine.w")) &&
+               sname == "cosyvoice3.flow.input_embd.w" || sname == "cosyvoice3.flow.spk_affine.w" ||
+               sname == "cosyvoice3.s3tok.fsq.proj.w")) &&
             // Skip OmniASR-CTC encoder layers in head/tail bands.
             // Names look like "enc.<idx>.attn.*" / "enc.<idx>.ffn.*";
             // skip if idx in [0, head_cutoff) ∪ [tail_cutoff, n_enc).

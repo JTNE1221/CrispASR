@@ -602,6 +602,10 @@ constexpr ExtraCompanion k_vibevoice_tts_extras[] = {
 // at load time; staging both here makes `-m auto --backend cosyvoice3-tts`
 // pull everything in one go.
 constexpr ExtraCompanion k_cosyvoice3_tts_extras[] = {
+    {"cosyvoice3-campplus-f16.gguf",
+     "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-campplus-f16.gguf"},
+    {"cosyvoice3-s3tok-f16.gguf",
+     "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-s3tok-f16.gguf"},
     {"cosyvoice3-hift-f16.gguf",
      "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-hift-f16.gguf"},
     {"cosyvoice3-voices.gguf",

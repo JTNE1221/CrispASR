@@ -34,6 +34,11 @@
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/audio_resample.h"
+#include "core/fft.h"
+#include "core/mel.h"
+#include "core/wav_reader.h"
+#include "chatterbox_campplus.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -43,14 +48,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <sstream>
 #include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -170,6 +178,64 @@ struct cv3_flow {
     std::vector<cv3_dit_block> blocks;
 
     // Flow-side ggml context + buffer (separate from the LM's).
+    ggml_context* ctx_w = nullptr;
+    ggml_backend_buffer_t buf_w = nullptr;
+    std::map<std::string, ggml_tensor*> tensors;
+};
+
+struct cv3_s3tok_hp {
+    uint32_t n_mels = 128;
+    uint32_t n_audio_state = 1280;
+    uint32_t n_audio_head = 20;
+    uint32_t n_audio_layer = 12;
+    uint32_t n_codebook_size = 6561;
+    uint32_t n_fft = 400;
+    uint32_t hop_length = 160;
+    uint32_t win_length = 400;
+    uint32_t fsmn_kernel = 31;
+    float rope_theta = 10000.0f;
+    float attn_ln_eps = 1e-6f;
+    float mlp_ln_eps = 1e-5f;
+};
+
+struct cv3_s3tok_block {
+    ggml_tensor* attn_ln_w = nullptr;
+    ggml_tensor* attn_ln_b = nullptr;
+    ggml_tensor* attn_q_b = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_k_w = nullptr;
+    ggml_tensor* attn_v_b = nullptr;
+    ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_o_b = nullptr;
+    ggml_tensor* attn_o_w = nullptr;
+    ggml_tensor* mlp_ln_w = nullptr;
+    ggml_tensor* mlp_ln_b = nullptr;
+    ggml_tensor* mlp_up_b = nullptr;
+    ggml_tensor* mlp_up_w = nullptr;
+    ggml_tensor* mlp_dn_b = nullptr;
+    ggml_tensor* mlp_dn_w = nullptr;
+    ggml_tensor* fsmn_w = nullptr;
+};
+
+struct cv3_s3tok {
+    bool loaded = false;
+    cv3_s3tok_hp hp;
+    ggml_tensor* conv0_w = nullptr;
+    ggml_tensor* conv0_b = nullptr;
+    ggml_tensor* conv1_w = nullptr;
+    ggml_tensor* conv1_b = nullptr;
+    std::vector<cv3_s3tok_block> blocks;
+    ggml_tensor* fsq_proj_w = nullptr;
+    ggml_tensor* fsq_proj_b = nullptr;
+    ggml_context* ctx_w = nullptr;
+    ggml_backend_buffer_t buf_w = nullptr;
+    std::map<std::string, ggml_tensor*> tensors;
+};
+
+struct cv3_campplus {
+    bool loaded = false;
+    cb_campplus_model model;
+    chatterbox_campplus::cb_campplus_runtime cache{};
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
@@ -318,6 +384,14 @@ struct cosyvoice3_tts_context {
     // cosyvoice3_tts_init_hift_from_file(). Stays empty if HiFT was
     // not loaded (`hift.loaded == false`).
     cv3_hift hift{};
+
+    // Phase 6 — speech_tokenizer_v3 encoder for arbitrary-WAV cloning.
+    // Loaded from the dedicated s3tok GGUF when available.
+    cv3_s3tok s3tok{};
+
+    // Phase 6 — CAMPPlus speaker encoder for arbitrary-WAV cloning.
+    // Loaded from the dedicated CAMPPlus GGUF when available.
+    cv3_campplus campplus{};
 
     // Phase 5 — Qwen2 BPE vocab + voice-clone bundle. The vocab is
     // populated alongside the LLM init (the LLM GGUF already carries
@@ -543,6 +617,193 @@ float* cv3_run_embed(cosyvoice3_tts_context* ctx, ggml_tensor* table, const int3
     return out;
 }
 
+std::vector<float> cv3_compute_s3tok_log_mel(const float* pcm_16k, int n_samples, int& T_out) {
+    T_out = 0;
+    if (!pcm_16k || n_samples <= 0)
+        return {};
+
+    constexpr int kSampleRate = 16000;
+    constexpr int kNFft = 400;
+    constexpr int kHop = 160;
+    constexpr int kNMels = 128;
+
+    static thread_local std::vector<float> hann;
+    if ((int)hann.size() != kNFft) {
+        hann.resize(kNFft);
+        for (int i = 0; i < kNFft; i++) {
+            hann[(size_t)i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)i / (float)kNFft));
+        }
+    }
+
+    static thread_local std::vector<float> mel_fb;
+    if (mel_fb.empty()) {
+        mel_fb = core_mel::build_slaney_fb(kSampleRate, kNFft, kNMels, /*fmin*/ 0.0f, /*fmax*/ 8000.0f,
+                                           core_mel::FbLayout::MelsFreqs);
+    }
+
+    core_mel::Params p;
+    p.n_fft = kNFft;
+    p.hop_length = kHop;
+    p.win_length = kNFft;
+    p.n_mels = kNMels;
+    p.log_base = core_mel::LogBase::Log10;
+    p.log_guard = core_mel::LogGuard::MaxClip;
+    p.spec_kind = core_mel::SpecKind::Power;
+    p.norm = core_mel::Normalization::GlobalClipMax;
+    p.layout = core_mel::Layout::MelsTime;
+    p.fb_layout = core_mel::FbLayout::MelsFreqs;
+    p.matmul = core_mel::MatmulPrecision::Double;
+    p.log_eps = 1e-10f;
+    p.center_pad = true;
+    p.preemph = 0.0f;
+    p.drop_last_frame = true;
+
+    int T = 0;
+    auto mel = core_mel::compute(pcm_16k, n_samples, hann.data(), kNFft, mel_fb.data(), kNFft / 2 + 1,
+                                 &core_fft::fft_radix2_wrapper, p, T);
+    T_out = T;
+    return mel;
+}
+
+ggml_cgraph* cv3_build_s3tok_graph(cosyvoice3_tts_context* ctx, int T_use) {
+    const auto& m = ctx->s3tok;
+    const auto& hp = m.hp;
+    const int d = (int)hp.n_audio_state;
+    const int n_h = (int)hp.n_audio_head;
+    const int hd = d / n_h;
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    ggml_tensor* mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_use, (int)hp.n_mels);
+    ggml_set_input(mel);
+    ggml_set_name(mel, "s3tok_mel_in");
+
+    auto bias_1d = [&](ggml_tensor* b) { return ggml_reshape_3d(ctx0, b, 1, b->ne[0], 1); };
+
+    ggml_tensor* x = ggml_conv_1d(ctx0, m.conv0_w, mel, /*s*/ 2, /*p*/ 1, /*d*/ 1);
+    x = ggml_add(ctx0, x, bias_1d(m.conv0_b));
+    x = ggml_gelu(ctx0, x);
+    x = ggml_conv_1d(ctx0, m.conv1_w, x, /*s*/ 2, /*p*/ 1, /*d*/ 1);
+    x = ggml_add(ctx0, x, bias_1d(m.conv1_b));
+    x = ggml_gelu(ctx0, x);
+
+    const int T_tok = (int)x->ne[0];
+    x = ggml_reshape_2d(ctx0, x, T_tok, d);
+    x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_tok);
+    ggml_set_input(positions);
+    ggml_set_name(positions, "positions");
+
+    for (uint32_t il = 0; il < hp.n_audio_layer; il++) {
+        const auto& b = m.blocks[il];
+        ggml_tensor* residual = x;
+        ggml_tensor* h = ggml_norm(ctx0, x, hp.attn_ln_eps);
+        h = ggml_mul(ctx0, h, b.attn_ln_w);
+        h = ggml_add(ctx0, h, b.attn_ln_b);
+
+        ggml_tensor* Q = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_q_w, h), b.attn_q_b);
+        ggml_tensor* K = ggml_mul_mat(ctx0, b.attn_k_w, h);
+        ggml_tensor* V = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_v_w, h), b.attn_v_b);
+
+        ggml_tensor* v_t = ggml_cont(ctx0, ggml_transpose(ctx0, V));
+        ggml_tensor* fsmn = ggml_conv_1d_dw(ctx0, b.fsmn_w, v_t, /*s*/ 1, /*p*/ (int)hp.fsmn_kernel / 2, /*d*/ 1);
+        if (ggml_n_dims(fsmn) > 2) {
+            fsmn = ggml_reshape_2d(ctx0, fsmn, fsmn->ne[0], fsmn->ne[1]);
+        }
+        fsmn = ggml_add(ctx0, fsmn, v_t);
+        fsmn = ggml_cont(ctx0, ggml_transpose(ctx0, fsmn));
+
+        Q = ggml_reshape_3d(ctx0, Q, hd, n_h, T_tok);
+        K = ggml_reshape_3d(ctx0, K, hd, n_h, T_tok);
+        V = ggml_reshape_3d(ctx0, V, hd, n_h, T_tok);
+        Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, 0, hp.rope_theta, 1.0f, 0.0f, 1.0f,
+                          0.0f, 0.0f);
+        K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, GGML_ROPE_TYPE_NEOX, 0, hp.rope_theta, 1.0f, 0.0f, 1.0f,
+                          0.0f, 0.0f);
+        Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+        K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+        V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr, attn_scale, 0.0f, 0.0f);
+        attn = ggml_reshape_2d(ctx0, attn, d, T_tok);
+        attn = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_o_w, attn), b.attn_o_b);
+        attn = ggml_add(ctx0, attn, fsmn);
+        x = ggml_add(ctx0, residual, attn);
+
+        residual = x;
+        h = ggml_norm(ctx0, x, hp.mlp_ln_eps);
+        h = ggml_mul(ctx0, h, b.mlp_ln_w);
+        h = ggml_add(ctx0, h, b.mlp_ln_b);
+        h = ggml_add(ctx0, ggml_mul_mat(ctx0, b.mlp_up_w, h), b.mlp_up_b);
+        h = ggml_gelu(ctx0, h);
+        h = ggml_add(ctx0, ggml_mul_mat(ctx0, b.mlp_dn_w, h), b.mlp_dn_b);
+        x = ggml_add(ctx0, residual, h);
+    }
+
+    ggml_tensor* proj = ggml_add(ctx0, ggml_mul_mat(ctx0, m.fsq_proj_w, x), m.fsq_proj_b);
+    ggml_set_name(proj, "s3tok_proj_down");
+    ggml_set_output(proj);
+    ggml_build_forward_expand(gf, proj);
+    ggml_free(ctx0);
+    return gf;
+}
+
+std::vector<int32_t> cv3_tokenize_s3tok(cosyvoice3_tts_context* ctx, const float* pcm_16k, int n_samples,
+                                        int max_tokens) {
+    std::vector<int32_t> out;
+    if (!ctx || !ctx->s3tok.loaded || !pcm_16k || n_samples <= 0)
+        return out;
+    int T = 0;
+    auto mel = cv3_compute_s3tok_log_mel(pcm_16k, n_samples, T);
+    if (mel.empty() || T <= 0)
+        return out;
+    int T_use = T;
+    if (max_tokens > 0 && max_tokens * 4 < T_use)
+        T_use = max_tokens * 4;
+
+    ctx->step_t1_gf = nullptr;
+    ctx->step_t1_fixed_kv_len = 0;
+    ggml_cgraph* gf = cv3_build_s3tok_graph(ctx, T_use);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "cosyvoice3_tts: s3tok alloc_graph failed\n");
+        return out;
+    }
+    ggml_tensor* mel_t = ggml_graph_get_tensor(gf, "s3tok_mel_in");
+    ggml_backend_tensor_set(mel_t, mel.data(), 0, (size_t)T_use * 128 * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "cosyvoice3_tts: s3tok graph compute failed\n");
+        return out;
+    }
+    ggml_tensor* proj_t = ggml_graph_get_tensor(gf, "s3tok_proj_down");
+    if (!proj_t)
+        return out;
+    std::vector<float> proj((size_t)ggml_nelements(proj_t));
+    ggml_backend_tensor_get(proj_t, proj.data(), 0, proj.size() * sizeof(float));
+    const int T_tok = (int)proj_t->ne[1];
+    out.resize((size_t)T_tok);
+    constexpr float kFsqGain = 0.9990000128746033f;
+    constexpr int kPowers[8] = {1, 3, 9, 27, 81, 243, 729, 2187};
+    for (int t = 0; t < T_tok; t++) {
+        const float* row = proj.data() + (size_t)t * 8;
+        int code = 0;
+        for (int i = 0; i < 8; i++) {
+            float h = std::tanh(row[i]) * kFsqGain;
+            int v = (int)std::nearbyint(h) + 1;
+            if (v < 0)
+                v = 0;
+            if (v > 2)
+                v = 2;
+            code += v * kPowers[i];
+        }
+        out[(size_t)t] = code;
+    }
+    return out;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -761,6 +1022,14 @@ extern "C" void cosyvoice3_tts_free(struct cosyvoice3_tts_context* ctx) {
         ggml_backend_buffer_free(ctx->hift.buf_w);
     if (ctx->hift.ctx_w)
         ggml_free(ctx->hift.ctx_w);
+    if (ctx->s3tok.buf_w)
+        ggml_backend_buffer_free(ctx->s3tok.buf_w);
+    if (ctx->s3tok.ctx_w)
+        ggml_free(ctx->s3tok.ctx_w);
+    if (ctx->campplus.buf_w)
+        ggml_backend_buffer_free(ctx->campplus.buf_w);
+    if (ctx->campplus.ctx_w)
+        ggml_free(ctx->campplus.ctx_w);
     if (ctx->backend && ctx->backend != ctx->backend_cpu)
         ggml_backend_free(ctx->backend);
     if (ctx->backend_cpu)
@@ -3919,6 +4188,260 @@ extern "C" int cosyvoice3_tts_init_hift_from_file(struct cosyvoice3_tts_context*
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6 — speech_tokenizer_v3 loader + native WAV token extraction
+// ---------------------------------------------------------------------------
+
+extern "C" int cosyvoice3_tts_init_s3tok_from_file(struct cosyvoice3_tts_context* ctx, const char* path) {
+    if (!ctx || !path) {
+        fprintf(stderr, "cosyvoice3_tts: init_s3tok: bad args\n");
+        return -1;
+    }
+    if (ctx->s3tok.loaded) {
+        fprintf(stderr, "cosyvoice3_tts: s3tok already loaded\n");
+        return 0;
+    }
+
+    ggml_context* gctx_dummy = nullptr;
+    gguf_init_params gp = {/*no_alloc=*/true, &gctx_dummy};
+    gguf_context* gctx = gguf_init_from_file(path, gp);
+    if (!gctx) {
+        fprintf(stderr, "cosyvoice3_tts: init_s3tok: failed to read GGUF '%s'\n", path);
+        return -1;
+    }
+
+    auto& hp = ctx->s3tok.hp;
+    hp.n_audio_layer = cv3_kv_u32(gctx, "cosyvoice3.s3tok.n_blocks", hp.n_audio_layer);
+    hp.n_audio_state = cv3_kv_u32(gctx, "cosyvoice3.s3tok.d_model", hp.n_audio_state);
+    hp.n_audio_head = cv3_kv_u32(gctx, "cosyvoice3.s3tok.n_heads", hp.n_audio_head);
+    hp.fsmn_kernel = cv3_kv_u32(gctx, "cosyvoice3.s3tok.fsmn_kernel", hp.fsmn_kernel);
+    hp.n_codebook_size = cv3_kv_u32(gctx, "cosyvoice3.s3tok.codebook_size", hp.n_codebook_size);
+    gguf_free(gctx);
+
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, ctx->backend, "cosyvoice3_tts:s3tok", wl)) {
+        fprintf(stderr, "cosyvoice3_tts: init_s3tok: load_weights failed for '%s'\n", path);
+        return -1;
+    }
+    ctx->s3tok.ctx_w = wl.ctx;
+    ctx->s3tok.buf_w = wl.buf;
+    ctx->s3tok.tensors = std::move(wl.tensors);
+
+    auto require_t = [&](const std::string& name) -> ggml_tensor* {
+        return core_gguf::require(ctx->s3tok.tensors, name.c_str(), "cosyvoice3_tts:s3tok");
+    };
+
+    auto& m = ctx->s3tok;
+    m.conv0_w = require_t("cosyvoice3.s3tok.subsample.conv0.w");
+    m.conv0_b = require_t("cosyvoice3.s3tok.subsample.conv0.b");
+    m.conv1_w = require_t("cosyvoice3.s3tok.subsample.conv1.w");
+    m.conv1_b = require_t("cosyvoice3.s3tok.subsample.conv1.b");
+    m.blocks.resize(hp.n_audio_layer);
+    for (uint32_t il = 0; il < hp.n_audio_layer; il++) {
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "cosyvoice3.s3tok.blk.%u", il);
+        std::string p = prefix;
+        auto& b = m.blocks[il];
+        b.attn_ln_w = require_t(p + ".attn_ln.w");
+        b.attn_ln_b = require_t(p + ".attn_ln.b");
+        b.attn_q_b = require_t(p + ".attn_q.b");
+        b.attn_q_w = require_t(p + ".attn_q.w");
+        b.attn_k_w = require_t(p + ".attn_k.w");
+        b.attn_v_b = require_t(p + ".attn_v.b");
+        b.attn_v_w = require_t(p + ".attn_v.w");
+        b.attn_o_b = require_t(p + ".attn_o.b");
+        b.attn_o_w = require_t(p + ".attn_o.w");
+        b.mlp_ln_w = require_t(p + ".mlp_ln.w");
+        b.mlp_ln_b = require_t(p + ".mlp_ln.b");
+        b.mlp_up_b = require_t(p + ".mlp_up.b");
+        b.mlp_up_w = require_t(p + ".mlp_up.w");
+        b.mlp_dn_b = require_t(p + ".mlp_dn.b");
+        b.mlp_dn_w = require_t(p + ".mlp_dn.w");
+        b.fsmn_w = require_t(p + ".attn.fsmn_block.w");
+        if (!b.attn_ln_w || !b.attn_q_w || !b.attn_k_w || !b.mlp_up_w || !b.fsmn_w) {
+            fprintf(stderr, "cosyvoice3_tts: init_s3tok: missing tensors in %s.*\n", prefix);
+            return -1;
+        }
+    }
+    m.fsq_proj_w = require_t("cosyvoice3.s3tok.fsq.proj.w");
+    m.fsq_proj_b = require_t("cosyvoice3.s3tok.fsq.proj.b");
+    if (!m.conv0_w || !m.conv1_w || !m.fsq_proj_w) {
+        fprintf(stderr, "cosyvoice3_tts: init_s3tok: missing core tensors\n");
+        return -1;
+    }
+
+    m.loaded = true;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "cosyvoice3_tts:s3tok loaded %zu tensors  blocks=%u d=%u h=%u kernel=%u codebook=%u\n",
+                m.tensors.size(), hp.n_audio_layer, hp.n_audio_state, hp.n_audio_head, hp.fsmn_kernel,
+                hp.n_codebook_size);
+    }
+    return 0;
+}
+
+extern "C" int cosyvoice3_tts_init_campplus_from_file(struct cosyvoice3_tts_context* ctx, const char* path) {
+    if (!ctx || !path) {
+        fprintf(stderr, "cosyvoice3_tts: init_campplus: bad args\n");
+        return -1;
+    }
+    if (ctx->campplus.ctx_w) {
+        fprintf(stderr, "cosyvoice3_tts: campplus already loaded\n");
+        return 0;
+    }
+
+    ggml_context* gctx_dummy = nullptr;
+    gguf_init_params gp = {/*no_alloc=*/true, &gctx_dummy};
+    gguf_context* gctx = gguf_init_from_file(path, gp);
+    if (!gctx) {
+        fprintf(stderr, "cosyvoice3_tts: init_campplus: failed to read GGUF '%s'\n", path);
+        return -1;
+    }
+    gguf_free(gctx);
+
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, ctx->backend, "cosyvoice3_tts:campplus", wl)) {
+        fprintf(stderr, "cosyvoice3_tts: init_campplus: load_weights failed for '%s'\n", path);
+        return -1;
+    }
+    ctx->campplus.ctx_w = wl.ctx;
+    ctx->campplus.buf_w = wl.buf;
+
+    auto T = [&](const char* name) -> ggml_tensor* { return core_gguf::try_get(wl.tensors, name); };
+    auto& m = ctx->campplus.model;
+    auto& head = m.head;
+    head.conv1_w = T("s3.se.head.conv1.weight");
+    head.conv1_b = T("s3.se.head.conv1.bias");
+    head.bn1_w = T("s3.se.head.bn1.weight");
+    head.bn1_b = T("s3.se.head.bn1.bias");
+    head.bn1_m = T("s3.se.head.bn1.running_mean");
+    head.bn1_v = T("s3.se.head.bn1.running_var");
+    head.conv2_w = T("s3.se.head.conv2.weight");
+    head.conv2_b = T("s3.se.head.conv2.bias");
+    head.bn2_w = T("s3.se.head.bn2.weight");
+    head.bn2_b = T("s3.se.head.bn2.bias");
+    head.bn2_m = T("s3.se.head.bn2.running_mean");
+    head.bn2_v = T("s3.se.head.bn2.running_var");
+    head.layer1.assign(2, cb_campplus_resblock{});
+    head.layer2.assign(2, cb_campplus_resblock{});
+    for (int i = 0; i < 2; i++) {
+        char base[64];
+        std::snprintf(base, sizeof(base), "s3.se.head.layer1.%d", i);
+        auto bind_resblock = [&](cb_campplus_resblock& b, const char* pfx) {
+            char k[128];
+            std::snprintf(k, sizeof(k), "%s.conv1.weight", pfx);
+            b.conv1_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.conv1.bias", pfx);
+            b.conv1_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn1.weight", pfx);
+            b.bn1_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn1.bias", pfx);
+            b.bn1_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn1.running_mean", pfx);
+            b.bn1_m = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn1.running_var", pfx);
+            b.bn1_v = T(k);
+            std::snprintf(k, sizeof(k), "%s.conv2.weight", pfx);
+            b.conv2_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.conv2.bias", pfx);
+            b.conv2_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn2.weight", pfx);
+            b.bn2_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn2.bias", pfx);
+            b.bn2_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn2.running_mean", pfx);
+            b.bn2_m = T(k);
+            std::snprintf(k, sizeof(k), "%s.bn2.running_var", pfx);
+            b.bn2_v = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.0.weight", pfx);
+            b.sc_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.0.bias", pfx);
+            b.sc_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.weight", pfx);
+            b.sc_bn_w = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.bias", pfx);
+            b.sc_bn_b = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.running_mean", pfx);
+            b.sc_bn_m = T(k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.1.running_var", pfx);
+            b.sc_bn_v = T(k);
+        };
+        bind_resblock(head.layer1[i], base);
+        std::snprintf(base, sizeof(base), "s3.se.head.layer2.%d", i);
+        bind_resblock(head.layer2[i], base);
+    }
+    head.layer1[0].stride = 2;
+    head.layer2[0].stride = 2;
+
+    auto bind_unit = [&](cb_campplus_unit& u, const char* base) {
+        char k[128];
+        std::snprintf(k, sizeof(k), "%s.linear.weight", base);
+        u.lin_w = T(k);
+        std::snprintf(k, sizeof(k), "%s.linear.bias", base);
+        u.lin_b = core_gguf::try_get(wl.tensors, k);
+        std::snprintf(k, sizeof(k), "%s.nl.bn.weight", base);
+        u.bn_w = T(k);
+        std::snprintf(k, sizeof(k), "%s.nl.bn.bias", base);
+        u.bn_b = T(k);
+        std::snprintf(k, sizeof(k), "%s.nl.bn.running_mean", base);
+        u.bn_m = T(k);
+        std::snprintf(k, sizeof(k), "%s.nl.bn.running_var", base);
+        u.bn_v = T(k);
+    };
+    bind_unit(m.tdnn, "s3.se.xv.tdnn");
+    bind_unit(m.transit1, "s3.se.xv.transit1");
+    bind_unit(m.transit2, "s3.se.xv.transit2");
+    bind_unit(m.transit3, "s3.se.xv.transit3");
+    m.out_nl.lin_w = nullptr;
+    m.out_nl.lin_b = nullptr;
+    m.out_nl.bn_w = T("s3.se.xv.out_nl.bn.weight");
+    m.out_nl.bn_b = T("s3.se.xv.out_nl.bn.bias");
+    m.out_nl.bn_m = T("s3.se.xv.out_nl.bn.running_mean");
+    m.out_nl.bn_v = T("s3.se.xv.out_nl.bn.running_var");
+    bind_unit(m.dense, "s3.se.xv.dense");
+
+    const int block_layer_counts[3] = {12, 24, 16};
+    const int block_dilations[3] = {1, 2, 2};
+    cb_campplus_dense_block* blocks_ptr[3] = {&m.block1, &m.block2, &m.block3};
+    for (int bi = 0; bi < 3; bi++) {
+        auto& blk = *blocks_ptr[bi];
+        blk.num_layers = block_layer_counts[bi];
+        blk.dilation = block_dilations[bi];
+        blk.layers.assign((size_t)blk.num_layers, cb_campplus_dense_layer{});
+        for (int li = 0; li < blk.num_layers; li++) {
+            char base[80];
+            std::snprintf(base, sizeof(base), "s3.se.xv.block%d.tdnnd%d", bi + 1, li + 1);
+            auto& l = blk.layers[(size_t)li];
+            std::string pfx = base;
+            l.nonl1_bn_w = T((pfx + ".nonl1.bn.weight").c_str());
+            l.nonl1_bn_b = T((pfx + ".nonl1.bn.bias").c_str());
+            l.nonl1_bn_m = T((pfx + ".nonl1.bn.running_mean").c_str());
+            l.nonl1_bn_v = T((pfx + ".nonl1.bn.running_var").c_str());
+            l.l1_w = T((pfx + ".l1.weight").c_str());
+            l.l1_b = T((pfx + ".l1.bias").c_str());
+            l.nonl2_bn_w = T((pfx + ".nonl2.bn.weight").c_str());
+            l.nonl2_bn_b = T((pfx + ".nonl2.bn.bias").c_str());
+            l.nonl2_bn_m = T((pfx + ".nonl2.bn.running_mean").c_str());
+            l.nonl2_bn_v = T((pfx + ".nonl2.bn.running_var").c_str());
+            l.cam_ll_w = T((pfx + ".cam.ll.weight").c_str());
+            l.cam_l1_w = T((pfx + ".cam.l1.weight").c_str());
+            l.cam_l1_b = T((pfx + ".cam.l1.bias").c_str());
+            l.cam_l2_w = T((pfx + ".cam.l2.weight").c_str());
+            l.cam_l2_b = T((pfx + ".cam.l2.bias").c_str());
+        }
+    }
+
+    if (!m.head.conv1_w || !m.tdnn.lin_w || !m.dense.lin_w || m.block1.layers.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: init_campplus: missing core tensors\n");
+        return -1;
+    }
+
+    ctx->campplus.loaded = true;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "cosyvoice3_tts:campplus loaded %zu tensors\n", wl.tensors.size());
+    }
+    return 0;
+}
+
 // ===========================================================================
 // Phase 5 — Voice cloning + end-to-end synth
 // ===========================================================================
@@ -3980,27 +4503,123 @@ bool cv3_voice_read_tensor(const std::map<std::string, ggml_tensor*>& tens, cons
     return true;
 }
 
-} // namespace
+std::string cv3_shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'')
+            out += "'\"'\"'";
+        else
+            out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+}
 
-extern "C" int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_context* ctx, const char* path) {
-    if (!ctx || !path) {
-        fprintf(stderr, "cosyvoice3_tts: init_voices: bad args\n");
-        return -1;
+bool cv3_write_file(const std::string& path, const std::string& data) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open())
+        return false;
+    f.write(data.data(), (std::streamsize)data.size());
+    return f.good();
+}
+
+std::string cv3_json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned)c);
+                out += buf;
+            } else {
+                out.push_back((char)c);
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+std::string cv3_temp_path(const char* suffix) {
+    char tmpl[] = "/tmp/cv3_phase6_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        return {};
+    close(fd);
+    std::remove(tmpl);
+    std::string path = tmpl;
+    if (suffix && *suffix)
+        path += suffix;
+    return path;
+}
+
+bool cv3_bake_runtime_voice_bundle(const char* wav_path, const char* ref_text, std::string& out_gguf_path) {
+    const std::string manifest_path = cv3_temp_path(".json");
+    const std::string gguf_path = cv3_temp_path(".gguf");
+    if (manifest_path.empty() || gguf_path.empty())
+        return false;
+
+    const std::string upstream_base = "/Volumes/backups/code/cosyvoice3-stash/CosyVoice-upstream";
+    std::ostringstream manifest;
+    manifest << "[{\"name\":\"runtime\",\"wav\":\"" << cv3_json_escape(wav_path ? wav_path : "")
+             << "\",\"prompt_text\":\"" << cv3_json_escape(ref_text ? ref_text : "") << "\"}]";
+    if (!cv3_write_file(manifest_path, manifest.str())) {
+        std::remove(manifest_path.c_str());
+        std::remove(gguf_path.c_str());
+        return false;
     }
 
-    // ---- Metadata pass — read `voice.names` + per-voice prompt_text strings ----
+    const std::string cmd = "python models/convert-cosyvoice3-voices-to-gguf.py --manifest " +
+                            cv3_shell_quote(manifest_path) + " --upstream-base " + cv3_shell_quote(upstream_base) +
+                            " --output " + cv3_shell_quote(gguf_path) + " >/dev/null 2>&1";
+    const int rc = std::system(cmd.c_str());
+    std::remove(manifest_path.c_str());
+    if (rc != 0) {
+        std::remove(gguf_path.c_str());
+        return false;
+    }
+    out_gguf_path = gguf_path;
+    return true;
+}
+
+bool cv3_load_voice_bundle_from_file(const char* path, std::vector<cv3_voice>& voices,
+                                     std::unordered_map<std::string, int>& by_name) {
+    voices.clear();
+    by_name.clear();
+
     ggml_context* gctx_dummy = nullptr;
     gguf_init_params gp = {/*no_alloc=*/true, &gctx_dummy};
     gguf_context* gctx = gguf_init_from_file(path, gp);
-    if (!gctx) {
-        fprintf(stderr, "cosyvoice3_tts: init_voices: failed to read GGUF '%s'\n", path);
-        return -1;
-    }
+    if (!gctx)
+        return false;
+
     auto names = core_gguf::kv_str_array(gctx, "voice.names");
     if (names.empty()) {
-        fprintf(stderr, "cosyvoice3_tts: init_voices: missing `voice.names` array in '%s'\n", path);
         gguf_free(gctx);
-        return -1;
+        return false;
     }
     std::vector<std::string> prompt_texts(names.size());
     for (size_t i = 0; i < names.size(); i++) {
@@ -4009,16 +4628,16 @@ extern "C" int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_contex
     }
     gguf_free(gctx);
 
-    // ---- Weight pass — load all `voice.*.{prompt_speech_tokens,spk_emb,ref_mel}` tensors ----
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    if (!backend)
+        return false;
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path, ctx->backend_cpu, "cosyvoice3_tts:voices", wl)) {
-        fprintf(stderr, "cosyvoice3_tts: init_voices: load_weights failed for '%s'\n", path);
-        return -1;
+    if (!core_gguf::load_weights(path, backend, "cosyvoice3_tts:voices", wl)) {
+        ggml_backend_free(backend);
+        return false;
     }
 
-    ctx->voices.voices.clear();
-    ctx->voices.by_name.clear();
-    ctx->voices.voices.reserve(names.size());
+    voices.reserve(names.size());
     for (size_t i = 0; i < names.size(); i++) {
         cv3_voice v;
         v.name = names[i];
@@ -4030,31 +4649,101 @@ extern "C" int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_contex
         if (!cv3_voice_read_tensor(wl.tensors, prefix + ".prompt_speech_tokens", tokens) ||
             !cv3_voice_read_tensor(wl.tensors, prefix + ".spk_emb", spk_emb) ||
             !cv3_voice_read_tensor(wl.tensors, prefix + ".ref_mel", ref_mel)) {
-            fprintf(stderr, "cosyvoice3_tts: init_voices: missing tensors for voice '%s'\n", v.name.c_str());
             core_gguf::free_weights(wl);
-            return -1;
+            ggml_backend_free(backend);
+            return false;
         }
-        if (spk_emb.size() != 192) {
-            fprintf(stderr, "cosyvoice3_tts: init_voices: voice '%s' spk_emb len=%zu, expected 192\n", v.name.c_str(),
-                    spk_emb.size());
+        if (spk_emb.size() != 192 || ref_mel.size() % 80 != 0) {
             core_gguf::free_weights(wl);
-            return -1;
-        }
-        if (ref_mel.size() % 80 != 0) {
-            fprintf(stderr, "cosyvoice3_tts: init_voices: voice '%s' ref_mel size %zu not divisible by mel_dim=80\n",
-                    v.name.c_str(), ref_mel.size());
-            core_gguf::free_weights(wl);
-            return -1;
+            ggml_backend_free(backend);
+            return false;
         }
         v.prompt_speech_tokens = std::move(tokens);
         v.spk_emb = std::move(spk_emb);
         v.t_ref_mel = (int)(ref_mel.size() / 80);
         v.ref_mel = std::move(ref_mel);
-        ctx->voices.by_name[v.name] = (int)ctx->voices.voices.size();
-        ctx->voices.voices.push_back(std::move(v));
+        by_name[v.name] = (int)voices.size();
+        voices.push_back(std::move(v));
     }
-    // The data is now in std::vector<>; we can drop the ggml ctx/buf.
     core_gguf::free_weights(wl);
+    ggml_backend_free(backend);
+    return !voices.empty();
+}
+
+bool cv3_load_runtime_voice(const char* wav_path, const char* ref_text, cv3_voice& out_voice) {
+    std::string baked_path;
+    if (!cv3_bake_runtime_voice_bundle(wav_path, ref_text, baked_path))
+        return false;
+    std::vector<cv3_voice> voices;
+    std::unordered_map<std::string, int> by_name;
+    const bool ok = cv3_load_voice_bundle_from_file(baked_path.c_str(), voices, by_name) && !voices.empty();
+    std::remove(baked_path.c_str());
+    if (!ok)
+        return false;
+    out_voice = std::move(voices.front());
+    return true;
+}
+
+bool cv3_extract_native_runtime_voice(cosyvoice3_tts_context* ctx, const char* wav_path, const char* ref_text,
+                                      cv3_voice& out_voice) {
+    if (!ctx || !wav_path || !ref_text || !*ref_text)
+        return false;
+    if (!ctx->s3tok.loaded || !ctx->campplus.loaded)
+        return false;
+
+    std::vector<float> pcm;
+    int sr = 0;
+    if (!crispasr::core::read_wav_mono_pcm16(wav_path, pcm, sr))
+        return false;
+
+    std::vector<float> pcm16 = pcm;
+    if (sr != 16000)
+        pcm16 = core_audio::resample_polyphase(pcm.data(), (int)pcm.size(), sr, 16000);
+    std::vector<float> pcm24 = pcm;
+    if (sr != 24000)
+        pcm24 = core_audio::resample_polyphase(pcm.data(), (int)pcm.size(), sr, 24000);
+
+    std::vector<int32_t> native_tokens = cv3_tokenize_s3tok(ctx, pcm16.data(), (int)pcm16.size(), /*max_tokens*/ 0);
+    if (native_tokens.empty())
+        return false;
+
+    std::vector<float> native_spk =
+        chatterbox_campplus::embed_speaker(ctx->campplus.model, ctx->campplus.cache, pcm16.data(), (int)pcm16.size());
+    if (native_spk.size() != 192)
+        return false;
+
+    int native_t_ref_mel = 0;
+    std::vector<float> native_ref_mel = chatterbox_campplus::compute_prompt_feat_24k(
+        pcm24.data(), (int)pcm24.size(), /*max_samples*/ 10 * 24000, native_t_ref_mel);
+    if (native_ref_mel.empty() || native_t_ref_mel <= 0)
+        return false;
+
+    out_voice.name = "runtime";
+    out_voice.prompt_text = ref_text;
+    out_voice.prompt_speech_tokens = std::move(native_tokens);
+    out_voice.spk_emb = std::move(native_spk);
+    out_voice.ref_mel = std::move(native_ref_mel);
+    out_voice.t_ref_mel = native_t_ref_mel;
+    return true;
+}
+
+} // namespace
+
+extern "C" int cosyvoice3_tts_init_voices_from_file(struct cosyvoice3_tts_context* ctx, const char* path) {
+    if (!ctx || !path) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: bad args\n");
+        return -1;
+    }
+    std::vector<cv3_voice> voices;
+    std::unordered_map<std::string, int> by_name;
+    if (!cv3_load_voice_bundle_from_file(path, voices, by_name)) {
+        fprintf(stderr, "cosyvoice3_tts: init_voices: failed to load GGUF '%s'\n", path);
+        return -1;
+    }
+    ctx->voices.voices.clear();
+    ctx->voices.by_name.clear();
+    ctx->voices.voices = std::move(voices);
+    ctx->voices.by_name = std::move(by_name);
     ctx->voices.loaded = true;
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "cosyvoice3_tts:voices loaded %zu voice(s):", ctx->voices.voices.size());
@@ -4279,15 +4968,11 @@ std::vector<float> cv3_seeded_gaussian(size_t n_samples, uint32_t seed) {
     return v;
 }
 
-} // namespace
-
-extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const char* text, const char* voice_name,
-                                       int* out_n_samples) {
-    if (!ctx || !text || !out_n_samples)
+float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const cv3_voice* voice, int* out_n_samples) {
+    if (!ctx || !text || !voice || !out_n_samples)
         return nullptr;
-    *out_n_samples = 0;
-    if (!ctx->flow.loaded || !ctx->hift.loaded || !ctx->voices.loaded) {
-        fprintf(stderr, "cosyvoice3_tts: synth requires LLM + flow + hift + voices to be loaded\n");
+    if (!ctx->flow.loaded || !ctx->hift.loaded) {
+        fprintf(stderr, "cosyvoice3_tts: synth requires LLM + flow + hift to be loaded\n");
         return nullptr;
     }
     if (ctx->vocab.id_to_token.empty()) {
@@ -4295,24 +4980,8 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
                         "tokenizer.ggml.tokens?)\n");
         return nullptr;
     }
-    std::string vname = voice_name ? voice_name : ctx->voices.voices.front().name;
-    const cv3_voice* voice = cv3_find_voice(ctx->voices, vname);
-    if (!voice) {
-        fprintf(stderr, "cosyvoice3_tts: synth: voice '%s' not found (have %zu)\n", vname.c_str(),
-                ctx->voices.voices.size());
-        return nullptr;
-    }
 
     // ---- 1. Tokenise prompt_text + user_text ----
-    // Upstream Qwen2LM.inference does `text = torch.concat([prompt_text,
-    // text], dim=1)` — prompt_text and the user text are tokenised
-    // SEPARATELY then the id streams are concatenated. Joining the raw
-    // strings (even with a space) changes the BPE boundary token for
-    // the first word of the user text (e.g. " Hello" → 1 token vs
-    // "Hello" → 2 tokens), which subtly shifts what the LM hears and
-    // produces small but audible mispronunciations downstream
-    // (observed: "a test" → "our test" on the smoke prompt). Mirror
-    // upstream exactly.
     std::vector<int32_t> prompt_ids = cv3_tokenise_prompt(ctx->vocab, voice->prompt_text);
     std::vector<int32_t> user_ids = cv3_tokenise_prompt(ctx->vocab, std::string(text));
     std::vector<int32_t> text_ids;
@@ -4334,9 +5003,7 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
     if (!cv3_build_lm_input_embeds(ctx, text_ids, voice->prompt_speech_tokens, lm_embeds, n_lm))
         return nullptr;
 
-    // CV3 stop tokens are [speech_codebook, speech_vocab) = [6561, 6761).
     const int stop_floor = (int)ctx->hp.speech_codebook;
-    // Heuristic max-token cap from upstream: text_len * max_token_text_ratio (20).
     int max_steps = ctx->params.max_tokens > 0 ? ctx->params.max_tokens : (int)text_ids.size() * 20;
     if (max_steps < 16)
         max_steps = 16;
@@ -4349,6 +5016,7 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "cosyvoice3_tts: synth: generated %zu speech tokens\n", gen_tokens.size());
     }
+
     if (const char* dump = std::getenv("COSYVOICE3_DUMP_TOKENS")) {
         FILE* f = std::fopen(dump, "w");
         if (f) {
@@ -4377,9 +5045,6 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
         return nullptr;
     const int mel = (int)ctx->flow.hp.mel_dim;
     const int T_mel_total = (int)(full_tokens.size() * (size_t)ctx->flow.hp.token_mel_ratio);
-    // T_ref_mel: upstream's `prompt_feat.shape[1]`. Our converter aligns
-    // T_ref_mel = 2 × T_prompt_tok, but if the wav was edge-truncated
-    // the stored value may be different — use the actual.
     const int T_ref_mel = voice->t_ref_mel;
     if (T_ref_mel > T_mel_total) {
         fprintf(stderr, "cosyvoice3_tts: synth: voice ref_mel (%d) longer than full T_mel (%d) — corrupt voice\n",
@@ -4416,7 +5081,6 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
     free(mel_full);
 
     // ---- 9. HiFT inference → 24 kHz audio ----
-    // noise_buf shape: T_mel * 480 * 9 (8 harmonics + 1 unvoiced).
     std::vector<float> noise_buf = cv3_seeded_uniform_noise((size_t)T_mel_out * 480 * 9, /*seed*/ 0);
     float* audio = cosyvoice3_tts_run_hift_inference(ctx, mel_out.data(), T_mel_out, noise_buf.data());
     if (!audio)
@@ -4424,4 +5088,140 @@ extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const
 
     *out_n_samples = T_mel_out * 480;
     return audio;
+}
+
+} // namespace
+
+extern "C" float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const char* text, const char* voice_name,
+                                       int* out_n_samples) {
+    if (!ctx || !text || !out_n_samples)
+        return nullptr;
+    *out_n_samples = 0;
+    if (!ctx->flow.loaded || !ctx->hift.loaded || !ctx->voices.loaded) {
+        fprintf(stderr, "cosyvoice3_tts: synth requires LLM + flow + hift + voices to be loaded\n");
+        return nullptr;
+    }
+    if (ctx->vocab.id_to_token.empty()) {
+        fprintf(stderr, "cosyvoice3_tts: synth: LLM vocab not loaded (was the GGUF written without "
+                        "tokenizer.ggml.tokens?)\n");
+        return nullptr;
+    }
+    std::string vname = voice_name ? voice_name : ctx->voices.voices.front().name;
+    const cv3_voice* voice = cv3_find_voice(ctx->voices, vname);
+    if (!voice) {
+        fprintf(stderr, "cosyvoice3_tts: synth: voice '%s' not found (have %zu)\n", vname.c_str(),
+                ctx->voices.voices.size());
+        return nullptr;
+    }
+    return cv3_synth_with_voice(ctx, text, voice, out_n_samples);
+}
+
+extern "C" float* cosyvoice3_tts_synth_from_wav(struct cosyvoice3_tts_context* ctx, const char* text,
+                                                const char* wav_path, const char* ref_text, int* out_n_samples) {
+    if (!ctx || !text || !wav_path || !out_n_samples)
+        return nullptr;
+    *out_n_samples = 0;
+    if (!ref_text || !*ref_text) {
+        fprintf(stderr, "cosyvoice3_tts: synth_from_wav requires --ref-text\n");
+        return nullptr;
+    }
+    if (!ctx->flow.loaded || !ctx->hift.loaded) {
+        fprintf(stderr, "cosyvoice3_tts: synth_from_wav requires LLM + flow + hift to be loaded\n");
+        return nullptr;
+    }
+    cv3_voice voice;
+    if (!cv3_extract_native_runtime_voice(ctx, wav_path, ref_text ? ref_text : "", voice) &&
+        !cv3_load_runtime_voice(wav_path, ref_text ? ref_text : "", voice)) {
+        fprintf(stderr, "cosyvoice3_tts: synth_from_wav: failed to bake runtime voice from '%s'\n", wav_path);
+        return nullptr;
+    }
+    return cv3_synth_with_voice(ctx, text, &voice, out_n_samples);
+}
+
+extern "C" int32_t* cosyvoice3_tts_extract_speech_tokens(struct cosyvoice3_tts_context* ctx, const char* wav_path,
+                                                         const char* ref_text, int* out_n_tokens) {
+    if (out_n_tokens)
+        *out_n_tokens = 0;
+    if (!ctx || !wav_path || !out_n_tokens)
+        return nullptr;
+    if (ctx->s3tok.loaded) {
+        std::vector<float> pcm;
+        int sr = 0;
+        if (!crispasr::core::read_wav_mono_pcm16(wav_path, pcm, sr))
+            return nullptr;
+        if (sr != 16000) {
+            pcm = core_audio::resample_polyphase(pcm.data(), (int)pcm.size(), sr, 16000);
+        }
+        std::vector<int32_t> toks = cv3_tokenize_s3tok(ctx, pcm.data(), (int)pcm.size(), /*max_tokens*/ 0);
+        if (toks.empty())
+            return nullptr;
+        int32_t* out = (int32_t*)malloc(toks.size() * sizeof(int32_t));
+        if (!out)
+            return nullptr;
+        std::memcpy(out, toks.data(), toks.size() * sizeof(int32_t));
+        *out_n_tokens = (int)toks.size();
+        return out;
+    }
+    cv3_voice voice;
+    if (!cv3_load_runtime_voice(wav_path, ref_text ? ref_text : "", voice))
+        return nullptr;
+    const size_t n = voice.prompt_speech_tokens.size();
+    int32_t* out = (int32_t*)malloc(n * sizeof(int32_t));
+    if (!out)
+        return nullptr;
+    std::memcpy(out, voice.prompt_speech_tokens.data(), n * sizeof(int32_t));
+    *out_n_tokens = (int)n;
+    return out;
+}
+
+extern "C" int cosyvoice3_tts_extract_spk_emb(struct cosyvoice3_tts_context* ctx, const char* wav_path,
+                                              float out_spk_emb[192]) {
+    if (!ctx || !wav_path || !out_spk_emb)
+        return -1;
+    if (ctx->campplus.loaded) {
+        std::vector<float> pcm;
+        int sr = 0;
+        if (!crispasr::core::read_wav_mono_pcm16(wav_path, pcm, sr))
+            return -1;
+        if (sr != 16000)
+            pcm = core_audio::resample_polyphase(pcm.data(), (int)pcm.size(), sr, 16000);
+        auto emb =
+            chatterbox_campplus::embed_speaker(ctx->campplus.model, ctx->campplus.cache, pcm.data(), (int)pcm.size());
+        if (emb.size() != 192)
+            return -1;
+        std::memcpy(out_spk_emb, emb.data(), 192 * sizeof(float));
+        return 0;
+    }
+    cv3_voice voice;
+    if (!cv3_load_runtime_voice(wav_path, "", voice) || voice.spk_emb.size() != 192)
+        return -1;
+    std::memcpy(out_spk_emb, voice.spk_emb.data(), 192 * sizeof(float));
+    return 0;
+}
+
+extern "C" float* cosyvoice3_tts_extract_ref_mel(struct cosyvoice3_tts_context* ctx, const char* wav_path,
+                                                 const char* ref_text, int* out_T_mel) {
+    if (out_T_mel)
+        *out_T_mel = 0;
+    if (!ctx || !wav_path || !out_T_mel)
+        return nullptr;
+    (void)ref_text;
+    std::vector<float> pcm;
+    int sr = 0;
+    if (!crispasr::core::read_wav_mono_pcm16(wav_path, pcm, sr))
+        return nullptr;
+    if (sr != 24000) {
+        pcm = core_audio::resample_polyphase(pcm.data(), (int)pcm.size(), sr, 24000);
+    }
+    int T_mel = 0;
+    auto mel =
+        chatterbox_campplus::compute_prompt_feat_24k(pcm.data(), (int)pcm.size(), /*max_samples*/ 10 * 24000, T_mel);
+    if (mel.empty() || T_mel <= 0)
+        return nullptr;
+    float* out = (float*)malloc(mel.size() * sizeof(float));
+    if (!out)
+        return nullptr;
+    std::memcpy(out, mel.data(), mel.size() * sizeof(float));
+    *out_T_mel = T_mel;
+    return out;
 }

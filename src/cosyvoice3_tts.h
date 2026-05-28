@@ -148,6 +148,14 @@ int cosyvoice3_tts_init_flow_from_file(struct cosyvoice3_tts_context* ctx, const
 // end-to-end synthesis). Returns 0 on success, -1 on failure.
 int cosyvoice3_tts_init_hift_from_file(struct cosyvoice3_tts_context* ctx, const char* path);
 
+// Load the speech_tokenizer_v3 GGUF into an already-initialised context.
+// Used by the native WAV cloning path for prompt speech-token extraction.
+int cosyvoice3_tts_init_s3tok_from_file(struct cosyvoice3_tts_context* ctx, const char* path);
+
+// Load the CAMPPlus speaker-encoder GGUF into an already-initialised context.
+// Used by the native WAV cloning path for speaker embedding extraction.
+int cosyvoice3_tts_init_campplus_from_file(struct cosyvoice3_tts_context* ctx, const char* path);
+
 // Read flow-side hparams. Each pointer may be NULL.
 int cosyvoice3_tts_get_flow_hparams(struct cosyvoice3_tts_context* ctx, uint32_t* n_dit_layers, uint32_t* dit_dim,
                                     uint32_t* dit_heads, uint32_t* dit_head_dim, uint32_t* dit_ff_dim,
@@ -254,6 +262,21 @@ const char* cosyvoice3_tts_voice_name(struct cosyvoice3_tts_context* ctx, int id
 // init_voices_from_file to all have been called first.
 float* cosyvoice3_tts_synth(struct cosyvoice3_tts_context* ctx, const char* text, const char* voice_name,
                             int* out_n_samples);
+
+// Runtime WAV-clone path. `wav_path` is the reference audio and
+// `ref_text` is its transcription. Returns a malloc'd float buffer of
+// 24 kHz mono PCM or nullptr on failure.
+float* cosyvoice3_tts_synth_from_wav(struct cosyvoice3_tts_context* ctx, const char* text, const char* wav_path,
+                                     const char* ref_text, int* out_n_samples);
+
+// Convenience extractors for the runtime WAV-clone path. These are
+// thin wrappers around the same prompt bake used by
+// `cosyvoice3_tts_synth_from_wav`.
+int32_t* cosyvoice3_tts_extract_speech_tokens(struct cosyvoice3_tts_context* ctx, const char* wav_path,
+                                              const char* ref_text, int* out_n_tokens);
+int cosyvoice3_tts_extract_spk_emb(struct cosyvoice3_tts_context* ctx, const char* wav_path, float out_spk_emb[192]);
+float* cosyvoice3_tts_extract_ref_mel(struct cosyvoice3_tts_context* ctx, const char* wav_path, const char* ref_text,
+                                      int* out_T_mel);
 
 // Diff-harness stage extractor. Returns malloc'd float[*out_n].
 // Phase 2 supports:

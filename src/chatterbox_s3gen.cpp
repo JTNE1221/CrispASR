@@ -697,6 +697,8 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
             char k[128];
             std::snprintf(k, sizeof(k), "%s.conv1.weight", base);
             b.conv1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.conv1.bias", base);
+            b.conv1_b = T(c, k);
             std::snprintf(k, sizeof(k), "%s.bn1.weight", base);
             b.bn1_w = T(c, k);
             std::snprintf(k, sizeof(k), "%s.bn1.bias", base);
@@ -707,6 +709,8 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
             b.bn1_v = T(c, k);
             std::snprintf(k, sizeof(k), "%s.conv2.weight", base);
             b.conv2_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.conv2.bias", base);
+            b.conv2_b = T(c, k);
             std::snprintf(k, sizeof(k), "%s.bn2.weight", base);
             b.bn2_w = T(c, k);
             std::snprintf(k, sizeof(k), "%s.bn2.bias", base);
@@ -717,6 +721,8 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
             b.bn2_v = T(c, k);
             std::snprintf(k, sizeof(k), "%s.shortcut.0.weight", base);
             b.sc_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.shortcut.0.bias", base);
+            b.sc_b = T(c, k);
             std::snprintf(k, sizeof(k), "%s.shortcut.1.weight", base);
             b.sc_bn_w = T(c, k);
             std::snprintf(k, sizeof(k), "%s.shortcut.1.bias", base);
@@ -738,6 +744,8 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
             l.nonl1_bn_v = T(c, k);
             std::snprintf(k, sizeof(k), "%s.l1.weight", base);
             l.l1_w = T(c, k);
+            std::snprintf(k, sizeof(k), "%s.l1.bias", base);
+            l.l1_b = T(c, k);
             std::snprintf(k, sizeof(k), "%s.nonl2.bn.weight", base);
             l.nonl2_bn_w = T(c, k);
             std::snprintf(k, sizeof(k), "%s.nonl2.bn.bias", base);
@@ -761,11 +769,13 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
         auto& m = c->campplus;
         auto& head = m.head;
         head.conv1_w = T(c, "s3.se.head.conv1.weight");
+        head.conv1_b = T(c, "s3.se.head.conv1.bias");
         head.bn1_w = T(c, "s3.se.head.bn1.weight");
         head.bn1_b = T(c, "s3.se.head.bn1.bias");
         head.bn1_m = T(c, "s3.se.head.bn1.running_mean");
         head.bn1_v = T(c, "s3.se.head.bn1.running_var");
         head.conv2_w = T(c, "s3.se.head.conv2.weight");
+        head.conv2_b = T(c, "s3.se.head.conv2.bias");
         head.bn2_w = T(c, "s3.se.head.bn2.weight");
         head.bn2_b = T(c, "s3.se.head.bn2.bias");
         head.bn2_m = T(c, "s3.se.head.bn2.running_mean");

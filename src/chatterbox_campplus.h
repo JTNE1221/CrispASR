@@ -59,16 +59,19 @@
 // `shortcut_*` stay nullptr.
 struct cb_campplus_resblock {
     ggml_tensor* conv1_w = nullptr; // F16  (k=3, k=3, in, out)
-    ggml_tensor* bn1_w = nullptr;   // F32  (out,)
+    ggml_tensor* conv1_b = nullptr;
+    ggml_tensor* bn1_w = nullptr; // F32  (out,)
     ggml_tensor* bn1_b = nullptr;
     ggml_tensor* bn1_m = nullptr;   // running_mean
     ggml_tensor* bn1_v = nullptr;   // running_var
     ggml_tensor* conv2_w = nullptr; // F16  (k=3, k=3, out, out)
+    ggml_tensor* conv2_b = nullptr;
     ggml_tensor* bn2_w = nullptr;
     ggml_tensor* bn2_b = nullptr;
     ggml_tensor* bn2_m = nullptr;
     ggml_tensor* bn2_v = nullptr;
     ggml_tensor* sc_w = nullptr; // F16  (1, 1, in, out)  — 1×1 shortcut
+    ggml_tensor* sc_b = nullptr;
     ggml_tensor* sc_bn_w = nullptr;
     ggml_tensor* sc_bn_b = nullptr;
     ggml_tensor* sc_bn_m = nullptr;
@@ -79,6 +82,7 @@ struct cb_campplus_resblock {
 // FCM head — 2-D conv stack on the mel-vs-time grid.
 struct cb_campplus_fcm {
     ggml_tensor* conv1_w = nullptr;
+    ggml_tensor* conv1_b = nullptr;
     ggml_tensor* bn1_w = nullptr;
     ggml_tensor* bn1_b = nullptr;
     ggml_tensor* bn1_m = nullptr;
@@ -86,6 +90,7 @@ struct cb_campplus_fcm {
     std::vector<cb_campplus_resblock> layer1; // 2 blocks
     std::vector<cb_campplus_resblock> layer2; // 2 blocks
     ggml_tensor* conv2_w = nullptr;
+    ggml_tensor* conv2_b = nullptr;
     ggml_tensor* bn2_w = nullptr;
     ggml_tensor* bn2_b = nullptr;
     ggml_tensor* bn2_m = nullptr;
@@ -101,6 +106,7 @@ struct cb_campplus_dense_layer {
     ggml_tensor* nonl1_bn_v = nullptr;
     // l1: bottleneck Conv1d(in_channels → bn_channels, k=1, no bias)
     ggml_tensor* l1_w = nullptr;
+    ggml_tensor* l1_b = nullptr;
     // nonl2.bn — runs on the bottleneck output (bn_channels=128).
     ggml_tensor* nonl2_bn_w = nullptr;
     ggml_tensor* nonl2_bn_b = nullptr;
@@ -127,7 +133,7 @@ struct cb_campplus_dense_block {
 // Conv1d-with-BN unit used by `tdnn`, `transit*`, `out_nl`, `dense`.
 struct cb_campplus_unit {
     ggml_tensor* lin_w = nullptr; // F16  Conv1d weight (kw, in, out)
-    ggml_tensor* lin_b = nullptr; // optional (only `dense` has `affine=False` BN; transit/dense `bias=False`)
+    ggml_tensor* lin_b = nullptr; // optional bias
     ggml_tensor* bn_w = nullptr;
     ggml_tensor* bn_b = nullptr;
     ggml_tensor* bn_m = nullptr;

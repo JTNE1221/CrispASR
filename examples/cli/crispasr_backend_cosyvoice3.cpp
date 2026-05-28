@@ -1,9 +1,10 @@
 // crispasr_backend_cosyvoice3.cpp — adapter for FunAudioLLM/Fun-CosyVoice3-0.5B-2512 TTS.
 //
-// Three-GGUF runtime: LLM (-m), flow (sibling), HiFT (sibling), plus a
-// voices.gguf carrying baked voice-clone bundles. The flow path can be
-// overridden via --codec-model; HiFT and voices auto-discover as
-// siblings of the LLM (or via the COSYVOICE3_HIFT_PATH /
+// Four-GGUF runtime: LLM (-m), flow (sibling), CAMPPlus (sibling), HiFT
+// (sibling), plus a voices.gguf carrying baked voice-clone bundles. The
+// flow path can be overridden via --codec-model; CAMPPlus / HiFT / voices
+// auto-discover as siblings of the LLM (or via the
+// COSYVOICE3_CAMPPLUS_PATH / COSYVOICE3_HIFT_PATH /
 // COSYVOICE3_VOICES_PATH env vars).
 
 #include "crispasr_backend.h"
@@ -21,6 +22,18 @@
 #include <vector>
 
 namespace {
+
+bool ends_with_ci(const std::string& s, const std::string& suffix) {
+    if (s.size() < suffix.size())
+        return false;
+    for (size_t i = 0; i < suffix.size(); i++) {
+        char a = (char)std::tolower((unsigned char)s[s.size() - suffix.size() + i]);
+        char b = (char)std::tolower((unsigned char)suffix[i]);
+        if (a != b)
+            return false;
+    }
+    return true;
+}
 
 bool file_exists(const std::string& path) {
     struct stat st;
@@ -99,6 +112,28 @@ public:
             return false;
         }
 
+        // ---- CAMPPlus ----
+        std::string campplus_path;
+        const char* env_campplus = getenv("COSYVOICE3_CAMPPLUS_PATH");
+        if (env_campplus && env_campplus[0])
+            campplus_path = env_campplus;
+        if (campplus_path.empty()) {
+            campplus_path = discover_sibling(base_dir, {
+                                                           "cosyvoice3-campplus-f16.gguf",
+                                                           "cosyvoice3-campplus.gguf",
+                                                       });
+        }
+        if (campplus_path.empty()) {
+            fprintf(stderr, "crispasr[cosyvoice3-tts]: no CAMPPlus GGUF found. Place "
+                            "cosyvoice3-campplus-f16.gguf next to the LLM, or set "
+                            "COSYVOICE3_CAMPPLUS_PATH.\n");
+            return false;
+        }
+        if (cosyvoice3_tts_init_campplus_from_file(ctx_, campplus_path.c_str()) != 0) {
+            fprintf(stderr, "crispasr[cosyvoice3-tts]: failed to load CAMPPlus '%s'\n", campplus_path.c_str());
+            return false;
+        }
+
         // ---- HiFT ----
         std::string hift_path;
         const char* env_hift = getenv("COSYVOICE3_HIFT_PATH");
@@ -119,6 +154,21 @@ public:
         if (cosyvoice3_tts_init_hift_from_file(ctx_, hift_path.c_str()) != 0) {
             fprintf(stderr, "crispasr[cosyvoice3-tts]: failed to load HiFT '%s'\n", hift_path.c_str());
             return false;
+        }
+
+        // ---- speech_tokenizer_v3 ----
+        std::string s3tok_path = discover_sibling(base_dir, {
+                                                                "cosyvoice3-s3tok-f16.gguf",
+                                                                "cosyvoice3-s3tok.gguf",
+                                                            });
+        if (!s3tok_path.empty()) {
+            if (cosyvoice3_tts_init_s3tok_from_file(ctx_, s3tok_path.c_str()) != 0) {
+                fprintf(stderr, "crispasr[cosyvoice3-tts]: failed to load s3tok '%s'\n", s3tok_path.c_str());
+                return false;
+            }
+        } else if (!p.no_prints) {
+            fprintf(stderr, "crispasr[cosyvoice3-tts]: no s3tok GGUF found. Runtime WAV cloning will fall back to the "
+                            "Python voice-bake bridge until cosyvoice3-s3tok-f16.gguf is present.\n");
         }
 
         // ---- Voices ----
@@ -159,9 +209,19 @@ public:
         cosyvoice3_tts_set_temperature(ctx_, params.temperature > 0.0f ? params.temperature : 0.8f);
         cosyvoice3_tts_set_seed(ctx_, (uint64_t)params.seed);
 
-        const char* voice = params.tts_voice.empty() ? nullptr : params.tts_voice.c_str();
         int n = 0;
-        float* pcm = cosyvoice3_tts_synth(ctx_, text.c_str(), voice, &n);
+        float* pcm = nullptr;
+        if (ends_with_ci(params.tts_voice, ".wav")) {
+            if (params.tts_ref_text.empty()) {
+                fprintf(stderr, "crispasr[cosyvoice3-tts]: --voice is a WAV but --ref-text was not set.\n");
+                return {};
+            }
+            pcm = cosyvoice3_tts_synth_from_wav(ctx_, text.c_str(), params.tts_voice.c_str(),
+                                                params.tts_ref_text.c_str(), &n);
+        } else {
+            const char* voice = params.tts_voice.empty() ? nullptr : params.tts_voice.c_str();
+            pcm = cosyvoice3_tts_synth(ctx_, text.c_str(), voice, &n);
+        }
         if (!pcm || n <= 0) {
             if (pcm)
                 free(pcm);

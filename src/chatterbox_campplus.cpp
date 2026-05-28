@@ -146,15 +146,18 @@ struct ResBlockCache {
                                 // for the CPU conv2d below
     int conv1_in = 0;
     int conv1_out = 0;
+    std::vector<float> conv1_b;
     BNFolded bn1;
     std::vector<float> conv2_w;
     int conv2_in = 0;
     int conv2_out = 0;
+    std::vector<float> conv2_b;
     BNFolded bn2;
     bool has_shortcut = false;
     std::vector<float> sc_w; // (1, 1, in, out)
     int sc_in = 0;
     int sc_out = 0;
+    std::vector<float> sc_b;
     BNFolded sc_bn;
     int stride = 1;
 };
@@ -163,6 +166,7 @@ struct DenseLayerCache {
     int in_channels = 0;
     BNFolded nonl1_bn;       // (in_channels,)
     std::vector<float> l1_w; // (1, in, bn) row-major in GGUF; stored flat
+    std::vector<float> l1_b;
     int bn_channels = 0;
     BNFolded nonl2_bn;           // (bn_channels,)
     std::vector<float> cam_ll_w; // (k=3, bn, out=growth) row-major
@@ -178,6 +182,7 @@ struct DenseLayerCache {
 
 struct UnitCache {
     std::vector<float> lin_w; // (kw, in, out)
+    std::vector<float> lin_b;
     int kw = 1;
     int in_dim = 0;
     int out_dim = 0;
@@ -189,8 +194,10 @@ struct CampplusCache {
     bool initialised = false;
     // FCM head
     std::vector<float> head_conv1_w; // (3, 3, 1, 32)
+    std::vector<float> head_conv1_b;
     BNFolded head_bn1;
     std::vector<float> head_conv2_w; // (3, 3, 32, 32)
+    std::vector<float> head_conv2_b;
     BNFolded head_bn2;
     std::vector<ResBlockCache> head_layer1; // 2
     std::vector<ResBlockCache> head_layer2; // 2
@@ -238,6 +245,17 @@ static inline float w2d(const float* w, int o, int i, int kh, int kw, int n_in, 
 // → flat row-major (o, i, kw) → `(o*in + i)*kw + kw`.
 static inline float w1d(const float* w, int o, int i, int kw, int n_in, int kW) {
     return w[((size_t)o * (size_t)n_in + (size_t)i) * (size_t)kW + (size_t)kw];
+}
+
+static void add_channel_bias(float* x, int C, int N, const std::vector<float>& bias) {
+    if (bias.empty())
+        return;
+    for (int c = 0; c < C; c++) {
+        const float b = bias[(size_t)c];
+        float* row = x + (size_t)c * (size_t)N;
+        for (int n = 0; n < N; n++)
+            row[n] += b;
+    }
 }
 
 // 2-D conv for the FCM head. Input layout: (C_in, H, W) row-major
@@ -327,12 +345,14 @@ static void resblock_forward(const float* in, int C_in, int H_in, int W_in, cons
     C_out = b.conv1_out;
     out.assign((size_t)C_out * (size_t)H_out * (size_t)W_out, 0.0f);
     conv2d_forward(in, C_in, H_in, W_in, b.conv1_w.data(), C_out, 3, 3, b.stride, 1, 1, 1, out.data());
+    add_channel_bias(out.data(), C_out, H_out * W_out, b.conv1_b);
     apply_bn_inplace(out.data(), C_out, H_out * W_out, b.bn1);
     relu_inplace(out.data(), out.size());
 
     // conv2: stride=1, p=1, channels stay
     std::vector<float> tmp((size_t)C_out * (size_t)H_out * (size_t)W_out, 0.0f);
     conv2d_forward(out.data(), C_out, H_out, W_out, b.conv2_w.data(), C_out, 3, 3, 1, 1, 1, 1, tmp.data());
+    add_channel_bias(tmp.data(), C_out, H_out * W_out, b.conv2_b);
     apply_bn_inplace(tmp.data(), C_out, H_out * W_out, b.bn2);
 
     // Shortcut branch: 1×1 Conv2d + BN if (stride!=1 || in!=out), else identity.
@@ -341,6 +361,7 @@ static void resblock_forward(const float* in, int C_in, int H_in, int W_in, cons
     if (b.has_shortcut) {
         sc.assign((size_t)C_out * (size_t)H_out * (size_t)W_out, 0.0f);
         conv2d_forward(in, C_in, H_in, W_in, b.sc_w.data(), C_out, 1, 1, b.stride, 1, 0, 0, sc.data());
+        add_channel_bias(sc.data(), C_out, H_out * W_out, b.sc_b);
         apply_bn_inplace(sc.data(), C_out, H_out * W_out, b.sc_bn);
         sc_ptr = sc.data();
     } else {
@@ -368,6 +389,8 @@ static void init_unit(UnitCache& u, const cb_campplus_unit& src, int default_in,
         u.in_dim = default_in;
         u.out_dim = default_out;
     }
+    if (src.lin_b)
+        u.lin_b = read_tensor_f32(src.lin_b);
     if (src.bn_m && src.bn_v) {
         u.bn = fold_bn(src.bn_m, src.bn_v, src.bn_w, src.bn_b, u.out_dim);
         u.has_bn = true;
@@ -381,18 +404,24 @@ static void init_resblock(ResBlockCache& b, const cb_campplus_resblock& src) {
         b.conv1_in = (int)src.conv1_w->ne[2];
         b.conv1_out = (int)src.conv1_w->ne[3];
     }
+    if (src.conv1_b)
+        b.conv1_b = read_tensor_f32(src.conv1_b);
     b.bn1 = fold_bn(src.bn1_m, src.bn1_v, src.bn1_w, src.bn1_b, b.conv1_out);
     if (src.conv2_w) {
         b.conv2_w = read_tensor_f32(src.conv2_w);
         b.conv2_in = (int)src.conv2_w->ne[2];
         b.conv2_out = (int)src.conv2_w->ne[3];
     }
+    if (src.conv2_b)
+        b.conv2_b = read_tensor_f32(src.conv2_b);
     b.bn2 = fold_bn(src.bn2_m, src.bn2_v, src.bn2_w, src.bn2_b, b.conv2_out);
     if (src.sc_w) {
         b.has_shortcut = true;
         b.sc_w = read_tensor_f32(src.sc_w);
         b.sc_in = (int)src.sc_w->ne[2];
         b.sc_out = (int)src.sc_w->ne[3];
+        if (src.sc_b)
+            b.sc_b = read_tensor_f32(src.sc_b);
         b.sc_bn = fold_bn(src.sc_bn_m, src.sc_bn_v, src.sc_bn_w, src.sc_bn_b, b.sc_out);
     }
 }
@@ -404,6 +433,8 @@ static void init_dense_layer(DenseLayerCache& l, const cb_campplus_dense_layer& 
         l.in_channels = (int)src.l1_w->ne[1];
         l.bn_channels = (int)src.l1_w->ne[2];
     }
+    if (src.l1_b)
+        l.l1_b = read_tensor_f32(src.l1_b);
     l.nonl1_bn = fold_bn(src.nonl1_bn_m, src.nonl1_bn_v, src.nonl1_bn_w, src.nonl1_bn_b, l.in_channels);
     l.nonl2_bn = fold_bn(src.nonl2_bn_m, src.nonl2_bn_v, src.nonl2_bn_w, src.nonl2_bn_b, l.bn_channels);
     if (src.cam_ll_w) {
@@ -432,10 +463,14 @@ static void init_cache(CampplusCache& cache, const cb_campplus_model& m) {
     // FCM head.
     if (m.head.conv1_w) {
         cache.head_conv1_w = read_tensor_f32(m.head.conv1_w);
+        if (m.head.conv1_b)
+            cache.head_conv1_b = read_tensor_f32(m.head.conv1_b);
         cache.head_bn1 = fold_bn(m.head.bn1_m, m.head.bn1_v, m.head.bn1_w, m.head.bn1_b, (int)m.head.conv1_w->ne[3]);
     }
     if (m.head.conv2_w) {
         cache.head_conv2_w = read_tensor_f32(m.head.conv2_w);
+        if (m.head.conv2_b)
+            cache.head_conv2_b = read_tensor_f32(m.head.conv2_b);
         cache.head_bn2 = fold_bn(m.head.bn2_m, m.head.bn2_v, m.head.bn2_w, m.head.bn2_b, (int)m.head.conv2_w->ne[3]);
     }
     cache.head_layer1.assign(m.head.layer1.size(), ResBlockCache{});
@@ -503,6 +538,7 @@ static void fcm_forward(const CampplusCache& cache, const float* feat_t_80, int 
     int C1 = 32;
     std::vector<float> y1((size_t)C1 * (size_t)H1 * (size_t)W1, 0.0f);
     conv2d_forward(x.data(), C0, H0, W0, cache.head_conv1_w.data(), C1, 3, 3, 1, 1, 1, 1, y1.data());
+    add_channel_bias(y1.data(), C1, H1 * W1, cache.head_conv1_b);
     apply_bn_inplace(y1.data(), C1, H1 * W1, cache.head_bn1);
     relu_inplace(y1.data(), y1.size());
 
@@ -535,6 +571,7 @@ static void fcm_forward(const CampplusCache& cache, const float* feat_t_80, int 
     int C2 = 32;
     std::vector<float> y2((size_t)C2 * (size_t)H2 * (size_t)W2, 0.0f);
     conv2d_forward(ya.data(), Ca, Ha, Wa, cache.head_conv2_w.data(), C2, 3, 3, 2, 1, 1, 1, y2.data());
+    add_channel_bias(y2.data(), C2, H2 * W2, cache.head_conv2_b);
     apply_bn_inplace(y2.data(), C2, H2 * W2, cache.head_bn2);
     relu_inplace(y2.data(), y2.size());
 
@@ -575,6 +612,8 @@ static std::vector<float> dense_layer_forward(const float* in, int C_in_actual, 
     // l1: 1×1 Conv1d (in_channels → bn_channels)
     std::vector<float> bo((size_t)l.bn_channels * (size_t)T, 0.0f);
     conv1d_forward(a.data(), C_in_actual, T, l.l1_w.data(), l.bn_channels, 1, 1, 0, 1, bo.data());
+    if (!l.l1_b.empty())
+        add_channel_bias(bo.data(), l.bn_channels, T, l.l1_b);
 
     // nonl2.bn(bn_channels) → ReLU
     apply_bn_inplace(bo.data(), l.bn_channels, T, l.nonl2_bn);
@@ -690,7 +729,6 @@ static std::vector<float> dense_layer_forward(const float* in, int C_in_actual, 
 // onto the running input.
 static std::vector<float> dense_block_forward(const float* in, int C_in, int T, const std::vector<DenseLayerCache>& blk,
                                               int& C_out) {
-    const bool dbg = std::getenv("CHATTERBOX_DEBUG") != nullptr;
     std::vector<float> running((size_t)C_in * (size_t)T);
     std::memcpy(running.data(), in, running.size() * sizeof(float));
     int C_running = C_in;
@@ -721,6 +759,8 @@ static std::vector<float> unit_forward(const UnitCache& u, const float* in, int 
     T_out = (T + 2 * p - (u.kw - 1) - 1) / s + 1;
     std::vector<float> out((size_t)u.out_dim * (size_t)T_out, 0.0f);
     conv1d_forward(in, C_in, T, u.lin_w.data(), u.out_dim, u.kw, s, p, 1, out.data());
+    if (!u.lin_b.empty())
+        add_channel_bias(out.data(), u.out_dim, T_out, u.lin_b);
     if (u.has_bn) {
         apply_bn_inplace(out.data(), u.out_dim, T_out, u.bn);
     }
@@ -850,7 +890,8 @@ std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runti
     // out_nl: BN(512) + ReLU. Note: out_nl is a bare get_nonlinear, so its
     // GGUF tensors are at `out_nl.bn.*` (not `out_nl.nl.bn.*`); the bind
     // step has a special case for this.
-    apply_bn_inplace(post_t3.data(), 512, T_tdnn, state->xv_out_nl.bn);
+    if (state->xv_out_nl.has_bn)
+        apply_bn_inplace(post_t3.data(), 512, T_tdnn, state->xv_out_nl.bn);
     relu_inplace(post_t3.data(), post_t3.size());
 
     // StatsPool → (1024,)

@@ -124,9 +124,10 @@ Each manifest entry is `{name, wav, prompt_text}`. The script needs
 `speech_tokenizer_v3.onnx` (CV3 token extractor); both auto-download
 from HF on first run.
 
-Arbitrary-WAV runtime cloning (no Python pre-bake step) is the next
-milestone — tracked as `Phase 6: S3Tokenizer V3 port` in the CrispASR
-roadmap.
+The native runtime companion set now includes
+`cosyvoice3-campplus-f16.gguf` and `cosyvoice3-s3tok-f16.gguf`, so
+arbitrary-WAV cloning can stay inside the C++ runtime without the
+Python pre-bake bridge when those companions are present.
 
 ## Tensor naming
 
