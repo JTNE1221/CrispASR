@@ -56,6 +56,8 @@ text (Qwen2 BPE) → CosyVoice3LM (Qwen2-0.5B + speech-token AR head)
 | `cosyvoice3-llm-q4_k.gguf` | Q4_K (Q4_0 fallback on 896-wide rows; head + embeddings stay F16) | 384 MB |
 | `cosyvoice3-flow-f16.gguf` | F16 | 665 MB |
 | `cosyvoice3-flow-q8_0.gguf` | Q8_0 (input_embd + spk_affine stay F16) | 361 MB |
+| `cosyvoice3-campplus-f16.gguf` | F16 speaker encoder for runtime WAV cloning | 31 MB |
+| `cosyvoice3-s3tok-f16.gguf` | F16 speech tokenizer for runtime WAV cloning | 462 MB |
 | `cosyvoice3-hift-f16.gguf` | F16 — too small to benefit from quant | 42 MB |
 | `cosyvoice3-voices.gguf` | F32 voice-clone bundle (1 baked voice today) | 57 KB |
 
@@ -98,6 +100,8 @@ crispasr -m cosyvoice3-llm-q4_k.gguf \
 The CLI auto-discovers companion GGUFs in this order:
 
 * **Flow** — `cosyvoice3-flow-*.gguf` next to the LLM, or `--codec-model PATH`.
+* **CAMPPlus** — `cosyvoice3-campplus-f16.gguf` next to the LLM, or `COSYVOICE3_CAMPPLUS_PATH` for the native WAV-clone path.
+* **S3Tokenizer** — `cosyvoice3-s3tok-f16.gguf` next to the LLM, or `COSYVOICE3_S3TOK_PATH` for the native WAV-clone path.
 * **HiFT** — `cosyvoice3-hift-*.gguf` next to the LLM, or `COSYVOICE3_HIFT_PATH` env var.
 * **Voices** — `cosyvoice3-voices.gguf` next to the LLM, or `COSYVOICE3_VOICES_PATH` env var.
 
