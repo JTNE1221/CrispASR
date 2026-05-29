@@ -57,7 +57,7 @@ text (Qwen2 BPE) → CosyVoice3LM (Qwen2-0.5B + speech-token AR head)
 | `cosyvoice3-flow-f16.gguf` | F16 | 665 MB |
 | `cosyvoice3-flow-q8_0.gguf` | Q8_0 (input_embd + spk_affine stay F16) | 361 MB |
 | `cosyvoice3-hift-f16.gguf` | F16 — too small to benefit from quant | 42 MB |
-| `cosyvoice3-voices.gguf` | F32 voice-clone bundle (1 baked voice today) | 57 KB |
+| `cosyvoice3-voices.gguf` | F32 voice-clone bank: 5 baked voices (zero_shot + en/de/zh/ja) | 413 KB |
 | `cosyvoice3-s3tok-f16.gguf` | F16 speech_tokenizer_v3 — **byte-exact vs ONNX** | 462 MB |
 | `cosyvoice3-s3tok-q4_k.gguf` | Q4_K s3tok (FSQ proj stays F16); ~0.6% token drift — optional smaller variant | 139 MB |
 | `cosyvoice3-campplus-f16.gguf` | F16 CAMPPlus 192-D speaker encoder | 13 MB |
@@ -115,9 +115,23 @@ positive value to override.
 
 ### Voices
 
-Today the repo ships one baked voice: `zero_shot` (the upstream
-`asset/zero_shot_prompt.wav` clip, ~3.5 s of Mandarin). More voices
-can be baked with the converter in the CrispASR tree:
+`cosyvoice3-voices.gguf` ships a small multilingual voice bank — pass
+the name to `--voice`:
+
+| `--voice` | Language | Prompt source |
+|---|---|---|
+| `zero_shot` | Mandarin | upstream `asset/zero_shot_prompt.wav` (~3.5 s) |
+| `fleurs-en` | English | FLEURS en (CC BY 4.0) |
+| `fleurs-de` | German | FLEURS de (CC BY 4.0) |
+| `fleurs-zh` | Mandarin | FLEURS zh (CC BY 4.0) |
+| `fleurs-ja` | Japanese | FLEURS ja (CC BY 4.0) |
+
+The `fleurs-*` prompts are ~4–6 s clips from Google's
+[FLEURS](https://huggingface.co/datasets/google/fleurs) corpus
+(CC BY 4.0), loudness-normalised before baking. CV3 clones the prompt's
+timbre *and* level, so quiet prompts yield quiet output — normalise your
+own prompt clips for a consistent level. More voices can be baked with
+the converter in the CrispASR tree:
 
 ```bash
 python models/convert-cosyvoice3-voices-to-gguf.py \
