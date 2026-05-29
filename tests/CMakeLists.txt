@@ -941,3 +941,12 @@ add_test(NAME benchmark-quick
 set_tests_properties(benchmark-quick PROPERTIES
     LABELS "benchmark"
     TIMEOUT 600)
+
+# ─── test-piper-tts — standalone Piper VITS TTS smoke test ─────────────────
+add_executable(test-piper-tts test-piper-tts.cpp)
+target_include_directories(test-piper-tts PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/ggml/include
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(test-piper-tts PRIVATE piper-tts)

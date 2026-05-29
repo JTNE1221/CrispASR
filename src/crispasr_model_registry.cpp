@@ -521,6 +521,11 @@ constexpr Entry k_registry[] = {
      "kokoro-voice-af_heart.gguf",
      "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-af_heart.gguf"},
 
+    // Piper — rhasspy/piper VITS TTS. 250+ community voices, 30+ languages.
+    // Bundled with en_US-lessac-medium F16 (30 MB). No auto-download yet
+    // (community voices hosted on rhasspy/piper, not HuggingFace GGUF).
+    {"piper", "piper-en_US-lessac-medium-f16.gguf", "", "~30 MB", nullptr, nullptr},
+
     // Text-LID — three families, one auto-routing dispatcher
     // (`src/text_lid_dispatch.cpp`). `lid-cld3` is the default for
     // `crispasr-lid -m auto` because it's the smallest (440 KB F16),

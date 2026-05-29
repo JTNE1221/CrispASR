@@ -40,6 +40,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_paraformer_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_sensevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxcpm2_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cosyvoice3_tts_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_piper_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -103,6 +104,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_indextts_backend();
     if (name == "kokoro" || name == "styletts2" || name == "styletts2-ljspeech" || name == "kokoro-tts")
         return crispasr_make_kokoro_backend();
+    if (name == "piper" || name == "piper-tts" || name == "piper-vits")
+        return crispasr_make_piper_backend();
     if (name == "voxcpm2-tts" || name == "voxcpm2" || name == "voxcpm" || name == "voxcpm2_tts")
         return crispasr_make_voxcpm2_tts_backend();
     if (name == "cosyvoice3" || name == "cosyvoice3-tts" || name == "cosyvoice3_tts" || name == "cv3" ||
@@ -176,6 +179,7 @@ std::vector<std::string> crispasr_list_backends() {
         "lahgtna-chatterbox",
         "indextts",
         "kokoro",
+        "piper",
         "voxcpm2-tts",
         "cosyvoice3-tts",
         "m2m100",

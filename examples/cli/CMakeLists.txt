@@ -33,6 +33,7 @@ add_executable(${TARGET}
     crispasr_backend_voxcpm2_tts.cpp
     crispasr_backend_cosyvoice3.cpp
     crispasr_backend_kokoro.cpp
+    crispasr_backend_piper.cpp
     crispasr_backend_m2m100.cpp
     crispasr_backend_t5.cpp
     crispasr_backend_glm_asr.cpp
@@ -250,6 +251,7 @@ target_link_libraries(${TARGET} PRIVATE
     chatterbox
     indextts
     kokoro
+    piper-tts
     voxcpm2_tts
     m2m100
     t5_translate

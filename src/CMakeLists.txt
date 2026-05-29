@@ -1010,6 +1010,29 @@ if(NOT CRISPASR_WITH_ESPEAK_NG STREQUAL "OFF")
 endif()
 
 # ---------------------------------------------------------------------------
+# piper-tts — rhasspy/piper VITS TTS (native ggml runtime)
+# ---------------------------------------------------------------------------
+add_library(piper-tts STATIC piper_tts.h piper_tts.cpp)
+set_target_properties(piper-tts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(piper-tts PUBLIC .)
+target_compile_features   (piper-tts PUBLIC cxx_std_17)
+target_link_libraries     (piper-tts PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(piper-tts PRIVATE -O3)
+endif()
+
+# Piper reuses the same espeak-ng integration as kokoro.
+if(_espeak_found)
+    target_compile_definitions(piper-tts PRIVATE CRISPASR_HAVE_ESPEAK_NG=1)
+    target_include_directories(piper-tts PRIVATE ${_espeak_include})
+    if(_espeak_libdir)
+        target_link_directories(piper-tts PUBLIC ${_espeak_libdir})
+    endif()
+    target_link_libraries(piper-tts PUBLIC ${_espeak_lib})
+    message(STATUS "piper-tts: libespeak-ng enabled")
+endif()
+
+# ---------------------------------------------------------------------------
 # firered-vad — FireRedVAD (DFSMN voice activity detection)
 # ---------------------------------------------------------------------------
 add_library(firered-vad STATIC firered_vad.h firered_vad.cpp)
@@ -1361,6 +1384,9 @@ if (TARGET cosyvoice3_tts)
 endif()
 if (TARGET kokoro)
     target_link_libraries(crispasr PUBLIC kokoro)
+endif()
+if (TARGET piper-tts)
+    target_link_libraries(crispasr PUBLIC piper-tts)
 endif()
 if (TARGET funasr)
     target_link_libraries(crispasr PUBLIC funasr)

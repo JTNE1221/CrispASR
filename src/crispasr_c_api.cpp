@@ -103,6 +103,10 @@
 #include "kokoro.h"
 #define CA_HAVE_KOKORO 1
 #endif
+#if __has_include("piper_tts.h")
+#include "piper_tts.h"
+#define CA_HAVE_PIPER 1
+#endif
 #if __has_include("chatterbox.h")
 #include "chatterbox.h"
 #define CA_HAVE_CHATTERBOX 1
