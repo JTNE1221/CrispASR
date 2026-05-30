@@ -1,6 +1,6 @@
 # Text-to-Speech (TTS)
 
-CrispASR ships **eight open-weights TTS engines** behind the same
+CrispASR ships **ten open-weights TTS engines** behind the same
 `crispasr` binary, each with a distinct voice / quality / footprint
 trade-off:
 
@@ -13,10 +13,12 @@ trade-off:
 | **`vibevoice-1.5b`** | Base VibeVoice TTS model with WAV cloning. | Yes (`VIBEVOICE_VOICE_AUDIO=<wav>` or `--voice <wav>`) | ~1.6 GB via `-m auto` |
 | **`orpheus`** | Llama-3.2-3B talker + SNAC 24 kHz codec. 8 baked English speakers; expressive output. Greedy loops — pass `--temperature 0.6`. | Preset names via `--voice tara/leah/...` | ~3.5 GB via `-m auto` (talker Q8 + 26 MB SNAC) |
 | **`chatterbox`** | T3 AR + S3Gen flow-matching + HiFTGenerator. Built-in voice baked into the T3 GGUF; clones via a baked voice GGUF (see workflow below). EN/AR/DE variants share runtime. | Yes (`--voice <voice.gguf>`, baked from a WAV with `models/bake-chatterbox-voice-from-wav.py`) | ~880 MB via `-m auto` (T3 Q8 + S3Gen Q8) |
+| **`outetts`** | OuteTTS-0.3-1B: OLMo-1B LLM + WavTokenizer single-codebook VQ-GAN. Lightweight (1B params), CC BY 4.0 license. 24 kHz output. | Yes (`--voice <speaker.json>`, created with `tools/reference_backends/outetts_create_speaker.py`) | ~2.5 GB via `-m auto` (talker F16 + WavTokenizer decoder) |
+| **`f5-tts`** | F5-TTS v1 Base: 22-layer DiT flow-matching TTS + Vocos iSTFT vocoder. MIT license. High-quality zero-shot voice cloning from 3-15s reference audio. 24 kHz output, character-level tokenization. | Yes (`--voice <ref.wav> --ref-text "transcript"`) | ~1.3 GB via `-m auto` (single GGUF, DiT + Vocos) |
 | **`indextts`** | IndexTTS-1.5: GPT-2 AR (24L/1280d) mel-code generator + BigVGAN vocoder. Designed for Chinese+English. Zero-shot voice cloning from any reference WAV. | Yes (`--voice <ref.wav>`) | ~2.4 GB via `-m auto` (GPT F16 + BigVGAN F16) |
 | **`cosyvoice3-tts`** | Fun-CosyVoice3-0.5B-2512: Qwen2-0.5B AR speech-token LM + DiT-CFM (10-step Euler) + HiFT (NSF + iSTFT) @ 24 kHz. 9 languages + 18 Chinese dialects. Ships an 8-voice baked bank (`zero_shot` + `fleurs-{en,de,zh,ja,fr,es,ko}`). | Yes — baked-bank name via `--voice <name>`, **or** native arbitrary-WAV cloning via `--voice <ref.wav> --ref-text "..."` (ports speech_tokenizer_v3 + CAMPPlus + matcha mel to ggml; speech tokens byte-exact vs ONNX). | ~1.2 GB via `-m auto` (Q4_K LLM + Q8_0 flow + HiFT + s3tok + campplus + voices) |
 
-All eight write mono WAV via `--tts-output` (22 kHz for piper, 24 kHz for others).
+All nine write mono WAV via `--tts-output` (22 kHz for piper, 24 kHz for others).
 
 ### Reproducible / diverse generation (`--seed`)
 
@@ -41,7 +43,7 @@ each run can produce a different prosody or phrasing.
 ```
 
 The seed is wired through the sampling-capable TTS backends:
-qwen3-tts, chatterbox, vibevoice, orpheus, indextts, and voxcpm2. It
+qwen3-tts, chatterbox, vibevoice, orpheus, indextts, f5-tts, and voxcpm2. It
 also works for ASR backends with temperature sampling (parakeet,
 canary, cohere, qwen3-asr, voxtral4b, granite, glm-asr, kyutai-stt,
 moonshine). The server API accepts `"seed"` in the `/v1/audio/speech`
@@ -516,6 +518,34 @@ reference.
 [`cstr/kartoffelbox-turbo-GGUF`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) ·
 [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) ·
 [`cstr/indextts-1.5-GGUF`](https://huggingface.co/cstr/indextts-1.5-GGUF)
+
+## F5-TTS — DiT flow-matching voice cloning
+
+F5-TTS v1 Base is a DiT-based flow-matching TTS model with zero-shot
+voice cloning from 3-15s of reference audio. MIT license. Architecture:
+ConvNeXtV2 text encoder → 22-layer Diffusion Transformer with AdaLN-Zero
+→ 32-step Euler ODE solver with CFG → Vocos iSTFT vocoder. Single GGUF
+(~1.3 GB) containing both DiT and Vocos weights.
+
+```bash
+# Basic synthesis with voice cloning
+./build/bin/crispasr --backend f5-tts -m auto \
+    --voice samples/jfk.wav \
+    --ref-text "Ask not what your country can do for you" \
+    --tts "Hello, how are you today?" \
+    --tts-output hello.wav --seed 42
+
+# Without voice cloning (requires ref audio for now)
+# F5-TTS always needs a reference audio + transcript pair.
+```
+
+The `--ref-text` flag provides the transcript of the reference audio.
+This is required for F5-TTS (unlike indextts which conditions on audio
+only). The model uses character-level tokenization (2545 vocab, pinyin
+for Chinese). Output is 24 kHz mono PCM.
+
+**Model file:**
+[`cstr/f5-tts-GGUF`](https://huggingface.co/cstr/f5-tts-GGUF)
 
 ## IndexTTS — Chinese/English voice cloning
 
