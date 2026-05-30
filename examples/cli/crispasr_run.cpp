@@ -661,6 +661,10 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     const bool use_chunk_context = crispasr_chunk_context::should_use_chunk_context(
         effective_chunk_seconds, slices.size(), kChunkContextS, wants_vad, backend_ok);
 
+    // Per-slice progress counter for --print-progress on unified backends.
+    // Atomic so parallel workers can safely increment it.
+    std::atomic<size_t> slices_done{0};
+
     auto process_slice = [&](size_t i, CrispasrBackend& be) {
         const auto& sl = slices[i];
 
@@ -793,6 +797,15 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         }
 
         per_slice[i] = std::move(segs);
+
+        // Per-slice progress for unified backends (whisper uses its own
+        // encoder-level callback). Print to stderr so it doesn't mix
+        // with transcript output.
+        if (params.print_progress && slices.size() > 1) {
+            const size_t done = slices_done.fetch_add(1) + 1;
+            const int pct = (int)(done * 100 / slices.size());
+            fprintf(stderr, "crispasr: progress = %3d%% (%zu/%zu slices)\n", pct, done, slices.size());
+        }
     };
 
     const int n_workers = std::min(params.n_processors, (int32_t)slices.size());
@@ -2552,6 +2565,12 @@ int crispasr_run_backend(const whisper_params& params_in) {
             }
 
             per_slice.push_back(std::move(segs));
+
+            if (params.print_progress && slices.size() > 1) {
+                const int pct = (int)((i + 1) * 100 / slices.size());
+                fprintf(stderr, "crispasr: progress = %3d%% (%zu/%zu slices)\n",
+                        pct, i + 1, slices.size());
+            }
         }
         auto all_segs = merge_segments(std::move(per_slice), slices);
 

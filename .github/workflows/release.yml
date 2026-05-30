@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +64,7 @@ jobs:
   # CPU; users on Skylake-X / Ice Lake / Tiger Lake / Sapphire Rapids
   # / Zen 4 can opt into the faster build.
   build-linux-x86_64-avx512:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -109,7 +109,7 @@ jobs:
   # plus sm_120 virtual for future compat. Ships as a self-contained tarball
   # alongside crispasr-quantize so users can convert + run in one download.
   build-linux-x86_64-cuda:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CUDA_VERSION: "12.8.0"
     steps:
@@ -162,13 +162,66 @@ jobs:
           files: release/crispasr-linux-x86_64-cuda.tar.gz
           fail_on_unmatched_files: false
 
+  # ── Linux x86_64 CLI — Vulkan variant ──────────────────────────────────────
+  # GPU-accelerated CLI for systems without NVIDIA CUDA (AMD, Intel Arc,
+  # or NVIDIA via the Vulkan ICD). Useful as a fallback in environments
+  # where the CUDA release binary is incompatible. Ships libvulkan
+  # dynamically linked — the host must have a Vulkan-capable driver.
+  build-linux-x86_64-vulkan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install deps + Vulkan SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libopenblas-dev libvulkan-dev
+          sudo apt-get install -y glslc || \
+          sudo apt-get install -y glslang-tools || \
+          sudo apt-get install -y shaderc
+
+      - name: Build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_VULKAN=ON \
+            -DGGML_OPENBLAS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=ON \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli crispasr-quantize -j $(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p release/crispasr-linux-x86_64-vulkan
+          cp build/bin/crispasr release/crispasr-linux-x86_64-vulkan/
+          cp build/bin/crispasr-quantize release/crispasr-linux-x86_64-vulkan/
+          cd release && tar czf crispasr-linux-x86_64-vulkan.tar.gz crispasr-linux-x86_64-vulkan/
+          ls -lh crispasr-linux-x86_64-vulkan.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-linux-x86_64-vulkan
+          path: release/crispasr-linux-x86_64-vulkan.tar.gz
+
+      - name: Attach crispasr-linux-x86_64-vulkan.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-linux-x86_64-vulkan.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux ARM64 CLI binaries ─────────────────────────────────────────────────
-  # Mirror of build-linux on GitHub's ubuntu-24.04-arm runner. NEON is the
+  # Mirror of build-linux on GitHub's ubuntu-22.04-arm runner. NEON is the
   # native SIMD path on aarch64, so OpenBLAS adds little — keep it on (same
   # as x86_64) for consistent CPU code paths and easy A/B comparison;
   # `libopenblas-dev` has aarch64 binaries in Ubuntu's apt repo.
   build-linux-arm64:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -203,7 +256,7 @@ jobs:
           fail_on_unmatched_files: false
 
   build-python-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -279,7 +332,7 @@ jobs:
   # ggml backend libs + libcrispasr_helpers.so + $ORIGIN RPATH so the
   # tarball is self-contained.
   build-python-linux-arm64:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -457,7 +510,7 @@ jobs:
   # at the extract dir instead of cmake-building from source. CPU + OpenBLAS
   # only — GPU-aware variants (CUDA/Vulkan) are a separate matrix slot.
   build-libs-linux-x86_64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -524,7 +577,7 @@ jobs:
   # downstream consumers (crispasr-sys / Dart / wrapper bindings) pull
   # from. See that job's comment for the per-CPU rationale.
   build-libs-linux-x86_64-avx512:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -587,7 +640,7 @@ jobs:
   # GPU variants for arm64 (CUDA-Jetson, Vulkan-mobile) are out of scope
   # for this round — add separate jobs when there's user demand.
   build-libs-linux-arm64:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -814,7 +867,7 @@ jobs:
   # link against a libcrispasr-cuda tarball typically have CUDA
   # already.
   build-libs-linux-x86_64-cuda:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CUDA_VERSION: "12.8.0"
     steps:
@@ -834,7 +887,7 @@ jobs:
           # Jimver/cuda-toolkit's `sub-packages` prepends `cuda-` and
           # appends `-12-8`. That works for cuda-nvcc / cuda-cudart /
           # cuda-nvrtc / cuda-nvrtc-dev which all exist as that exact
-          # name in NVIDIA's Ubuntu 24.04 apt repo. cuBLAS is the
+          # name in NVIDIA's Ubuntu apt repo. cuBLAS is the
           # exception: NVIDIA publishes it as `libcublas-dev-12-8`
           # (lib- prefix, not cuda-), so it has to go through
           # `non-cuda-sub-packages` instead.

@@ -328,6 +328,22 @@ crispasr --backend parakeet -m parakeet.gguf --vad --flush-after 1 -osrt -f long
 | **Multilingual (31 langs) speech-LLM** | **fun-asr-mlt-nano**, **qwen3**, **omniasr-llm**, **gemma4-e2b** |
 | **Multilingual (50+ langs) + LID + emotion + audio-event in one pass** | **sensevoice** (encoder-only CTC, non-AR, 15× faster than Whisper-Large) |
 
+### CPU performance tips
+
+Audio-LLM backends (`qwen3`, `voxtral`, `granite`, `glm-asr`, etc.) run full
+transformer decoder stacks (28+ layers, 2048-dim) and are **dramatically slower
+on CPU** than encoder-only backends. On older dual-core hardware they can drop
+below 0.01× realtime. If you're on CPU-only hardware:
+
+- Prefer **moonshine** (16× RT), **fc-ctc** (10× RT), **parakeet** (2.9× RT),
+  or **whisper** for usable speeds.
+- Use `--flush-after 1` to see results as each VAD slice completes instead of
+  waiting for the entire file.
+- Use `-pp` / `--print-progress` for per-slice progress indicators on all
+  backends (unified backends show slice-level progress; whisper shows
+  encoder-level progress).
+- Quantize models to Q4_K or Q5_K to reduce memory and compute.
+
 ### Language detection for backends that don't do it natively
 
 Cohere, canary, granite, voxtral and voxtral4b need an explicit
