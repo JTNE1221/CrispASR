@@ -289,11 +289,30 @@ for name, D in [('text_embed',512),('time_embed',1024),('input_embed',1024),
 3. ~~**Validate ODE solver**~~ — **DONE** (mean cos>0.999 at step 31; min=0.972 from FP32 accum)
 4. ~~**Implement Vocos vocoder**~~ — **DONE** (Conv1d + 8× ConvNeXt + ISTFTHead with radix-2 FFT)
 5. ~~**Implement mel spectrogram**~~ — **DONE** (HTK mel filterbank + STFT + radix-2 FFT)
-6. **Performance**: move ConvNeXtV2 and ConvPosEmbed from CPU loops to ggml ops
+6. ~~**Performance**~~ — **DONE** (unified ggml graph: ggml_rope_ext + ggml_flash_attn_ext, 5x speedup)
 7. ~~**Wire CLI adapter**~~ — **DONE** (`examples/cli/crispasr_backend_f5_tts.cpp`, `--backend f5-tts`)
 8. ~~**Wire C API + model registry**~~ — **DONE** (8 insertion points in `crispasr_c_api.cpp` + registry entry)
 9. ~~**ASR roundtrip test**~~ — **DONE** (whisper transcribes "Hello world" correctly, both test harness and CLI)
-10. **Push to cohere remote**
+10. ~~**Push to cohere remote**~~ — **DONE** (all pushed, CI green)
+11. ~~**HF upload**~~ — **DONE** (`cstr/f5-tts-GGUF`, F16 953 MB)
+12. ~~**Quantization**~~ — **DONE** (F16 only; Q8_0/Q4_K fail due to 1408-pass ODE error compounding)
+
+### Quantization analysis
+
+Tested systematically with `crispasr-quantize` arch-specific rules:
+
+| Approach | Size | ASR result |
+|----------|------|------------|
+| Generic Q8_0 (all tensors quantized) | 371 MB | buzzing |
+| Mixed Q8_0 (conditioning F32, bulk Q8_0) | 773 MB | "Our power!" |
+| Mixed Q4_K (conditioning F32, bulk Q4_K) | 677 MB | "Our power!" |
+| DiT at F16, only text+vocos quantized | 929 MB | 24 MB savings, not worth it |
+| **F16 (recommended)** | **953 MB** | **"Hello world"** |
+
+Root cause: 22 layers × 32 ODE steps × 2 CFG = 1408 forward passes
+compound any weight quantization error catastrophically. Unlike AR
+models, flow-matching ODE feeds each step's output back recursively.
+The quantizer now skips F5-TTS entirely with a clear comment.
 
 ## Stale artifacts to ignore
 

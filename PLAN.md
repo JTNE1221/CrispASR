@@ -4420,7 +4420,14 @@ share the same frequency — a standard rotation. Original analysis in
 the handover was incorrect. See `handover-prompts/f5-tts-129-continuation.md`
 Bug 10 for details.
 
-Remaining: performance optimization (CPU loops → ggml ops), push to cohere.
+Performance: unified ggml graph (ggml_rope_ext + ggml_flash_attn_ext)
+gives 5x speedup (DiT forward ~2 min → ~24 sec per ODE step).
+
+Quantization: F16 (953 MB) is the only viable precision. Q8_0/Q4_K
+tested with arch-specific conditioning-pathway skip rules — still
+produce unintelligible output because QKV/FFN error compounds through
+1408 iterative forward passes. `crispasr-quantize` skips F5-TTS.
+HF repo `cstr/f5-tts-GGUF` has the F16 GGUF only.
 
 ---
 
