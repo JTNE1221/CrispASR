@@ -48,6 +48,9 @@ void cohere_set_temperature(struct cohere_context* ctx, float temperature, uint6
 void cohere_set_max_new_tokens(struct cohere_context* ctx, int max_new_tokens);
 void cohere_set_frequency_penalty(struct cohere_context* ctx, float frequency_penalty);
 
+// §90 beam-search width. n > 1 activates beam search; n <= 0 clamped to 1 (greedy).
+void cohere_set_beam_size(struct cohere_context* ctx, int n);
+
 // ---- Extended API: per-token confidence and timing ----
 
 // Per-token data returned by cohere_transcribe_ex().

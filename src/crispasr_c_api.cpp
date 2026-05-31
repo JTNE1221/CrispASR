@@ -1143,8 +1143,9 @@ struct crispasr_session {
     //   firered         — firered_asr_set_beam_size
     //   moonshine       — moonshine_set_beam_size
     //   omniasr-llm     — omniasr_set_beam_size
-    // Silent no-op for: canary, cohere (AED enc-dec — §61h deferred),
-    //   voxtral4b (streaming, no beam hook), CTC/NAR backends.
+    //   canary          — canary_set_beam_size (branched-KV AED beam)
+    //   cohere          — cohere_set_beam_size (branched-KV AED beam)
+    // Silent no-op for: voxtral4b (streaming, no beam hook), CTC/NAR backends.
     // Default 1 preserves greedy bit-identical output (no-regression contract).
     int beam_size = 1;
 
@@ -2834,6 +2835,8 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         // (default true).
         const std::string src = lang_set ? lang : (!s->source_language.empty() ? s->source_language : "en");
         const std::string tgt = !s->target_language.empty() ? s->target_language : src;
+        if (s->beam_size > 1)
+            canary_set_beam_size(s->canary_ctx, s->beam_size);
         canary_result* cr =
             canary_transcribe_ex(s->canary_ctx, pcm, n_samples, src.c_str(), tgt.c_str(), s->punctuation, 0);
         if (!cr) {
@@ -3057,6 +3060,8 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         const std::string src = lang_set ? lang : (!s->source_language.empty() ? s->source_language : "en");
         cohere_set_max_new_tokens(s->cohere_ctx, s->max_new_tokens);
         cohere_set_frequency_penalty(s->cohere_ctx, s->frequency_penalty);
+        if (s->beam_size > 1)
+            cohere_set_beam_size(s->cohere_ctx, s->beam_size);
         cohere_result* cr = cohere_transcribe_ex(s->cohere_ctx, pcm, n_samples, src.c_str(), 0);
         if (!cr) {
             delete r;
@@ -5659,12 +5664,12 @@ CA_EXPORT int crispasr_session_set_frequency_penalty(crispasr_session* s, float 
 }
 
 // §90 Sticky beam_size for beam-search sampling. > 1 activates beam search
-// on 9 backends wired in transcribe_single:
+// on 11 backends wired in transcribe_single:
 //   whisper (native BEAM_SEARCH), qwen3-asr / granite / voxtral (replay via
 //   core_beam_decode::run_with_probs), glm-asr / kyutai-stt / firered /
-//   moonshine / omniasr (per-backend _set_beam_size setter).
-// Silent no-op for canary, cohere (AED — §61h deferred), voxtral4b
-// (streaming), CTC/NAR backends.
+//   moonshine / omniasr (per-backend _set_beam_size setter),
+//   canary / cohere (branched-KV AED beam via _set_beam_size).
+// Silent no-op for voxtral4b (streaming), CTC/NAR backends.
 // Returns 0 on a non-null session; width <= 0 clamped to 1 (greedy).
 CA_EXPORT int crispasr_session_set_beam_size(crispasr_session* s, int n) {
     if (!s)

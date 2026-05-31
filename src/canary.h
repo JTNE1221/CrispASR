@@ -100,6 +100,9 @@ int canary_str_to_token(struct canary_context* ctx, const char* str);
 // path. Sticky on the context until the next call.
 void canary_set_temperature(struct canary_context* ctx, float temperature, uint64_t seed);
 
+// §90 beam-search width. n > 1 activates beam search; n <= 0 clamped to 1 (greedy).
+void canary_set_beam_size(struct canary_context* ctx, int n);
+
 // Hyper-parameters
 int canary_frame_dur_cs(struct canary_context* ctx);
 int canary_n_mels(struct canary_context* ctx);

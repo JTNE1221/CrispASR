@@ -2355,7 +2355,9 @@ class CrispasrSession {
   ///   firered         — firered_asr_set_beam_size
   ///   moonshine       — moonshine_set_beam_size
   ///   omniasr-llm     — omniasr_set_beam_size
-  /// Silent no-op for canary, cohere, voxtral4b, CTC/NAR backends.
+  ///   canary          — canary_set_beam_size (branched-KV AED beam)
+  ///   cohere          — cohere_set_beam_size (branched-KV AED beam)
+  /// Silent no-op for voxtral4b, CTC/NAR backends.
   /// `n` <= 0 or 1 reverts to greedy (default).
   ///
   /// Only available when built with beam-search support (symbol presence

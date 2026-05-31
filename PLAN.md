@@ -1962,7 +1962,7 @@ validation showing the model honours an instruction prompt before
 plumbing the toggle. Out of scope until a backend lands that's
 actually instruction-tuned.
 
-### 61h. Beam search for LLM family + enc-dec — MOSTLY DONE
+### 61h. Beam search for LLM family + enc-dec — DONE
 
 **Tier:** 3. **Effort:** ~300 LOC for shared decoder + 30 LOC per
 backend. **Cells:** 8 (LLM quartet + qwen3/granite/voxtral4b +
@@ -1980,7 +1980,8 @@ canary/cohere/moonshine via per-model loop).
 | granite* session-API beam | DONE — `run_with_probs` replay in `transcribe_single` (commit 0c24178e) |
 | voxtral session-API beam | DONE — `run_with_probs` via `run_voxtral_family` (commit 0c24178e) |
 | voxtral4b | ❌ N/A — streaming path, no beam hook |
-| canary/cohere encoder-decoder beam | DEFERRED — AED needs branched-KV or per-decoder beam loop |
+| canary beam | DONE — `run_with_probs_branched` (KV snap of kv_k/kv_v; cross-KV shared) |
+| cohere beam | DONE — `run_with_probs_branched` (KV snap of kv_k/kv_v; cross-KV shared) |
 
 **What landed (May 2026 follow-up).** The original entry deferred
 omniasr-llm / kyutai-stt / moonshine because `replay_fn` does
@@ -2010,13 +2011,10 @@ actually improved quality on JFK ("fellow Americans" vs greedy's
 "fellow-american"). omniasr-llm at `-bs 4` lands above the 60s
 "rough" gate but well within order-of-magnitude.
 
-**Still deferred and why.** The classic encoder-decoder backends
-(canary, cohere) need a beam path that reuses the cross-attention
-KV across all beams — either `run_with_probs_branched` with
-per-decoder save/restore callbacks, or a per-backend beam loop.
-voxtral4b stays out of scope (streaming API, no beam hook).
-qwen3-asr, granite*, and voxtral are now fully wired via §90
-(commit 0c24178e).
+**All backends now wired.** canary and cohere use
+`run_with_probs_branched` with per-backend KV save/restore callbacks
+(snapshot monolithic `kv_k`/`kv_v` tensors; cross-attention KV shared
+across beams). voxtral4b stays out of scope (streaming API, no beam hook).
 
 ### 61i. Flash attention for fc-ctc — DEFERRED
 

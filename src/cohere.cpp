@@ -521,6 +521,9 @@ struct cohere_context {
     float frequency_penalty = 0.0f;
     int max_new_tokens = 0;
     uint64_t decode_seed = 0;
+
+    // §90 beam-search width. 1 = greedy (default).
+    int beam_size = 1;
 };
 
 static void cohere_log_tensor(const char* name, const struct ggml_tensor* t);
@@ -1036,6 +1039,7 @@ static ggml_tensor* ct_get_tensor_fmt(cohere_model& model, const char* fmt, int 
 // ---------------------------------------------------------------------------
 
 #include "core/attention.h"
+#include "core/beam_decode.h"
 #include "core/audio_chunking.h"
 #include "core/gguf_loader.h"
 
@@ -2466,95 +2470,157 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
         ggml_backend_sched_reserve(ctx->ggml_alloc, gf_max);
     }
 
-    // Greedy / temperature-sampled decode
     std::vector<int> generated;
     std::vector<float> gen_probs;
-    const bool sampling = ctx->decode_temperature > 0.0f;
-    std::mt19937_64 rng(ctx->decode_seed != 0 ? ctx->decode_seed : (uint64_t)std::random_device{}());
-    std::vector<int> token_counts(ctx->frequency_penalty > 0.0f ? (size_t)hp.vocab_size : 0);
-    std::vector<float> adjusted_logits;
 
-    for (int step = 0; step < max_gen; step++) {
+    // §90 beam search — run_with_probs_branched when beam_size > 1.
+    // Cross-attention KV (cross_kv_k/v) is shared across beams; only self-attention
+    // KV (kv_k/kv_v) is snapshotted per beam.
+    if (ctx->beam_size > 1) {
+        struct cohere_kv_snap {
+            std::vector<uint8_t> k_data;
+            std::vector<uint8_t> v_data;
+        };
+
+        auto save_fn = [](cohere_context* c) -> cohere_kv_snap* {
+            auto* s = new cohere_kv_snap();
+            size_t kb = ggml_nbytes(c->kv_k);
+            size_t vb = ggml_nbytes(c->kv_v);
+            s->k_data.resize(kb);
+            s->v_data.resize(vb);
+            ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
+            ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
+            return s;
+        };
+
+        auto restore_fn = [](cohere_context* c, cohere_kv_snap* s) {
+            ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
+            ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
+        };
+
+        auto snap_free_fn = [](cohere_kv_snap* s) { delete s; };
+
+        // Capture T_enc so step_fn can pass it to cohere_decode_step.
+        const int beam_T_enc = T_enc;
+        auto step_fn = [beam_T_enc](cohere_context* c, int32_t tok, int n_past) -> float* {
+            auto lg = cohere_decode_step(c, beam_T_enc, &tok, 1, n_past);
+            if (lg.empty())
+                return nullptr;
+            float* out = (float*)std::malloc(lg.size() * sizeof(float));
+            std::memcpy(out, lg.data(), lg.size() * sizeof(float));
+            return out;
+        };
+
         const int vocab = hp.vocab_size;
-        const float* last_logits = (step == 0) ? logits.data() + ((int)prompt.size() - 1) * vocab : logits.data();
-        const float* pick_logits = last_logits;
-        if (ctx->frequency_penalty > 0.0f && !token_counts.empty()) {
-            adjusted_logits.assign(last_logits, last_logits + vocab);
-            for (int v = 0; v < vocab; v++) {
-                if (token_counts[(size_t)v] > 0)
-                    adjusted_logits[(size_t)v] -= ctx->frequency_penalty * (float)token_counts[(size_t)v];
-            }
-            pick_logits = adjusted_logits.data();
+        // Use only the last-position logits from the prefill
+        const float* last_logits = logits.data() + ((int)prompt.size() - 1) * vocab;
+
+        core_beam_decode::Config bcfg;
+        bcfg.max_new_tokens = max_gen;
+        bcfg.eos_id = eos_id;
+        bcfg.vocab_size = vocab;
+        bcfg.beam_size = ctx->beam_size;
+        bcfg.prompt_len = (int)prompt.size();
+
+        auto br = core_beam_decode::run_with_probs_branched(ctx, last_logits, save_fn, restore_fn, snap_free_fn,
+                                                            step_fn, bcfg);
+
+        // Strip EOS if present at the end
+        for (int i = 0; i < (int)br.tokens.size(); i++) {
+            if (br.tokens[i] == eos_id)
+                break;
+            generated.push_back(br.tokens[i]);
+            gen_probs.push_back(br.probs[i]);
         }
+    } else {
+        // Greedy / temperature-sampled decode
+        const bool sampling = ctx->decode_temperature > 0.0f;
+        std::mt19937_64 rng(ctx->decode_seed != 0 ? ctx->decode_seed : (uint64_t)std::random_device{}());
+        std::vector<int> token_counts(ctx->frequency_penalty > 0.0f ? (size_t)hp.vocab_size : 0);
+        std::vector<float> adjusted_logits;
 
-        int next_tok = (int)(std::max_element(pick_logits, pick_logits + vocab) - pick_logits);
-
-        // Numerically-stable softmax probability of (initially) the
-        // argmax token. We compute the partition function once per
-        // step regardless of which path we take, because we need
-        // the per-token probability for the gen_probs vector either
-        // way.
-        float max_l = pick_logits[next_tok];
-        double sum_e = 0.0;
-        for (int v = 0; v < vocab; v++)
-            sum_e += std::exp((double)(pick_logits[v] - max_l));
-        float tok_p = (float)(1.0 / sum_e);
-
-        if (sampling) {
-            // Re-do the partition with logits/T instead of logits.
-            const float inv_t = 1.0f / ctx->decode_temperature;
-            float max_lt = pick_logits[0] * inv_t;
-            for (int v = 1; v < vocab; v++) {
-                const float s = pick_logits[v] * inv_t;
-                if (s > max_lt)
-                    max_lt = s;
-            }
-            std::vector<double> pr((size_t)vocab);
-            double sum_t = 0.0;
-            for (int v = 0; v < vocab; v++) {
-                const double e = std::exp((double)(pick_logits[v] * inv_t - max_lt));
-                pr[(size_t)v] = e;
-                sum_t += e;
-            }
-            if (sum_t > 0.0) {
-                std::uniform_real_distribution<double> unif(0.0, sum_t);
-                const double rr = unif(rng);
-                double acc = 0.0;
+        for (int step = 0; step < max_gen; step++) {
+            const int vocab = hp.vocab_size;
+            const float* last_logits = (step == 0) ? logits.data() + ((int)prompt.size() - 1) * vocab : logits.data();
+            const float* pick_logits = last_logits;
+            if (ctx->frequency_penalty > 0.0f && !token_counts.empty()) {
+                adjusted_logits.assign(last_logits, last_logits + vocab);
                 for (int v = 0; v < vocab; v++) {
-                    acc += pr[(size_t)v];
-                    if (rr <= acc) {
-                        next_tok = v;
-                        break;
+                    if (token_counts[(size_t)v] > 0)
+                        adjusted_logits[(size_t)v] -= ctx->frequency_penalty * (float)token_counts[(size_t)v];
+                }
+                pick_logits = adjusted_logits.data();
+            }
+
+            int next_tok = (int)(std::max_element(pick_logits, pick_logits + vocab) - pick_logits);
+
+            // Numerically-stable softmax probability of (initially) the
+            // argmax token. We compute the partition function once per
+            // step regardless of which path we take, because we need
+            // the per-token probability for the gen_probs vector either
+            // way.
+            float max_l = pick_logits[next_tok];
+            double sum_e = 0.0;
+            for (int v = 0; v < vocab; v++)
+                sum_e += std::exp((double)(pick_logits[v] - max_l));
+            float tok_p = (float)(1.0 / sum_e);
+
+            if (sampling) {
+                // Re-do the partition with logits/T instead of logits.
+                const float inv_t = 1.0f / ctx->decode_temperature;
+                float max_lt = pick_logits[0] * inv_t;
+                for (int v = 1; v < vocab; v++) {
+                    const float s = pick_logits[v] * inv_t;
+                    if (s > max_lt)
+                        max_lt = s;
+                }
+                std::vector<double> pr((size_t)vocab);
+                double sum_t = 0.0;
+                for (int v = 0; v < vocab; v++) {
+                    const double e = std::exp((double)(pick_logits[v] * inv_t - max_lt));
+                    pr[(size_t)v] = e;
+                    sum_t += e;
+                }
+                if (sum_t > 0.0) {
+                    std::uniform_real_distribution<double> unif(0.0, sum_t);
+                    const double rr = unif(rng);
+                    double acc = 0.0;
+                    for (int v = 0; v < vocab; v++) {
+                        acc += pr[(size_t)v];
+                        if (rr <= acc) {
+                            next_tok = v;
+                            break;
+                        }
                     }
+                    // Recompute the unsoftened probability of the
+                    // newly-picked token so the JSON-full output reflects
+                    // the model's actual confidence in it, not the
+                    // temperature-warped value.
+                    max_l = pick_logits[next_tok];
+                    sum_e = 0.0;
+                    for (int v = 0; v < vocab; v++) {
+                        sum_e += std::exp((double)(pick_logits[v] - max_l));
+                    }
+                    tok_p = (float)(1.0 / sum_e);
                 }
-                // Recompute the unsoftened probability of the
-                // newly-picked token so the JSON-full output reflects
-                // the model's actual confidence in it, not the
-                // temperature-warped value.
-                max_l = pick_logits[next_tok];
-                sum_e = 0.0;
-                for (int v = 0; v < vocab; v++) {
-                    sum_e += std::exp((double)(pick_logits[v] - max_l));
-                }
-                tok_p = (float)(1.0 / sum_e);
             }
+
+            COHERE_VLOG2(vb, "cohere: step %3d  tok=%5d  p=%.3f  %s\n", step, next_tok, tok_p,
+                         (next_tok >= 0 && next_tok < (int)voc.id_to_token.size()) ? voc.id_to_token[next_tok].c_str()
+                                                                                   : "?");
+            if (next_tok == eos_id || next_tok < 0)
+                break;
+
+            generated.push_back(next_tok);
+            gen_probs.push_back(tok_p);
+            if (next_tok >= 0 && next_tok < (int)token_counts.size())
+                token_counts[(size_t)next_tok]++;
+            offset++;
+
+            logits = cohere_decode_step(ctx, T_enc, &next_tok, 1, offset - 1);
+            perf.n_dec_steps++;
         }
-
-        COHERE_VLOG2(vb, "cohere: step %3d  tok=%5d  p=%.3f  %s\n", step, next_tok, tok_p,
-                     (next_tok >= 0 && next_tok < (int)voc.id_to_token.size()) ? voc.id_to_token[next_tok].c_str()
-                                                                               : "?");
-        if (next_tok == eos_id || next_tok < 0)
-            break;
-
-        generated.push_back(next_tok);
-        gen_probs.push_back(tok_p);
-        if (next_tok >= 0 && next_tok < (int)token_counts.size())
-            token_counts[(size_t)next_tok]++;
-        offset++;
-
-        logits = cohere_decode_step(ctx, T_enc, &next_tok, 1, offset - 1);
-        perf.n_dec_steps++;
-    }
+    } // end else (greedy path)
 
     // Snapshot memory
     perf.mem_model_buf = ctx->model.buf ? ggml_backend_buffer_get_size(ctx->model.buf) : 0;
@@ -2940,6 +3006,12 @@ void cohere_set_frequency_penalty(struct cohere_context* ctx, float frequency_pe
     if (!ctx)
         return;
     ctx->frequency_penalty = frequency_penalty > 0.0f ? frequency_penalty : 0.0f;
+}
+
+void cohere_set_beam_size(struct cohere_context* ctx, int n) {
+    if (!ctx)
+        return;
+    ctx->beam_size = n > 0 ? n : 1;
 }
 
 char* cohere_transcribe(struct cohere_context* ctx, const float* samples, int n_samples, const char* lang) {
