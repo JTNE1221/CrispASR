@@ -538,6 +538,19 @@ def main():
     else:
         print("  WARN: no tokenizer.json found", file=sys.stderr)
 
+    # --- Collect RVQ cluster_usage for embed_sum normalization ---
+    # The HF transformers format stores embed_sum (unnormalized) + cluster_usage.
+    # Actual embedding = embed_sum / cluster_usage. We need to normalize.
+    rvq_cluster_usage = {}
+    for hf_name in sorted(name_to_idx.keys()):
+        if hf_name.endswith(".cluster_usage"):
+            cu = handles[name_to_idx[hf_name]].get_tensor(hf_name).to(torch.float32).numpy()
+            # Map the cluster_usage key to the corresponding embed_sum key
+            embed_sum_key = hf_name.replace(".cluster_usage", ".embed_sum")
+            rvq_cluster_usage[embed_sum_key] = cu
+            print(f"  [RVQ] cluster_usage for {hf_name}: shape={cu.shape}, "
+                  f"mean={cu.mean():.2f}, min={cu.min():.2f}")
+
     # --- Map and write tensors ---
     n_mapped = [0]
     n_skipped = 0
@@ -551,10 +564,19 @@ def main():
 
         t = handles[name_to_idx[hf_name]].get_tensor(hf_name).to(torch.float32).numpy()
 
-        # Handle RVQ embed_sum: the transformers-format stores embed_sum
-        # which needs to be normalized by cluster_usage to get actual embeddings.
-        # But for Mimi the codebook is stored as embed_sum already being the
-        # actual embedding (EMA-trained). We store as-is.
+        # Normalize RVQ embed_sum by cluster_usage to get actual embeddings.
+        # embed_sum has shape (codebook_dim, num_codes) = (256, 2048).
+        # cluster_usage has shape (num_codes,) = (2048,).
+        # actual_embedding = embed_sum / cluster_usage[None, :]
+        if hf_name in rvq_cluster_usage:
+            cu = rvq_cluster_usage[hf_name]
+            # Avoid division by zero
+            cu = np.maximum(cu, 1.0)
+            # embed_sum shape is (num_codes, codebook_dim) = (2048, 256)
+            # cluster_usage shape is (num_codes,) = (2048,)
+            # actual_embedding = embed_sum / cluster_usage[:, None]
+            t = t / cu[:, None]
+            print(f"  [RVQ] normalized {hf_name} by cluster_usage")
 
         # Separate Q/K/V for Mimi transformer -> collect for fusion
         if ".attn.q_w" in gn or ".attn.k_w" in gn or ".attn.v_w" in gn:
