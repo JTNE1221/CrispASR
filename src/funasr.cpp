@@ -327,7 +327,7 @@ static void compute_encoder_pe(funasr_model& m, int max_T) {
 }
 
 static bool funasr_load_model(funasr_model& model, funasr_vocab& vocab, const char* path, ggml_backend_t backend,
-                              ggml_backend_t /*backend_cpu*/) {
+                              ggml_backend_t cpu_backend) {
     // Pass 1: hparams + vocab
     {
         gguf_context* gctx = core_gguf::open_metadata(path);
