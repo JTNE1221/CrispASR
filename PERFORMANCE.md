@@ -117,6 +117,71 @@ for the implementation write-up.
 
 ---
 
+## Kaggle P100 GPU — 2026-05-31
+
+Platform: Tesla P100-PCIE (16 GB VRAM), 4 CPU threads, CUDA **sm_60**
+(auto-detected — the kernel pins `CMAKE_CUDA_ARCHITECTURES` from
+`nvidia-smi compute_cap`, so the build is correct whether the box is a
+T4/P100/A100/L4). Commit: `7bc3ef5b`. Run via
+`tools/kaggle-benchmark-all-backends.py` (now on the shared
+`tools/kaggle/kaggle_harness.py`). **27 backends tested, 26 pass.**
+
+First run to cover all six newly-registered ASR backends (marked †):
+sensevoice, paraformer, mega-asr, granite-4.1, funasr, mimo-asr.
+
+### Speed ranking (11.0 s JFK, Q4_K unless noted, greedy)
+
+| Rank | Backend | RTx | Time | WER | Architecture |
+|---|---|---|---|---|---|
+| 1 | SenseVoice Small † | **19.8x** | 0.6s | 0.0% | Encoder (multitask) |
+| 2 | FastConformer CTC | 8.9x | 1.2s | 0.0% | Encoder-CTC |
+| 3 | Moonshine Tiny | 8.6x | 1.3s | 9.1% | Encoder-Decoder |
+| 4 | Canary 1B | 8.0x | 1.4s | 9.1% | Encoder-AED |
+| 5 | Data2Vec Base | 7.5x | 1.5s | 4.5% | Encoder-CTC |
+| 6 | OmniASR CTC 1B | 7.0x | 1.6s | 9.1% | Encoder-CTC |
+| 7 | HuBERT Large | 6.9x | 1.6s | 0.0% | Encoder-CTC |
+| 8 | Wav2Vec2 XLSR-EN | 6.9x | 1.6s | 0.0% | Encoder-CTC |
+| 9 | Cohere Transcribe | 6.6x | 1.7s | 0.0% | Encoder-AED |
+| 10 | Parakeet TDT 0.6B | 6.0x | 1.8s | 0.0% | Encoder-TDT |
+| 11 | Whisper base | 5.6x | 2.0s | 0.0% | Encoder-Decoder |
+| 12 | Paraformer-zh NAR † | 5.0x | 2.2s | 0.0% | Encoder (NAR) |
+| 13 | GLM ASR Nano | 4.7x | 2.4s | 0.0% | Encoder-LLM |
+| 14 | Qwen3 ASR 0.6B | 4.4x | 2.5s | 0.0% | Encoder-LLM |
+| 15 | Moonshine Streaming Tiny | 2.9x | 3.8s | 0.0% | Encoder-Decoder |
+| 16 | Mega-ASR 1.7B † | 2.9x | 3.9s | 0.0% | Encoder-LLM (qwen3) |
+| 17 | Granite Speech 1B | 2.8x | 3.9s | 0.0% | Encoder-LLM |
+| 18 | Granite Speech 4.1 2B † | 2.7x | 4.1s | 0.0% | Encoder-LLM |
+| 19 | Voxtral Mini 3B | 2.5x | 4.4s | 0.0% | Encoder-LLM |
+| 20 | OmniASR LLM 300M | 1.6x | 7.0s | 4.5% | Encoder-LLM |
+| 21 | Kyutai STT 1B | 1.5x | 7.5s | 0.0% | Encoder-AED |
+| 22 | VibeVoice ASR | 1.3x | 8.6s | 4.5% | Encoder-LLM |
+| 23 | Voxtral 4B Realtime | 0.9x | 11.9s | 0.0% | Encoder-LLM |
+| 24 | Gemma-4-E2B 2.3B | 0.8x | 13.6s | 0.0% | Encoder-LLM |
+| 25 | FireRed ASR2 AED | 0.6x | 19.2s | 0.0% | Encoder-AED |
+| 26 | MiMo-ASR † | 0.3x | 38.0s | 0.0% | Encoder-LLM (CPU-forced, #115) |
+| — | **funasr** † | 6.0x | 1.8s | **100% FAIL** | Encoder-LLM (qwen3 dec) |
+
+### Notes
+
+- **funasr is the lone failure.** It runs (6.0× RT, no crash) but emits a
+  wrong transcript (WER 100%) — a real GPU-path backend bug, not a
+  harness/quant issue. It's F16-only (~1.9 GB) and was flagged earlier
+  for a Blackwell-CUDA `!`-loop (guard `f72d3db1`); this confirms the bad
+  output reproduces on **P100 / sm_60** too. Needs a GPU-path fix.
+- **SenseVoice debuts at #1** (19.8× RT, 0% WER) — encoder-only multitask
+  model, fastest backend now measured.
+- **mimo-asr** runs at 0.3× (38 s) because PLAN #115 forces it to CPU; it
+  transcribes correctly. The 420 s timeout budgeted for it was ample.
+- P100 (sm_60, ~9.3 TFLOPS fp32) lands the LLM-AR tail a touch faster than
+  the 2026-04-26 T4 run (e.g. voxtral-3B 2.5× vs 2.4×, granite-1B 2.8× vs
+  1.7×); CTC/encoder backends are comparable. Cross-run deltas are also
+  affected by Q4_K model refreshes since April.
+- Two non-fatal HF pre-download `401`s (the Kaggle Secrets API was
+  flaking, so no HF token) fell back to the C++ downloader; all models are
+  public `cstr/*` so downloads still succeeded.
+
+---
+
 ## Kaggle T4 GPU — 2026-04-26
 
 Platform: 2x Tesla T4 (15 GB VRAM each), 4 CPU threads, CUDA.
