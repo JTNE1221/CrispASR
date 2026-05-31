@@ -1068,25 +1068,456 @@ extern "C" float* csm_tts_synthesize_with_reference(struct csm_tts_context* ctx,
     // Collected audio codes: [n_generated_frames][audio_num_codebooks]
     std::vector<std::vector<int32_t>> all_codes;
 
-    // TODO: implement backbone AR loop + depth decoder loop
-    // This is the core inference loop that needs to:
-    // a) Build backbone graph for prefill + step-by-step AR decode
-    // b) For each generated frame, run depth decoder to fill codebooks 1..31
-    // c) Check for EOS (all codebooks == codebook_eos_token_id)
+    // -------------------------------------------------------------------
+    // Backbone AR loop: generates codebook-0 tokens autoregressively.
+    // -------------------------------------------------------------------
+    // The backbone input at each frame is:
+    //   sum of audio embeddings for all 32 codebooks (padded for text frames)
+    //   + text embedding (padded for audio frames)
     //
-    // For now, return nullptr to indicate the skeleton is in place
-    // but the inference loop is not yet wired up.
+    // During text-prompt frames: audio slots are padded, text is real.
+    // During generation: text is the special audio_token_id, audio comes
+    // from previously generated codebook tokens.
+    // -------------------------------------------------------------------
 
-    fprintf(stderr, "csm_tts: backbone AR loop not yet implemented (skeleton only)\n");
+    // Clear backbone KV cache
+    ggml_backend_buffer_clear(ctx->bb_kv_buf, 0);
 
-    // 3. Mimi decode: codes -> PCM
-    // This part IS wired up as a skeleton:
+    int bb_d = (int)hp.bb_d_model;
+    int avocab = (int)hp.audio_vocab_size;
+    int n_cb = (int)hp.audio_num_codebooks;
+
+    // Read backbone embedding tables to CPU for embedding lookups
+    std::vector<float> audio_embd_data((size_t)bb_d * avocab * n_cb);
+    ggml_backend_tensor_get(m.bb_audio_embd_w, audio_embd_data.data(), 0, audio_embd_data.size() * sizeof(float));
+    std::vector<float> text_embd_data((size_t)bb_d * hp.text_vocab_size);
+    ggml_backend_tensor_get(m.bb_text_embd_w, text_embd_data.data(), 0, text_embd_data.size() * sizeof(float));
+
+    // Helper: embed a single token from the text vocab
+    auto embed_text = [&](int32_t tok_id, float* out) {
+        if (tok_id < 0 || tok_id >= (int)hp.text_vocab_size) {
+            std::memset(out, 0, (size_t)bb_d * sizeof(float));
+            return;
+        }
+        std::memcpy(out, &text_embd_data[(size_t)tok_id * bb_d], (size_t)bb_d * sizeof(float));
+    };
+
+    // Helper: embed a single token from audio codebook cb_idx
+    auto embed_audio = [&](int cb_idx, int32_t tok_id, float* out) {
+        if (tok_id < 0 || tok_id >= avocab) {
+            std::memset(out, 0, (size_t)bb_d * sizeof(float));
+            return;
+        }
+        size_t offset = ((size_t)cb_idx * avocab + tok_id) * bb_d;
+        std::memcpy(out, &audio_embd_data[offset], (size_t)bb_d * sizeof(float));
+    };
+
+    // Build a single backbone embedding frame:
+    //   For text frames: text_embd(text_token) + sum of audio_embd(pad) for all codebooks
+    //   For audio frames: text_embd(audio_token_id) + sum of audio_embd(cb_i) for all codebooks
+    auto build_frame_embedding = [&](int32_t text_tok, const int32_t* audio_tokens, float* out) {
+        std::memset(out, 0, (size_t)bb_d * sizeof(float));
+        // Text contribution
+        std::vector<float> tmp(bb_d);
+        embed_text(text_tok, tmp.data());
+        for (int d = 0; d < bb_d; d++) {
+            out[d] += tmp[d];
+        }
+        // Audio contribution (sum over all codebooks)
+        for (int cb = 0; cb < n_cb; cb++) {
+            embed_audio(cb, audio_tokens[cb], tmp.data());
+            for (int d = 0; d < bb_d; d++) {
+                out[d] += tmp[d];
+            }
+        }
+    };
+
+    // --- Build backbone transformer graph ---
+    auto build_backbone_graph = [&](int n_past, int T) -> ggml_cgraph* {
+        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+        ggml_context* ctx0 = ggml_init(ip);
+        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+        int Lk = n_past + T;
+        ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, bb_d, T);
+        ggml_set_name(embeds, "bb_embeds");
+        ggml_set_input(embeds);
+        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+        ggml_set_name(positions, "bb_positions");
+        ggml_set_input(positions);
+        ggml_tensor* causal_mask = nullptr;
+        if (T > 1) {
+            causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
+            ggml_set_name(causal_mask, "bb_mask");
+            ggml_set_input(causal_mask);
+        }
+
+        const core_attn::KvSelfAttnParams kvp = {
+            /*n_heads*/ (int)hp.bb_n_heads,
+            /*n_kv_heads*/ (int)hp.bb_n_kv_heads,
+            /*head_dim*/ (int)hp.bb_head_dim,
+            /*n_kv_grp*/ (int)(hp.bb_n_heads / hp.bb_n_kv_heads),
+            /*n_ctx_orig*/ (int)hp.bb_max_pos,
+            /*rope_theta*/ hp.bb_rope_theta,
+            /*rope_beta_fast*/ 0.0f,
+            /*rope_beta_slow*/ 0.0f,
+            /*attn_scale*/ 1.0f / std::sqrt((float)hp.bb_head_dim),
+            /*qk_norm_eps*/ 0.0f,
+            /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
+        };
+
+        ggml_tensor* cur = embeds;
+        for (uint32_t il = 0; il < hp.bb_n_layers; il++) {
+            const auto& blk = m.bb_layers[il];
+            ggml_tensor* residual = cur;
+
+            // Pre-attn RMSNorm
+            ggml_tensor* x = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+            x = ggml_mul(ctx0, x, blk.attn_norm_w);
+
+            // Self-attention with KV cache
+            ggml_tensor* attn = core_attn::kv_self_attn(
+                ctx0, gf, x, blk.attn_q_w, blk.attn_k_w, blk.attn_v_w, blk.attn_output_w, nullptr, nullptr, positions,
+                (T == 1) ? nullptr : causal_mask, ctx->bb_kv_k, ctx->bb_kv_v, (int)il, n_past, kvp);
+            cur = ggml_add(ctx0, residual, attn);
+
+            // FFN
+            residual = cur;
+            x = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+            x = ggml_mul(ctx0, x, blk.ffn_norm_w);
+            ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, blk.ffn_gate_w, blk.ffn_up_w, blk.ffn_down_w);
+            cur = ggml_add(ctx0, residual, mlp);
+        }
+
+        // Final norm + codebook-0 head
+        cur = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+        cur = ggml_mul(ctx0, cur, m.bb_output_norm_w);
+        // Take only last position for logits
+        if (T > 1) {
+            cur = ggml_view_2d(ctx0, cur, bb_d, 1, cur->nb[1], (size_t)(T - 1) * cur->nb[1]);
+        }
+        // Also output the hidden state for depth decoder
+        ggml_set_name(cur, "bb_hidden");
+        ggml_build_forward_expand(gf, cur);
+
+        ggml_tensor* logits = ggml_mul_mat(ctx0, m.bb_codebook0_head_w, cur);
+        ggml_set_name(logits, "bb_logits");
+        ggml_build_forward_expand(gf, logits);
+
+        ggml_free(ctx0);
+        return gf;
+    };
+
+    // --- Build depth decoder graph ---
+    auto build_depth_graph = [&](int T) -> ggml_cgraph* {
+        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+        ggml_context* ctx0 = ggml_init(ip);
+        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
+
+        int dd_d = (int)hp.dd_d_model;
+        ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dd_d, T);
+        ggml_set_name(embeds, "dd_embeds");
+        ggml_set_input(embeds);
+        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+        ggml_set_name(positions, "dd_positions");
+        ggml_set_input(positions);
+        ggml_tensor* causal_mask = nullptr;
+        if (T > 1) {
+            causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T, T);
+            ggml_set_name(causal_mask, "dd_mask");
+            ggml_set_input(causal_mask);
+        }
+
+        const core_attn::KvSelfAttnParams kvp = {
+            /*n_heads*/ (int)hp.dd_n_heads,
+            /*n_kv_heads*/ (int)hp.dd_n_kv_heads,
+            /*head_dim*/ (int)hp.dd_head_dim,
+            /*n_kv_grp*/ (int)(hp.dd_n_heads / hp.dd_n_kv_heads),
+            /*n_ctx_orig*/ (int)(hp.audio_num_codebooks + 1),
+            /*rope_theta*/ hp.bb_rope_theta,
+            /*rope_beta_fast*/ 0.0f,
+            /*rope_beta_slow*/ 0.0f,
+            /*attn_scale*/ 1.0f / std::sqrt((float)hp.dd_head_dim),
+            /*qk_norm_eps*/ 0.0f,
+            /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
+        };
+
+        ggml_tensor* cur = embeds;
+        for (uint32_t il = 0; il < hp.dd_n_layers; il++) {
+            const auto& blk = m.dd_layers[il];
+            ggml_tensor* residual = cur;
+
+            // Pre-attn RMSNorm
+            ggml_tensor* x = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+            x = ggml_mul(ctx0, x, blk.attn_norm_w);
+
+            ggml_tensor* attn = core_attn::kv_self_attn(
+                ctx0, gf, x, blk.attn_q_w, blk.attn_k_w, blk.attn_v_w, blk.attn_output_w, nullptr, nullptr, positions,
+                (T == 1) ? nullptr : causal_mask, ctx->dd_kv_k, ctx->dd_kv_v, (int)il, 0, kvp);
+            cur = ggml_add(ctx0, residual, attn);
+
+            // FFN
+            residual = cur;
+            x = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+            x = ggml_mul(ctx0, x, blk.ffn_norm_w);
+            ggml_tensor* mlp = core_ffn::swiglu(ctx0, x, blk.ffn_gate_w, blk.ffn_up_w, blk.ffn_down_w);
+            cur = ggml_add(ctx0, residual, mlp);
+        }
+
+        // Final norm
+        cur = ggml_rms_norm(ctx0, cur, hp.bb_rms_norm_eps);
+        cur = ggml_mul(ctx0, cur, m.dd_output_norm_w);
+        // Take last position
+        if (T > 1) {
+            cur = ggml_view_2d(ctx0, cur, dd_d, 1, cur->nb[1], (size_t)(T - 1) * cur->nb[1]);
+        }
+        // Project through codebooks head: [dd_d_model, (n_cb-1) * audio_vocab_size]
+        // The head produces logits for all 31 codebooks stacked.
+        ggml_tensor* logits = ggml_mul_mat(ctx0, m.dd_codebooks_head_w, cur);
+        ggml_set_name(logits, "dd_logits");
+        ggml_build_forward_expand(gf, logits);
+
+        ggml_free(ctx0);
+        return gf;
+    };
+
+    // Read depth decoder embeddings + projection to CPU
+    int dd_d = (int)hp.dd_d_model;
+    std::vector<float> dd_token_embd((size_t)dd_d * avocab);
+    ggml_backend_tensor_get(m.dd_token_embd_w, dd_token_embd.data(), 0, dd_token_embd.size() * sizeof(float));
+    std::vector<float> dd_proj_data((size_t)hp.dd_backbone_hidden * dd_d);
+    ggml_backend_tensor_get(m.dd_projection_w, dd_proj_data.data(), 0, dd_proj_data.size() * sizeof(float));
+
+    // Helper: project backbone hidden (bb_d) -> depth (dd_d) via dd_projection_w
+    // projection_w is [bb_d, dd_d] in GGUF (ne[0]=bb_d, ne[1]=dd_d)
+    auto project_bb_to_dd = [&](const float* bb_hidden, float* dd_out) {
+        int proj_ne0 = (int)m.dd_projection_w->ne[0];
+        int proj_ne1 = (int)m.dd_projection_w->ne[1];
+        for (int d = 0; d < proj_ne1; d++) {
+            float sum = 0.0f;
+            for (int k = 0; k < proj_ne0; k++) {
+                sum += dd_proj_data[(size_t)d * proj_ne0 + k] * bb_hidden[k];
+            }
+            dd_out[d] = sum;
+        }
+    };
+
+    // Helper: embed depth decoder token
+    auto embed_dd_token = [&](int32_t tok_id, float* out) {
+        if (tok_id < 0 || tok_id >= avocab) {
+            std::memset(out, 0, (size_t)dd_d * sizeof(float));
+            return;
+        }
+        std::memcpy(out, &dd_token_embd[(size_t)tok_id * dd_d], (size_t)dd_d * sizeof(float));
+    };
+
+    // --- Prefill: process text frames through backbone ---
+    {
+        // Build embeddings for all text frames
+        std::vector<float> prefill_embeds((size_t)bb_d * n_text_frames);
+        std::vector<int32_t> pad_audio(n_cb, (int32_t)hp.codebook_pad_token_id);
+        for (int i = 0; i < n_text_frames; i++) {
+            build_frame_embedding(text_tokens[i], pad_audio.data(), &prefill_embeds[(size_t)i * bb_d]);
+        }
+
+        // Build positions
+        std::vector<int32_t> positions(n_text_frames);
+        for (int i = 0; i < n_text_frames; i++) {
+            positions[i] = i;
+        }
+
+        // Build causal mask
+        int Lk = n_text_frames;
+        std::vector<ggml_fp16_t> mask_data;
+        if (n_text_frames > 1) {
+            mask_data.assign((size_t)Lk * n_text_frames, ggml_fp32_to_fp16(0.0f));
+            ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < n_text_frames; q++) {
+                for (int k = q + 1; k < Lk; k++) {
+                    mask_data[(size_t)q * Lk + k] = neg_inf;
+                }
+            }
+        }
+
+        ggml_cgraph* gf = build_backbone_graph(0, n_text_frames);
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+            fprintf(stderr, "csm_tts: failed to alloc backbone prefill graph\n");
+            return nullptr;
+        }
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bb_embeds"), prefill_embeds.data(), 0,
+                                prefill_embeds.size() * sizeof(float));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bb_positions"), positions.data(), 0,
+                                positions.size() * sizeof(int32_t));
+        if (n_text_frames > 1) {
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bb_mask"), mask_data.data(), 0,
+                                    mask_data.size() * sizeof(ggml_fp16_t));
+        }
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "csm_tts: backbone prefill compute failed\n");
+            return nullptr;
+        }
+        // We don't need the prefill logits — they're just warming the KV cache.
+    }
+
+    int n_past_bb = n_text_frames;
+
+    // --- AR decode loop: generate frames one by one ---
+    // First audio frame input: text=audio_token_id, audio=all padding
+    std::vector<int32_t> prev_audio_codes(n_cb, (int32_t)hp.codebook_pad_token_id);
+
+    for (int frame_idx = 0; frame_idx < max_audio_frames; frame_idx++) {
+        // Build frame embedding for this step
+        std::vector<float> step_embed(bb_d);
+        build_frame_embedding((int32_t)hp.audio_token_id, prev_audio_codes.data(), step_embed.data());
+
+        // Position
+        int32_t pos = (int32_t)n_past_bb;
+
+        // Run backbone single-step
+        ggml_cgraph* gf = build_backbone_graph(n_past_bb, 1);
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+            fprintf(stderr, "csm_tts: failed to alloc backbone step graph\n");
+            break;
+        }
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bb_embeds"), step_embed.data(), 0,
+                                (size_t)bb_d * sizeof(float));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bb_positions"), &pos, 0, sizeof(int32_t));
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "csm_tts: backbone step %d compute failed\n", frame_idx);
+            break;
+        }
+
+        // Read backbone hidden state and logits
+        ggml_tensor* bb_hidden_t = ggml_graph_get_tensor(gf, "bb_hidden");
+        ggml_tensor* bb_logits_t = ggml_graph_get_tensor(gf, "bb_logits");
+        std::vector<float> bb_hidden(bb_d);
+        std::vector<float> bb_logits(avocab);
+        ggml_backend_tensor_get(bb_hidden_t, bb_hidden.data(), 0, (size_t)bb_d * sizeof(float));
+        ggml_backend_tensor_get(bb_logits_t, bb_logits.data(), 0, (size_t)avocab * sizeof(float));
+
+        n_past_bb++;
+
+        // Sample codebook-0 token
+        int32_t cb0_token = sample_topk(bb_logits.data(), avocab, topk, temperature, ctx->rng_state);
+
+        // Check EOS: if codebook-0 is the EOS token, stop generation
+        if (cb0_token == (int32_t)hp.codebook_eos_token_id) {
+            if (ctx->params.verbosity >= 2) {
+                fprintf(stderr, "csm_tts: backbone EOS at frame %d\n", frame_idx);
+            }
+            break;
+        }
+
+        // --- Depth decoder: fill codebooks 1..31 ---
+        std::vector<int32_t> frame_codes(n_cb);
+        frame_codes[0] = cb0_token;
+
+        // Clear depth KV cache for this frame
+        ggml_backend_buffer_clear(ctx->dd_kv_buf, 0);
+
+        // Depth decoder input sequence:
+        //   Position 0: projected backbone hidden state
+        //   Position 1: embedding of codebook-0 token
+        //   Position 2..31: embeddings of codebook 1..30 as they're generated
+        //
+        // We process it incrementally: first prefill positions 0-1,
+        // then decode positions 2..31 one at a time.
+
+        // Build initial depth input: [projected_hidden, cb0_embed]
+        std::vector<float> dd_init_embeds((size_t)dd_d * 2);
+        project_bb_to_dd(bb_hidden.data(), &dd_init_embeds[0]);
+        embed_dd_token(cb0_token, &dd_init_embeds[dd_d]);
+
+        // Prefill depth with 2 positions
+        {
+            std::vector<int32_t> dd_positions = {0, 1};
+            std::vector<ggml_fp16_t> dd_mask(2 * 2, ggml_fp32_to_fp16(0.0f));
+            ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+            // Position 0 can't see position 1
+            dd_mask[0 * 2 + 1] = neg_inf;
+
+            ggml_cgraph* dd_gf = build_depth_graph(2);
+            ggml_backend_sched_reset(ctx->sched);
+            if (!ggml_backend_sched_alloc_graph(ctx->sched, dd_gf)) {
+                fprintf(stderr, "csm_tts: failed to alloc depth prefill graph\n");
+                break;
+            }
+            ggml_backend_tensor_set(ggml_graph_get_tensor(dd_gf, "dd_embeds"), dd_init_embeds.data(), 0,
+                                    dd_init_embeds.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(dd_gf, "dd_positions"), dd_positions.data(), 0,
+                                    dd_positions.size() * sizeof(int32_t));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(dd_gf, "dd_mask"), dd_mask.data(), 0,
+                                    dd_mask.size() * sizeof(ggml_fp16_t));
+            if (ggml_backend_sched_graph_compute(ctx->sched, dd_gf) != GGML_STATUS_SUCCESS) {
+                fprintf(stderr, "csm_tts: depth prefill compute failed\n");
+                break;
+            }
+
+            // Read logits: [(n_cb-1) * avocab] — take first codebook's logits
+            ggml_tensor* dd_logits_t = ggml_graph_get_tensor(dd_gf, "dd_logits");
+            std::vector<float> dd_logits((n_cb - 1) * avocab);
+            ggml_backend_tensor_get(dd_logits_t, dd_logits.data(), 0, dd_logits.size() * sizeof(float));
+
+            // Sample codebook-1 token (index 0 in the logits head)
+            int32_t cb1_token = sample_topk(&dd_logits[0], avocab, topk, temperature, ctx->rng_state);
+            frame_codes[1] = cb1_token;
+        }
+
+        // Decode codebooks 2..31 one at a time
+        int dd_n_past = 2;
+        for (int cb_idx = 2; cb_idx < n_cb; cb_idx++) {
+            // Input: embedding of previously generated codebook token
+            std::vector<float> dd_step_embed(dd_d);
+            embed_dd_token(frame_codes[cb_idx - 1], dd_step_embed.data());
+            int32_t dd_pos = (int32_t)dd_n_past;
+
+            ggml_cgraph* dd_gf = build_depth_graph(1);
+            ggml_backend_sched_reset(ctx->sched);
+            if (!ggml_backend_sched_alloc_graph(ctx->sched, dd_gf)) {
+                fprintf(stderr, "csm_tts: failed to alloc depth step graph (cb=%d)\n", cb_idx);
+                break;
+            }
+            ggml_backend_tensor_set(ggml_graph_get_tensor(dd_gf, "dd_embeds"), dd_step_embed.data(), 0,
+                                    (size_t)dd_d * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(dd_gf, "dd_positions"), &dd_pos, 0, sizeof(int32_t));
+            if (ggml_backend_sched_graph_compute(ctx->sched, dd_gf) != GGML_STATUS_SUCCESS) {
+                fprintf(stderr, "csm_tts: depth step compute failed (cb=%d)\n", cb_idx);
+                break;
+            }
+
+            // Read logits — the head gives [(n_cb-1)*avocab] stacked
+            // Codebook cb_idx corresponds to index (cb_idx-1) in the head
+            ggml_tensor* dd_logits_t = ggml_graph_get_tensor(dd_gf, "dd_logits");
+            std::vector<float> dd_logits((n_cb - 1) * avocab);
+            ggml_backend_tensor_get(dd_logits_t, dd_logits.data(), 0, dd_logits.size() * sizeof(float));
+
+            int32_t cb_token =
+                sample_topk(&dd_logits[(size_t)(cb_idx - 1) * avocab], avocab, topk, temperature, ctx->rng_state);
+            frame_codes[cb_idx] = cb_token;
+            dd_n_past++;
+        }
+
+        all_codes.push_back(frame_codes);
+        prev_audio_codes = frame_codes;
+
+        if (ctx->params.verbosity >= 2 && (frame_idx % 10 == 0)) {
+            fprintf(stderr, "csm_tts: frame %d, cb0=%d\n", frame_idx, cb0_token);
+        }
+    }
+
     if (all_codes.empty()) {
+        fprintf(stderr, "csm_tts: no audio frames generated\n");
         return nullptr;
     }
 
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "csm_tts: generated %zu audio frames\n", all_codes.size());
+    }
+
+    // 3. Mimi decode: codes -> PCM
     int T_frames = (int)all_codes.size();
-    int n_cb = (int)hp.audio_num_codebooks;
 
     // Flatten codes to [n_codebooks, T_frames] layout
     std::vector<int32_t> flat_codes(n_cb * T_frames);
@@ -1107,10 +1538,6 @@ extern "C" float* csm_tts_synthesize_with_reference(struct csm_tts_context* ctx,
     // [mimi_dim, T_frames] -> upsample -> transformer -> SEANet -> PCM
     {
         int mdim = (int)hp.mimi_dim;
-        int T_up = T_frames * 2; // after stride-2 upsample
-
-        // Estimate output samples: stride product = 8*6*5*4 = 960, times T_up
-        // int n_pcm_est = T_up * 960;
 
         struct ggml_init_params gp = {
             /*.mem_size   =*/ctx->compute_meta.size(),

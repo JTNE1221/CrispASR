@@ -52,6 +52,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_speecht5_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_dia_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_parler_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_fastpitch_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_csm_tts_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -169,6 +170,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_parler_tts_backend();
     if (name == "zonos" || name == "zonos-tts" || name == "zonos_tts")
         return crispasr_make_zonos_backend();
+    if (name == "csm" || name == "csm-tts" || name == "csm_tts" || name == "sesame" || name == "sesame-csm")
+        return crispasr_make_csm_tts_backend();
 
     fprintf(stderr, "crispasr: error: unknown backend '%s'\n", name.c_str());
     return nullptr;
@@ -242,6 +245,9 @@ std::vector<std::string> crispasr_list_backends() {
         "parler-tts",
         "zonos",
         "zonos-tts",
+        "csm",
+        "csm-tts",
+        "sesame",
     };
 }
 
