@@ -1035,6 +1035,18 @@ if(NOT MSVC)
     target_compile_options(f5-tts PRIVATE -O3)
 endif()
 
+# ---------------------------------------------------------------------------
+# pocket-tts — kyutai/pocket-tts (100M continuous-latent AR TTS, 24 kHz)
+# ---------------------------------------------------------------------------
+add_library(pocket-tts STATIC pocket_tts.h pocket_tts.cpp)
+set_target_properties(pocket-tts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(pocket-tts PUBLIC .)
+target_compile_features   (pocket-tts PUBLIC cxx_std_17)
+target_link_libraries     (pocket-tts PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(pocket-tts PRIVATE -O3)
+endif()
+
 # piper-tts — rhasspy/piper VITS TTS (native ggml runtime)
 # ---------------------------------------------------------------------------
 add_library(piper-tts STATIC piper_tts.h piper_tts.cpp)
@@ -1415,6 +1427,9 @@ if (TARGET outetts)
 endif()
 if (TARGET f5-tts)
     target_link_libraries(crispasr PUBLIC f5-tts)
+endif()
+if (TARGET pocket-tts)
+    target_link_libraries(crispasr PUBLIC pocket-tts)
 endif()
 if (TARGET piper-tts)
     target_link_libraries(crispasr PUBLIC piper-tts)

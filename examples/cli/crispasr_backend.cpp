@@ -46,6 +46,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_outetts_backend();
 #endif
 std::unique_ptr<CrispasrBackend> crispasr_make_f5_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_bark_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_pocket_tts_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -117,6 +118,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
 #endif
     if (name == "f5-tts" || name == "f5_tts" || name == "f5tts" || name == "f5")
         return crispasr_make_f5_tts_backend();
+    if (name == "pocket-tts" || name == "pocket_tts" || name == "pockettts" || name == "pocket")
+        return crispasr_make_pocket_tts_backend();
     if (name == "voxcpm2-tts" || name == "voxcpm2" || name == "voxcpm" || name == "voxcpm2_tts")
         return crispasr_make_voxcpm2_tts_backend();
     if (name == "cosyvoice3" || name == "cosyvoice3-tts" || name == "cosyvoice3_tts" || name == "cv3" ||
@@ -192,6 +195,7 @@ std::vector<std::string> crispasr_list_backends() {
         "lahgtna-chatterbox",
         "indextts",
         "f5-tts",
+        "pocket-tts",
         "kokoro",
         "piper",
         "outetts",
@@ -442,6 +446,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "indextts";
     if (contains_ci("f5-tts") || contains_ci("f5tts") || contains_ci("F5TTS"))
         return "f5-tts";
+    if (contains_ci("pocket-tts") || contains_ci("pocket_tts") || contains_ci("pockettts"))
+        return "pocket-tts";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
         return "chatterbox";
     if (contains_ci("m2m100") || (contains_ci("m2m") && contains_ci("100")) || contains_ci("wmt21"))
@@ -574,6 +580,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "indextts";
             else if (a == "outetts" || a == "oute-tts" || a == "oute_tts")
                 result = "outetts";
+            else if (a == "pocket-tts" || a == "pocket_tts" || a == "pockettts")
+                result = "pocket-tts";
         }
     }
     gguf_free(gctx);

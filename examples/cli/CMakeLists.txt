@@ -31,6 +31,7 @@ add_executable(${TARGET}
     crispasr_backend_chatterbox.cpp
     crispasr_backend_indextts.cpp
     crispasr_backend_f5_tts.cpp
+    crispasr_backend_pocket_tts.cpp
     crispasr_backend_voxcpm2_tts.cpp
     crispasr_backend_cosyvoice3.cpp
     crispasr_backend_kokoro.cpp
