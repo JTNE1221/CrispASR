@@ -7931,3 +7931,58 @@ Implications for porting any backend that mixes CPU + GPU buffers:
 - PLAN #115 for option C scope (per-tensor backend tagging in `mimo_asr_build_prefill_graph`)
 - [[project_chatterbox_gpu_bug_s3gen]] for a different shape of the same general problem (sched parallel=true fixed it there)
 - `src/mimo_asr.cpp` commit `c887881e` for the option A landing
+
+## funasr CUDA !-loop — all-NaN prefill logits (issue #125, §136)
+
+### Bug
+
+funasr (FunASR Nano 2512, SANM encoder + Qwen2-0.6B decoder) transcribes
+JFK correctly and byte-identically on CPU and Apple Metal, but on CUDA the
+greedy decode degenerates: token id 0 repeats until the stop-loss guard
+aborts → empty/garbage `!!!!!` transcript → WER 100%. Confirmed on P100
+(sm_60) and Blackwell (sm_120) — architecture-independent within CUDA.
+
+### Investigation (2026-05-31)
+
+1. **Initial hypothesis was wrong.** Commit `868aabdf` blamed F16 weights
+   causing `MUL_MAT(F16,F32)` saturation on CUDA and shipped a registry
+   default flip F16→Q8_0 + a ggml-cuda patch. Q8_0 model also !-looped on
+   Kaggle P100, disproving the hypothesis.
+
+2. **Flash-attn in the encoder was suspected but ruled out.** Added
+   `FUNASR_DUMP_STAGES=1` per-stage tensor dump (min/max/mean/L2/NaN/first8)
+   for 13 key encoder stages + adaptor + spliced embeddings. Kaggle v3 ran
+   three experiments: CUDA FA-on, CUDA FA-off (`FUNASR_NO_FA=1`), CPU
+   baseline. Result: **encoder/adaptor stages match CPU on CUDA** to within
+   first8 max-diff < 0.05 across all layers. The encoder is fine.
+
+3. **The bug is in the LLM decoder.** ALL 151936 prefill logits are NaN
+   on CUDA — both with FA on and FA off. The encoder produces correct
+   embeddings, the splice is correct, but after the Qwen2-0.6B LLM prefill
+   graph runs on CUDA, every output float is NaN.
+
+4. **Same `kv_self_attn` code works for qwen3-asr on CUDA.** So it's not a
+   generic bug in `core_attn::kv_self_attn`. The difference must be
+   funasr-specific: model shapes (head_dim=128 with GQA ratio=2), weight
+   types (Q8_0), QK norm (Qwen2-0.6B has per-head RMS norm on Q/K with
+   128-dim weights), or a subtle graph-construction issue.
+
+5. **KV cache is F16, allocated on CUDA, not zeroed** — standard pattern,
+   but uninitialized GPU memory could cause NaN if a graph scheduling race
+   reads before write. Under investigation.
+
+### Diagnostic protocol that worked
+
+- `FUNASR_DUMP_STAGES=1` env-gated tensor stats at every 10th encoder
+  layer + adaptor + spliced embeds + prefill logits → localized the NaN
+  to the LLM prefill in one Kaggle run instead of guessing.
+- Three-way CPU/CUDA-FA/CUDA-noFA comparison in a single kernel → ruled
+  out flash-attn as the cause definitively.
+- Stage dumps confirmed to Kaggle's own P100 → no "works on my machine".
+
+### Cross-refs
+
+- `src/funasr.cpp` FUNASR_DUMP_STAGES instrumentation (commit `7dfe401d`)
+- `tools/kaggle/funasr-cuda-debug/` kernel (v3: encoder OK, v4: LLM snaps)
+- PLAN §136 for the fix plan
+- issue #125 (original report)
