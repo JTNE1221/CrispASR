@@ -77,9 +77,14 @@ constexpr Entry k_registry[] = {
     // Apache-2.0; weights are FunASR Model License v1.1 (Alibaba) —
     // commercial use OK with attribution, so the license field below
     // is set so the cache layer prints it to stderr on first download.
-    {"funasr", "funasr-nano-2512-f16.gguf",
-     "https://huggingface.co/cstr/funasr-nano-GGUF/resolve/main/funasr-nano-2512-f16.gguf",
-     "~1.98 GB", nullptr, nullptr,
+    {"funasr", "funasr-nano-2512-q8_0.gguf",
+     "https://huggingface.co/cstr/funasr-nano-GGUF/resolve/main/funasr-nano-2512-q8_0.gguf",
+     "~1.06 GB", nullptr, nullptr,
+     // Default is Q8_0, not F16: the F16 weights hit the CUDA F16×F32 matmul
+     // saturation bug (issue #38 CUDA counterpart) and degenerate into a
+     // single-token "!-loop" on GPU. Q8_0 takes the MMQ/MMVQ path (per-block
+     // scales, F32-range activations) so it's correct on CUDA too, and it's
+     // ~half the download. Q8_0 is byte-identical to F16 on CPU/Metal.
      "FunASR Model License v1.1 (commercial use OK with attribution; see "
      "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512/blob/main/LICENSE)"},
     // Multilingual sibling — same architecture, 31 languages including

@@ -77,7 +77,7 @@ SLOW_BACKENDS = [
     ("gemma4-e2b",        "Gemma-4-E2B 2.3B",        300, "Q4_K, 2.3B params"),
     ("granite-4.1",       "Granite Speech 4.1 2B",   300, "Q4_K, ~2.94GB, LLM-AR"),
     ("mega-asr",          "Mega-ASR 1.7B",           120, "Q4_K, ~1.3GB, qwen3 backend + robustness LoRA"),
-    ("funasr",            "Fun-ASR Nano 2512",       180, "F16 only (~1.98GB), Qwen3-0.6B decoder"),
+    ("funasr",            "Fun-ASR Nano 2512",       180, "Q8_0 (~1.06GB); F16 hits CUDA F16xF32 !-loop, Q8_0 is GPU-safe"),
     ("mimo-asr",          "MiMo-ASR",                420, "Q4_K ~4.2GB; PLAN #115 forces CPU (~297s/11s clip)"),
 ]
 
@@ -283,7 +283,7 @@ MODEL_REGISTRY = {
     "paraformer":        ("paraformer-zh-q4_k.gguf",     "cstr/paraformer-zh-GGUF",               "paraformer-zh-q4_k.gguf"),
     "granite-4.1":       ("granite-speech-4.1-2b-q4_k.gguf","cstr/granite-speech-4.1-2b-GGUF",     "granite-speech-4.1-2b-q4_k.gguf"),
     "mega-asr":          ("mega-asr-1.7b-q4_k.gguf",     "cstr/mega-asr-GGUF",                    "mega-asr-1.7b-q4_k.gguf"),
-    "funasr":            ("funasr-nano-2512-f16.gguf",   "cstr/funasr-nano-GGUF",                 "funasr-nano-2512-f16.gguf"),
+    "funasr":            ("funasr-nano-2512-q8_0.gguf",  "cstr/funasr-nano-GGUF",                 "funasr-nano-2512-q8_0.gguf"),
     "mimo-asr":          ("mimo-asr-q4_k.gguf",          "cstr/mimo-asr-GGUF",                    "mimo-asr-q4_k.gguf"),
 }
 

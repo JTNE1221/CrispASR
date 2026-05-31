@@ -1502,7 +1502,17 @@ static void ggml_cuda_op_mul_mat_cublas(
         (src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) &&
         ggml_is_contiguous(src0) &&
         row_diff == src0->ne[1] &&
-        dst->op_params[0] == GGML_PREC_DEFAULT;
+        dst->op_params[0] == GGML_PREC_DEFAULT &&
+        // CrispASR patch (issue #38 → CUDA counterpart; MUST RE-APPLY on ggml sync).
+        // F16 weight × F32 activation must NOT take the fp16 cuBLAS path: it
+        // quantizes the F32 activation to F16, which saturates at ±65504. Deep
+        // encoders (funasr SANM, 70 layers) produce activations past that, so they
+        // collapse to ±Inf → NaN → a degenerate single-token "!-loop" on CUDA only
+        // (CPU has the #38 F16×F32 dot-product fix; Metal has a native F16×F32
+        // kernel). Exclude this case so it falls through to the F32 cublasSgemm
+        // path below (dequant weight to F32, keep activation F32). Quantized
+        // weights are unaffected — they take the MMQ/MMVQ path, not this fallback.
+        !(src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F32);
 
     if (supports_bf16 && src0->type == GGML_TYPE_BF16 && ggml_is_contiguous(src0) && row_diff == src0->ne[1]) {
         ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
