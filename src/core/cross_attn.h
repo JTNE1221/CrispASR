@@ -46,7 +46,7 @@
 
 #include "ggml.h"
 
-#include <cmath>   // std::sqrt
+#include <cmath> // std::sqrt
 
 namespace core_cross_attn {
 

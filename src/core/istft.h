@@ -220,8 +220,8 @@ static inline std::vector<float> istft(const float* mag, const float* phase, int
 // The caller must free() the returned pointer.
 // Returns nullptr on failure; *out_n is set to the number of samples.
 static inline float* istft_alloc(const float* mag, const float* phase, int n_fft, int hop, int T_frames,
-                                 const float* window, TrimMode trim, float clamp_val, int* out_n,
-                                 float win_eps = 1e-8f, bool zero_below_eps = false) {
+                                 const float* window, TrimMode trim, float clamp_val, int* out_n, float win_eps = 1e-8f,
+                                 bool zero_below_eps = false) {
     std::vector<float> pcm = istft(mag, phase, n_fft, hop, T_frames, window, trim, clamp_val, win_eps, zero_below_eps);
     if (pcm.empty()) {
         if (out_n) {
