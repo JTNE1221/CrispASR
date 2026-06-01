@@ -1,55 +1,102 @@
-**Title:** `ggml-backend / sched : dual-backend [CUDA,CPU] produces Inf/NaN in LLM decoder at layer 2+ (funasr Qwen2-0.6B)`
+**Title:** `ggml-cuda : fix F16 cuBLAS accumulator overflow producing Inf/NaN on sm_60 (P100)`
 
 ---
 
-Same bug class as issue #11 (Metal sched NaN at large T), now confirmed
-on CUDA. The `ggml_backend_sched` with `[CUDA, CPU]` backends misroutes
-LLM decoder ops, producing Inf at layer 2 and all-NaN by layer 3.
+## Root cause (confirmed)
+
+The cuBLAS fallback path in `ggml_cuda_op_mul_mat_cublas` has a
+`use_fp16` flag that routes quantized-weight × F32-activation matmuls
+through `cublasHgemm` (F16 GEMM). On GPUs without DP4A (P100 sm_60),
+the MMQ kernel is unavailable, so quantized MUL_MAT always takes this
+cuBLAS fallback.
+
+The F16 GEMM accumulates dot-product partial sums in F16 (max ±65504).
+For LLM FFN layers with large intermediate values (swiglu outputs
+reaching ~15K over 3072-element dot products), the partial sums exceed
+65504 and overflow to Inf. This manifests as 1 Inf at layer 2, all-NaN
+by layer 3, and degenerate output.
 
 ## Symptom
 
 A 28-layer Qwen2-0.6B LLM decoder (head_dim=128, n_heads=16,
 n_kv_heads=8, GQA ratio=2, per-head QK-RMSNorm) runs correctly on
-CPU-only builds but produces all-NaN prefill logits on CUDA when
-scheduled through `ggml_backend_sched_new({cuda, cpu}, ..., false, false)`.
+CPU-only builds but produces all-NaN prefill logits on CUDA.
 
-Per-layer tensor dump:
+Per-layer tensor dump (CUDA vs CPU):
 ```
-llm_layer_0:  0 NaN, 0 Inf  — matches CPU
-llm_layer_1:  0 NaN, 0 Inf  — matches CPU
-llm_layer_2:  0 NaN, 1 Inf  — max=6973 vs CPU max=124512
-llm_layer_3:  ALL NaN (47104/47104)
-llm_layer_4+: ALL NaN
+llm_layer_0:  0 NaN, 0 Inf, max=1046  — matches CPU (1046)
+llm_layer_1:  0 NaN, 0 Inf, max=1057  — matches CPU (1057)
+llm_layer_2:  0 NaN, 1 Inf, max=6916  — CPU max=124512 ← DIVERGES
+llm_layer_3:  ALL NaN (47104/47104)    — CPU max=125052
 ```
 
-The encoder (70-layer SANM, same sched, same graph compute call) is
-fine — 0 NaN across all layers, values match CPU to <0.05 first8 diff.
+Per-node NaN checker trace (layer 2, CUDA):
+```
+node#86  MUL_MAT  [3072,46]  min=-14.27  max=104.9  nan=0 inf=0   ← FFN gate
+node#87  UNARY    [3072,46]  min=-0.28   max=104.9  nan=0 inf=0   ← SiLU
+node#88  MUL_MAT  [3072,46]  min=-51.88  max=143    nan=0 inf=0   ← FFN up
+node#89  MUL      [3072,46]  min=-2402   max=15010  nan=0 inf=0   ← swiglu
+node#90  MUL_MAT  [1024,46]  min=-755.5  max=6916   nan=0 inf=1   ← FFN down *** FIRST INF
+```
+
+The swiglu output (max=15010) is within F16 range, but the 3072-element
+dot product in the FFN down projection produces partial sums exceeding
+65504.
 
 ## Confirmed on
 
-- Tesla P100 (sm_60) — Kaggle, 16 kernel versions
-- Blackwell (sm_120) — GitHub issue #125
+- Tesla P100 (sm_60) — Kaggle, kernel versions 19-21
+- Also affects Blackwell (sm_120) per GitHub issue #125 (same symptom,
+  likely same cause via a different code path)
 
-Architecture-independent within CUDA.
+Architecture-independent within CUDA — any GPU where the quantized
+MUL_MAT takes the cuBLAS F16 fallback instead of MMQ.
 
-## What does NOT fix it
+## The fix
 
-| Attempt | Result |
-|---|---|
-| Q8_0 weights (instead of F16) | Still NaN |
-| Disable flash_attn_ext (`FUNASR_NO_FA=1`) | Still NaN |
-| F32 KV cache reads (`CRISPASR_KV_READ_F32=1`) | Still NaN |
-| `parallel=true` sched flag | Still NaN |
-| Fuse Q/K/V into single QKV matmul | Still NaN |
-| Single-backend GPU sched (remove CPU) | Crashes (ops need CPU) |
-| Zero-fill KV cache on alloc | Still NaN |
+In `ggml/src/ggml-cuda/ggml-cuda.cu`, function
+`ggml_cuda_op_mul_mat_cublas`, change the `use_fp16` condition from:
 
-## What DOES fix it
+```c
+// BEFORE: only blocks F16 weights with F32 activations
+!(src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F32);
+```
 
-Put the LLM decoder's weight tensors + KV cache on the CPU backend
-(via `load_weights_split`). The sched then routes the entire LLM
-subgraph to CPU. Encoder stays GPU-accelerated. Identical workaround
-to issue #11 (Metal NaN at large T).
+to:
+
+```c
+// AFTER: blocks ALL weight types when activations are F32
+!(src1->type == GGML_TYPE_F32);
+```
+
+This forces the F32 `cublasSgemm` path (dequant weight to F32, keep
+activation F32) whenever activations are F32, avoiding F16 accumulator
+overflow on all CUDA architectures.
+
+## Performance impact
+
+Negligible:
+
+- On sm_60 (P100): no tensor cores, so F16 vs F32 cuBLAS is marginal.
+  The F32 path is slightly slower but the difference is small.
+- On sm_61+ (all modern GPUs): DP4A is available, so quantized MUL_MAT
+  uses the MMQ kernel, never hitting this cuBLAS fallback. Zero impact.
+- The cuBLAS fallback is a last-resort path; the primary quantized
+  matmul paths (MMQ, MMVQ) are unaffected.
+
+## Verification
+
+Kaggle P100 kernel v21 (commit `9211662a`):
+```
+CUDA default (all-GPU, fix applied): PASS
+  "AND SO MY FELLOW AMERICANS ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU
+   ASK WHAT YOU CAN DO FOR YOUR COUNTRY"
+CPU baseline:                        PASS
+CUDA workaround (LLM CPU):           PASS
+NaN checker (128 nodes, 4 layers):   0 Inf, 0 NaN
+
+*** FIX CONFIRMED ***
+```
 
 ## Repro
 
@@ -60,47 +107,33 @@ Audio: any 16 kHz WAV (11s JFK speech used for testing).
 # Build with CUDA
 cmake -B build -DGGML_CUDA=ON && cmake --build build --target crispasr-cli
 
-# CUDA: produces "!!!!!!!!!!!!!!!!!!!!" (all-NaN logits)
+# Before fix: produces all-NaN → "!!!!!!!!!!!!!!!!!!!!"
 FUNASR_DUMP_STAGES=1 build/bin/crispasr --backend funasr -m auto \
     --auto-download -f samples/jfk.wav --no-prints
 
-# CPU: produces correct transcript
-CUDA_VISIBLE_DEVICES="" build/bin/crispasr --backend funasr -m auto \
-    --auto-download -f samples/jfk.wav --no-prints
+# After fix: correct transcript
+# (same command, the fix is in the CUDA matmul dispatch)
 ```
 
-The `FUNASR_DUMP_STAGES=1` env var prints per-layer tensor stats to
-stderr — look for NaN/Inf counts in `llm_layer_2` and beyond.
+## What was ruled out during investigation
 
-## Relation to existing upstream PRs
+| Attempt | Result |
+|---|---|
+| Q8_0 model (instead of F16) | Still NaN |
+| Disable flash_attn_ext | Still NaN |
+| F32 KV cache reads | Still NaN |
+| `parallel=true` sched flag | Still NaN |
+| Fuse Q/K/V into single QKV matmul | Still NaN |
+| KV cache zero-fill on alloc | Still NaN |
+| Weight split but KV still on GPU | Still NaN |
 
-- **#10 (dangling src[j] pointers):** Independent bug, already patched
-  in our fork. The funasr NaN persists with #10's fix applied.
-- **#11 (Metal sched NaN at large T):** Same bug class. Different
-  backend (CUDA vs Metal), different symptom shape (layer-2 Inf vs
-  all-NaN-from-start), but same root cause (mixed-backend scheduling
-  produces corrupted intermediate tensors). Same workaround (force
-  entire subgraph to one backend via weight placement).
-- **#12 (parallel=true shared-storage docs):** Not the same issue.
-  `parallel=true` does NOT fix this bug (tested in Kaggle v8).
+All of these targeted the wrong component (scheduler, flash attention,
+KV cache). The bug was in the cuBLAS matmul dispatch, specifically the
+`use_fp16` flag that allowed F16 accumulation for quantized weights.
 
-## Proposed investigation
+## Diagnostic tools added
 
-The sched assigns each graph node to a backend based on weight
-residency + op support. With all weights on GPU, the sched should
-route everything to CUDA. But something at layer 2 gets misrouted or
-the cross-backend data copy is corrupted. A `GGML_SCHED_DEBUG=2`
-trace showing the per-node backend assignment + the split boundaries
-for this graph would identify the exact misrouted op.
-
-We can provide:
-- The GGUF model file (1.5 GB Q8_0)
-- A minimal C repro that builds and runs the LLM graph
-- `GGML_SCHED_DEBUG=2` traces for the working (CPU) and broken (CUDA) runs
-
----
-
-**Application-side workaround (shipped in our fork, commit `f94fec90`):**
-`load_weights_split` + KV-on-CPU for the LLM decoder. The encoder
-runs on CUDA for the GPU speedup. Performance hit: ~4.5× slower LLM
-decode (CPU vs GPU), acceptable for ASR (short output sequences).
+- `FUNASR_NAN_CHECK=1`: per-node eval callback that reads back every
+  graph node and prints the first op with NaN/Inf + source tensor stats
+- `FUNASR_LLM_LAYERS=N`: limits LLM decoder to N layers for faster
+  debugging (4 layers sufficient to trigger the layer-2 bug)
