@@ -1547,12 +1547,19 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                     V_full = ggml_reshape_4d(ctx0, V_cur, head_dim, n_kv_heads, T_cur, B);
                 }
 
-                // GQA: repeat K/V heads to match Q heads
-                // n_heads=16, n_kv_heads=4 -> repeat 4x
+                // GQA: repeat_interleave K/V heads to match Q heads
+                // n_heads=16, n_kv_heads=4 -> each KV head maps to 4 consecutive Q heads
+                // Pattern: insert unit dim before n_kv, repeat, flatten
+                // (hd, n_kv, T, B) -> (hd, 1, n_kv, T*B) -> repeat -> (hd, n_rep, n_kv, T*B) -> (hd, n_heads, T, B)
                 int n_rep = n_heads / n_kv_heads;
                 if (n_rep > 1) {
-                    K_full = ggml_repeat_4d(ctx0, K_full, head_dim, n_heads, T_past + T_cur, B);
-                    V_full = ggml_repeat_4d(ctx0, V_full, head_dim, n_heads, T_past + T_cur, B);
+                    int T_full = T_past + T_cur;
+                    K_full = ggml_reshape_4d(ctx0, K_full, head_dim, 1, n_kv_heads, T_full * B);
+                    K_full = ggml_repeat_4d(ctx0, K_full, head_dim, n_rep, n_kv_heads, T_full * B);
+                    K_full = ggml_cont(ctx0, ggml_reshape_4d(ctx0, K_full, head_dim, n_heads, T_full, B));
+                    V_full = ggml_reshape_4d(ctx0, V_full, head_dim, 1, n_kv_heads, T_full * B);
+                    V_full = ggml_repeat_4d(ctx0, V_full, head_dim, n_rep, n_kv_heads, T_full * B);
+                    V_full = ggml_cont(ctx0, ggml_reshape_4d(ctx0, V_full, head_dim, n_heads, T_full, B));
                 }
 
                 // Attention: Q @ K^T / sqrt(d)
