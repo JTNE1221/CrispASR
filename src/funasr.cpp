@@ -177,6 +177,7 @@ struct funasr_llm_block {
     ggml_tensor* attn_q_w = nullptr;
     ggml_tensor* attn_k_w = nullptr;
     ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_qkv_w = nullptr; // fused Q+K+V for single matmul (§136)
     ggml_tensor* attn_output_w = nullptr;
     ggml_tensor* attn_q_norm_w = nullptr;
     ggml_tensor* attn_k_norm_w = nullptr;
@@ -236,6 +237,12 @@ struct funasr_context {
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
     ggml_backend_sched_t sched = nullptr;
+
+    // Fused QKV weights (§136). Created at init to merge the 3 separate
+    // Q/K/V projections into one matmul so ggml_backend_sched can't split
+    // them across backends (the root cause of the CUDA !-loop).
+    ggml_context* fused_ctx = nullptr;
+    ggml_backend_buffer_t fused_buf = nullptr;
 
     std::vector<uint8_t> compute_meta;
 
@@ -404,29 +411,12 @@ static bool funasr_load_model(funasr_model& model, funasr_vocab& vocab, const ch
         core_gguf::free_metadata(gctx);
     }
 
-    // Pass 2: tensor data.
-    // On CUDA, the dual-backend sched produces all-NaN prefill logits for
-    // the Qwen2-0.6B LLM decoder (issue #125). Workaround: split weights
-    // so the encoder goes to GPU (fast) but the LLM stays on CPU (correct).
-    // FUNASR_LLM_GPU=1 overrides this to put everything on GPU for testing.
+    // Pass 2: tensor data — all weights on the primary backend.
+    // The CUDA !-loop (issue #125) is fixed by QKV fusion at init time
+    // (see below), so no weight split is needed.
     core_gguf::WeightLoad wl;
-    const bool force_llm_gpu = []() {
-        const char* s = std::getenv("FUNASR_LLM_GPU");
-        return s && *s && *s != '0';
-    }();
-    if (!ggml_backend_is_cpu(backend) && cpu_backend && !force_llm_gpu) {
-        // Encoder/adaptor tensors → GPU; LLM decoder tensors → CPU.
-        auto is_gpu = [](const char* name, void*) -> bool {
-            // Encoder: funasr.enc.blk.*, funasr.adaptor.blk.*
-            // LLM: blk.*, output.*, output_norm.*, token_embd (== output)
-            return std::strncmp(name, "funasr.", 7) == 0;
-        };
-        if (!core_gguf::load_weights_split(path, backend, cpu_backend, is_gpu, nullptr, "funasr", wl))
-            return false;
-    } else {
-        if (!core_gguf::load_weights(path, backend, "funasr", wl))
-            return false;
-    }
+    if (!core_gguf::load_weights(path, backend, "funasr", wl))
+        return false;
     model.ctx = wl.ctx;
     model.buf = wl.buf;
     model.buf_cpu = wl.buf_cpu;
@@ -1067,10 +1057,13 @@ static ggml_cgraph* funasr_build_graph_llm_kv_impl(funasr_context* ctx, int n_pa
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
+        // Use fused QKV when available (§136 — prevents sched cross-backend
+        // split that causes all-NaN on CUDA). Falls back to separate Q/K/V
+        // when fusion wasn't possible (type mismatch, alloc failure).
         ggml_tensor* attn =
             core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w, b.attn_q_norm_w,
                                     b.attn_k_norm_w, positions, causal_mask, ctx->kv_k, ctx->kv_v, (int)il, n_past, kvp,
-                                    /*qkv_w*/ nullptr, fixed_kv_len, kv_indices);
+                                    /*qkv_w*/ b.attn_qkv_w, fixed_kv_len, kv_indices);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -1251,13 +1244,7 @@ static bool funasr_kv_init(funasr_context* ctx, int max_ctx) {
     ggml_set_name(ctx->kv_v, "kv_v");
     const size_t kbytes = ggml_nbytes(ctx->kv_k);
     const size_t vbytes = ggml_nbytes(ctx->kv_v);
-    // When LLM weights were split to CPU (buf_cpu != nullptr, issue #125
-    // workaround), the KV cache must also live on CPU so the sched routes
-    // the entire LLM decoder to CPU. Otherwise KV-on-GPU + weights-on-CPU
-    // confuses the sched → Inf at layer 2 → all-NaN by layer 3.
-    ggml_backend_t kv_backend = (ctx->model.buf_cpu)
-                                    ? ctx->backend_cpu
-                                    : core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "funasr");
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "funasr");
     ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes);
     if (!ctx->kv_buf) {
         std::fprintf(stderr, "funasr: failed to allocate kv buffer\n");
@@ -1799,6 +1786,60 @@ extern "C" funasr_context* funasr_init_from_file(const char* path, funasr_contex
         return nullptr;
     }
 
+    // ---- Fuse Q/K/V into a single QKV weight per LLM layer (§136). ----
+    // The ggml_backend_sched with [CUDA,CPU] misroutes the 3 separate
+    // mul_mats across backends → Inf → NaN on CUDA (issue #125). A single
+    // fused matmul forces the sched to keep it on one backend.
+    {
+        auto& blocks = ctx->model.llm.blocks;
+        bool can_fuse = !blocks.empty() && blocks[0].attn_q_w && blocks[0].attn_k_w && blocks[0].attn_v_w;
+        if (can_fuse) {
+            const ggml_type t0 = blocks[0].attn_q_w->type;
+            for (auto& b : blocks) {
+                if (!b.attn_q_w || !b.attn_k_w || !b.attn_v_w || b.attn_q_w->type != t0 || b.attn_k_w->type != t0 ||
+                    b.attn_v_w->type != t0 || b.attn_q_w->ne[0] != b.attn_k_w->ne[0] ||
+                    b.attn_q_w->ne[0] != b.attn_v_w->ne[0]) {
+                    can_fuse = false;
+                    break;
+                }
+            }
+        }
+        if (can_fuse) {
+            const ggml_type t0 = blocks[0].attn_q_w->type;
+            int q_out = (int)blocks[0].attn_q_w->ne[1];
+            int k_out = (int)blocks[0].attn_k_w->ne[1];
+            int hidden = (int)blocks[0].attn_q_w->ne[0];
+            int qkv_out = q_out + 2 * k_out;
+            size_t fused_mem = ggml_tensor_overhead() * blocks.size() + 256;
+            ggml_init_params fgp = {fused_mem, nullptr, true};
+            ctx->fused_ctx = ggml_init(fgp);
+            if (ctx->fused_ctx) {
+                for (auto& b : blocks)
+                    b.attn_qkv_w = ggml_new_tensor_2d(ctx->fused_ctx, t0, hidden, qkv_out);
+                ctx->fused_buf = ggml_backend_alloc_ctx_tensors_from_buft(
+                    ctx->fused_ctx, ggml_backend_get_default_buffer_type(ctx->backend));
+                if (ctx->fused_buf) {
+                    for (auto& b : blocks) {
+                        size_t qb = ggml_nbytes(b.attn_q_w), kb = ggml_nbytes(b.attn_k_w);
+                        std::vector<uint8_t> tmp(qb + 2 * kb);
+                        ggml_backend_tensor_get(b.attn_q_w, tmp.data(), 0, qb);
+                        ggml_backend_tensor_get(b.attn_k_w, tmp.data() + qb, 0, kb);
+                        ggml_backend_tensor_get(b.attn_v_w, tmp.data() + qb + kb, 0, kb);
+                        ggml_backend_tensor_set(b.attn_qkv_w, tmp.data(), 0, tmp.size());
+                    }
+                    if (params.verbosity >= 1)
+                        std::fprintf(stderr, "funasr: fused QKV for %zu LLM layers (%d+%d+%d→%d, type=%s)\n",
+                                     blocks.size(), q_out, k_out, k_out, qkv_out, ggml_type_name(t0));
+                } else {
+                    ggml_free(ctx->fused_ctx);
+                    ctx->fused_ctx = nullptr;
+                    for (auto& b : blocks)
+                        b.attn_qkv_w = nullptr;
+                }
+            }
+        }
+    }
+
     {
         int n_be = 0;
         ggml_backend_t backends[2];
@@ -1853,6 +1894,10 @@ extern "C" void funasr_free(funasr_context* ctx) {
         ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->kv_ctx)
         ggml_free(ctx->kv_ctx);
+    if (ctx->fused_buf)
+        ggml_backend_buffer_free(ctx->fused_buf);
+    if (ctx->fused_ctx)
+        ggml_free(ctx->fused_ctx);
     if (ctx->model.buf)
         ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.buf_cpu)
