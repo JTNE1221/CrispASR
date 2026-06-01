@@ -545,7 +545,7 @@ static bool dia_kv_cache_init(dia_kv_cache& cache, const dia_model& m) {
 
 // Forward declaration for RoPE mode
 // Dia uses NeoX-style RoPE (mode=2 in ggml_rope)
-static const int DIA_ROPE_MODE = 0; // standard rotate-half (not NeoX interleaved)
+static const int DIA_ROPE_MODE = 2; // first-half/second-half pairing (ggml NeoX mode)
 
 static ggml_tensor* build_dia_encoder(ggml_context* ctx, dia_model& m,
                                       ggml_tensor* inp_tokens, // (max_enc_ctx * 2,) I32

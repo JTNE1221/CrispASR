@@ -401,11 +401,10 @@ def convert(model_dir: Path, output_path: str, include_dac: bool = False):
                         data = data.T.copy()
 
                 # Choose precision
-                if data.ndim == 1:
-                    # Norms, biases: keep as F32
-                    out = data.astype(np.float32)
-                else:
-                    out = data.astype(np.float16)
+                # Dia's attention uses scale=1.0 (no 1/sqrt(d)) which makes
+                # softmax hypersensitive to precision. F16 weights cause layer-
+                # by-layer divergence. Use F32 for all weights.
+                out = data.astype(np.float32)
 
                 writer.add_tensor(gguf_name, out)
                 n_tensors += 1
