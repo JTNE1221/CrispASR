@@ -229,8 +229,8 @@ static std::vector<uint32_t> dia_tokenize(const std::string& text, uint32_t max_
     if (processed.substr(0, 4) != "[S1]" && processed.substr(0, 4) != "[S2]") {
         processed = "[S1] " + processed;
     }
-    // Ensure trailing period
-    if (!processed.empty() && processed.back() != '.') {
+    // Ensure trailing period (only if text doesn't end with punctuation)
+    if (!processed.empty() && processed.back() != '.' && processed.back() != '?' && processed.back() != '!') {
         processed += ".";
     }
 
@@ -1564,7 +1564,7 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                 // kq: (T_full, 1, n_heads, B) — dot product contracts on head_dim
                 ggml_tensor* kq = ggml_mul_mat(ctx0, k_perm, q_perm);
                 // Scale by 1/sqrt(head_dim)
-                kq = ggml_scale(ctx0, kq, 1.0f / sqrtf((float)head_dim));
+                // Dia uses scale=1.0 (no 1/sqrt(d) scaling) — matching Python SelfAttention/CrossAttention
                 // Softmax (no mask needed for causal since we only have past + current)
                 kq = ggml_soft_max(ctx0, kq);
 
@@ -1595,8 +1595,8 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                 // No RoPE on cross-attention Q (cross-attn uses absolute position from encoder)
 
                 // K/V from precomputed cross-attention cache
-                // cross_k: (cross_kv_dim=2048, T_enc, B) -> (head_dim, n_heads, T_enc, B)
-                // Cross-attention is MHA (16q, 16kv) — no GQA repeat needed
+                // cross_k: (cross_kv_dim=2048, T_enc, B) -> (hd, n_heads, T_enc, B)
+                // MHA (16q, 16kv) — no GQA repeat needed
                 ggml_tensor* K_cross = ggml_reshape_4d(ctx0, cross_k_inputs[l], head_dim, n_heads, T_enc, B);
                 ggml_tensor* V_cross = ggml_reshape_4d(ctx0, cross_v_inputs[l], head_dim, n_heads, T_enc, B);
 
@@ -1604,7 +1604,7 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                 ggml_tensor* q_perm = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
                 ggml_tensor* k_perm = ggml_cont(ctx0, ggml_permute(ctx0, K_cross, 0, 2, 1, 3));
                 ggml_tensor* kq = ggml_mul_mat(ctx0, k_perm, q_perm);
-                kq = ggml_scale(ctx0, kq, 1.0f / sqrtf((float)head_dim));
+                // Dia uses scale=1.0 (no 1/sqrt(d) scaling) — matching Python SelfAttention/CrossAttention
                 kq = ggml_soft_max(ctx0, kq);
 
                 ggml_tensor* v_perm = ggml_cont(ctx0, ggml_permute(ctx0, V_cross, 0, 2, 1, 3));
@@ -1723,20 +1723,30 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         }
 
         // Read logits and apply CFG, then sample
+        if (step == 0 && p.verbosity >= 1) {
+            fprintf(stderr, "dia_tts: decoder step 0 logits dump (for diff-testing):\n");
+        }
         for (int h = 0; h < (int)m.n_output_heads; h++) {
             std::string hn = "logits_" + std::to_string(h);
             // Logits shape: (output_vocab_size, 1, B) = (1028, 1, 2)
-            // Batch 0 = conditional, Batch 1 = unconditional
+            // Batch 0 = unconditional, Batch 1 = conditional (matches encoder input order)
             std::vector<float> logits_raw(m.output_vocab_size * B);
             ggml_backend_tensor_get(ggml_graph_get_tensor(gf, hn.c_str()), logits_raw.data(), 0,
                                     logits_raw.size() * sizeof(float));
 
             // CFG: final_logits = uncond + cfg_scale * (cond - uncond)
             std::vector<float> final_logits(m.output_vocab_size);
-            float* cond = logits_raw.data();
-            float* uncond = logits_raw.data() + m.output_vocab_size;
+            float* uncond = logits_raw.data();                        // batch 0
+            float* cond = logits_raw.data() + m.output_vocab_size;    // batch 1
             for (uint32_t i = 0; i < m.output_vocab_size; i++) {
                 final_logits[i] = uncond[i] + p.cfg_scale * (cond[i] - uncond[i]);
+            }
+
+            if (step == 0 && h == 0 && p.verbosity >= 1) {
+                fprintf(stderr, "  cond h0 first4: %.4f %.4f %.4f %.4f argmax=%d\n",
+                        cond[0], cond[1], cond[2], cond[3],
+                        (int)(std::max_element(cond, cond + m.output_vocab_size) - cond));
+                fprintf(stderr, "  Python ref:     -2.8282 -1.6599 -4.0806 -0.2944 argmax=568\n");
             }
 
             // Sample token for this codebook
