@@ -1197,8 +1197,15 @@ static void mimi_dec_transformer(pocket_tts_context* pctx, float* seq, int T, in
     std::vector<float> normed(D), qkv(3 * D), attn_out(D), proj_out(D);
     std::vector<float> ff_h(FF), ff_out(D), residual(D), scaled(D);
 
+    // Per-layer KV cache: compute K,V once per position, attend from cache.
+    // Reduces complexity from O(T²·D²) to O(T²·D + T·D²).
+    std::vector<float> k_cache((size_t)NL * T * D);
+    std::vector<float> v_cache((size_t)NL * T * D);
+
     for (int l = 0; l < NL; l++) {
         const auto& L = m.dec_transformer_layers[l];
+        float* k_layer = &k_cache[(size_t)l * T * D];
+        float* v_layer = &v_cache[(size_t)l * T * D];
 
         for (int t = 0; t < T; t++) {
             float* x_t = &seq[t * D];
@@ -1210,8 +1217,12 @@ static void mimi_dec_transformer(pocket_tts_context* pctx, float* seq, int T, in
             linear_f32(qkv.data(), normed.data(), L.attn_in_proj, nullptr, 3 * D, D);
 
             float* Q = qkv.data();
+            float* K = qkv.data() + D;
+            float* V = qkv.data() + 2 * D;
 
-            // No RoPE for Mimi transformer (uses relative position via context window)
+            // Store K,V in cache for this position
+            vec_copy(&k_layer[t * D], K, D);
+            vec_copy(&v_layer[t * D], V, D);
 
             // Causal attention with limited context
             int start_pos = std::max(0, t - context_size + 1);
@@ -1223,13 +1234,7 @@ static void mimi_dec_transformer(pocket_tts_context* pctx, float* seq, int T, in
                 float scale = 1.0f / std::sqrt((float)HD);
                 for (int p = 0; p < att_len; p++) {
                     int abs_p = start_pos + p;
-                    float* other = &seq[abs_p * D];
-                    // Recompute K for position (since we process sequentially)
-                    std::vector<float> qkv_p(3 * D), normed_p(D);
-                    layer_norm(normed_p.data(), other, D, tensor_f32_data(L.attn_norm_w),
-                               tensor_f32_data(L.attn_norm_b));
-                    linear_f32(qkv_p.data(), normed_p.data(), L.attn_in_proj, nullptr, 3 * D, D);
-                    float* Kp = qkv_p.data() + D;
+                    float* Kp = &k_layer[abs_p * D];
                     scores[p] = vec_dot(&Q[h * HD], &Kp[h * HD], HD) * scale;
                 }
                 float max_s = *std::max_element(scores.begin(), scores.begin() + att_len);
@@ -1243,12 +1248,7 @@ static void mimi_dec_transformer(pocket_tts_context* pctx, float* seq, int T, in
 
                 for (int p = 0; p < att_len; p++) {
                     int abs_p = start_pos + p;
-                    float* other = &seq[abs_p * D];
-                    std::vector<float> qkv_p(3 * D), normed_p(D);
-                    layer_norm(normed_p.data(), other, D, tensor_f32_data(L.attn_norm_w),
-                               tensor_f32_data(L.attn_norm_b));
-                    linear_f32(qkv_p.data(), normed_p.data(), L.attn_in_proj, nullptr, 3 * D, D);
-                    float* Vp = qkv_p.data() + 2 * D;
+                    float* Vp = &v_layer[abs_p * D];
                     vec_fma(&attn_out[h * HD], &Vp[h * HD], scores[p], HD);
                 }
             }
