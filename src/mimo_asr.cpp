@@ -340,10 +340,28 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
     // steps). Force-CPU is the cheapest path to correctness; the
     // proper GPU graph fix is tracked as PLAN #115 option C and
     // belongs in `mimo_asr_build_prefill_graph`.
-    ctx->backend = ctx->backend_cpu;
-    // params.use_gpu intentionally ignored — see PLAN #115
-    if (params.use_gpu && params.verbosity >= 1) {
-        fprintf(stderr, "mimo_asr: --gpu honored as CPU (PLAN #115 — GPU prefill broken)\n");
+    // PLAN #115 option C diagnostic. Default is force-CPU (option A,
+    // verified correct on M1 Metal + Kaggle CPU). Setting
+    // CRISPASR_MIMO_FORCE_GPU=1 (with --gpu) re-enables the GPU-resident
+    // weights + GPU compute config (the `89111260` path) so the silent-empty
+    // bug can be reproduced and localised stage-by-stage on a Kaggle GPU box
+    // (the local M1 can't hold the 4.2 GB model). When this opt-in is OFF the
+    // behaviour is unchanged.
+    const bool force_gpu = params.use_gpu && std::getenv("CRISPASR_MIMO_FORCE_GPU") != nullptr;
+    if (force_gpu) {
+        ctx->backend = ggml_backend_init_best();
+        if (!ctx->backend) {
+            fprintf(stderr, "mimo_asr: GPU backend init failed; falling back to CPU\n");
+            ctx->backend = ctx->backend_cpu;
+        } else if (params.verbosity >= 1) {
+            fprintf(stderr,
+                    "mimo_asr: CRISPASR_MIMO_FORCE_GPU=1 — weights + compute on GPU (PLAN #115 option C diag)\n");
+        }
+    } else {
+        ctx->backend = ctx->backend_cpu;
+        if (params.use_gpu && params.verbosity >= 1) {
+            fprintf(stderr, "mimo_asr: --gpu honored as CPU (PLAN #115 — set CRISPASR_MIMO_FORCE_GPU=1 to test GPU)\n");
+        }
     }
     // PLAN #69a: when CRISPASR_N_GPU_LAYERS is set and < total LLM
     // layers, the split loader still works against ctx->backend_cpu —
@@ -367,7 +385,10 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         }
         fprintf(stderr, "mimo_asr: layer offload requested but pinned to CPU (PLAN #115 — GPU path broken)\n");
     } else {
-        if (!core_gguf::load_weights(path_model, ctx->backend_cpu, "mimo_asr", wl)) {
+        // force_gpu (option C diag) loads weights onto the GPU backend so the
+        // whole prefill runs GPU-resident; default loads onto CPU (option A).
+        ggml_backend_t weight_backend = force_gpu ? ctx->backend : ctx->backend_cpu;
+        if (!core_gguf::load_weights(path_model, weight_backend, "mimo_asr", wl)) {
             fprintf(stderr, "mimo_asr: failed to load weights from '%s'\n", path_model);
             delete ctx;
             return nullptr;

@@ -3956,6 +3956,16 @@ Considered earlier as Option 1. Rejected because:
 
 ## 115. mimo-asr baseline broken — silent empty on short, segfault on long
 
+**Status (2026-06-02):** option A shipped, option C in progress. Added the
+opt-in `CRISPASR_MIMO_FORCE_GPU=1` diagnostic (loads weights on the GPU
+backend + computes there — the `89111260` config) and a CUDA Kaggle kernel
+`tools/kaggle/mimo-asr-gpu-diff/` that reproduces the GPU silent-empty on a
+GPU box (the local M1 can't hold the 4.2 GB model) and dumps the failure
+point. Default behaviour unchanged (force-CPU). Next: read the kernel's GPU
+stderr → localise → fix the prefill graph emission (per-tensor backend
+tagging), validated via a CPU-vs-GPU `mimo_asr_extract_stage` self-diff
+(no Python ref needed — the CPU path is the verified reference).
+
 **Status (2026-05-26):** option A shipped, option C still open.
 
 The smoking-gun commit is `89111260` ("perf #72: load weights to GPU when use_gpu=true"), which flipped `core_gguf::load_weights(..., ctx->backend_cpu, ...)` to `..., ctx->backend, ...`. The same commit message foresaw the regression — *"If a platform regresses, add a CRISPASR_FORCE_CPU_WEIGHTS=1 escape hatch — none seen yet"*.
