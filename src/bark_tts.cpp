@@ -35,6 +35,7 @@
 
 #include "bark_tts.h"
 #include "core/gguf_loader.h"
+#include "core/wordpiece.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -196,6 +197,7 @@ struct bark_context {
     bark_encodec_model encodec;
 
     bark_speaker_prompt speaker;
+    core_wordpiece::Tokenizer tokenizer;
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
@@ -1026,21 +1028,49 @@ static int sample_from_logits(const float* logits, int vocab_size, float tempera
 // Stage 1: Generate semantic tokens from text
 // ---------------------------------------------------------------------------
 
-// Simple tokenizer: maps text characters to token IDs offset by TEXT_ENCODING_OFFSET.
-// Bark's actual tokenizer is a BERT word-piece tokenizer. For a minimal implementation,
-// we use byte-level encoding: each byte -> byte_val + TEXT_ENCODING_OFFSET.
-// This is a functional approximation that produces valid tokens in the model's range.
-static std::vector<int32_t> tokenize_text_simple(const char* text, uint32_t text_encoding_offset,
-                                                 uint32_t text_pad_token, int max_len) {
+// Tokenize text for bark's semantic model.
+// Uses BERT WordPiece tokenizer (from GGUF vocab) when available, falls back
+// to byte-level encoding otherwise.
+// Returns padded token sequence of exactly max_len elements, each offset by
+// TEXT_ENCODING_OFFSET.
+static std::vector<int32_t> tokenize_text(bark_context* ctx, const char* text, int max_len) {
+    auto& pp = ctx->pp;
     std::vector<int32_t> tokens;
-    const uint8_t* p = (const uint8_t*)text;
-    while (*p && (int)tokens.size() < max_len) {
-        tokens.push_back((int32_t)(*p) + (int32_t)text_encoding_offset);
-        p++;
+
+    if (ctx->tokenizer.loaded) {
+        // BERT WordPiece: [CLS] tokens... [SEP], then offset by TEXT_ENCODING_OFFSET
+        std::vector<int32_t> wp_ids = ctx->tokenizer.tokenize(text);
+        // Bark prepends [CLS]=101 and appends [SEP]=102
+        tokens.push_back((int32_t)(101 + pp.text_encoding_offset));
+        for (int32_t id : wp_ids) {
+            if ((int)tokens.size() >= max_len - 1)
+                break;
+            tokens.push_back(id + (int32_t)pp.text_encoding_offset);
+        }
+        tokens.push_back((int32_t)(102 + pp.text_encoding_offset));
+
+        if (ctx->params.verbosity >= 2) {
+            fprintf(stderr, "bark: BERT tokenized %d tokens (max=%d)\n", (int)tokens.size(), max_len);
+        }
+    } else {
+        // Fallback: byte-level encoding
+        const uint8_t* p = (const uint8_t*)text;
+        while (*p && (int)tokens.size() < max_len) {
+            tokens.push_back((int32_t)(*p) + (int32_t)pp.text_encoding_offset);
+            p++;
+        }
+        if (ctx->params.verbosity >= 1) {
+            fprintf(stderr, "bark: WARNING: no BERT vocab in GGUF, using byte-level tokenizer\n");
+        }
     }
+
     // Pad to max_len
     while ((int)tokens.size() < max_len) {
-        tokens.push_back((int32_t)text_pad_token);
+        tokens.push_back((int32_t)pp.text_pad_token);
+    }
+    // Truncate if needed
+    if ((int)tokens.size() > max_len) {
+        tokens.resize((size_t)max_len);
     }
     return tokens;
 }
@@ -1056,7 +1086,7 @@ static std::vector<int32_t> generate_text_semantic(bark_context* ctx, const char
     }
 
     // 1. Tokenize text -> padded to 256
-    std::vector<int32_t> text_tokens = tokenize_text_simple(text, pp.text_encoding_offset, pp.text_pad_token, ctx_len);
+    std::vector<int32_t> text_tokens = tokenize_text(ctx, text, ctx_len);
 
     // 2. Semantic history (from speaker or all-PAD)
     std::vector<int32_t> sem_hist(ctx_len, (int32_t)pp.semantic_pad_token);
@@ -1791,10 +1821,19 @@ struct bark_context* bark_init_from_file(const char* path_model, struct bark_con
     ctx->buf_w = wl.buf;
     ctx->tensors = std::move(wl.tensors);
 
-    // Load metadata
+    // Load metadata + tokenizer vocab
     gguf_context* g = gguf_init_from_file(path_model, {/*.no_alloc=*/true, /*.ctx=*/nullptr});
     if (g) {
         load_metadata(ctx, g);
+        // Load BERT tokenizer vocab if embedded
+        ctx->tokenizer.id_to_token = core_gguf::kv_str_array(g, "tokenizer.ggml.tokens");
+        if (!ctx->tokenizer.id_to_token.empty()) {
+            ctx->tokenizer.build_map();
+            if (params.verbosity >= 1) {
+                fprintf(stderr, "bark: loaded BERT vocab (%d tokens, %s)\n", (int)ctx->tokenizer.id_to_token.size(),
+                        ctx->tokenizer.do_lower ? "uncased" : "cased");
+            }
+        }
         gguf_free(g);
     }
 
