@@ -232,13 +232,13 @@ def map_decoder_tensors(tensors: dict, config: dict) -> list[tuple[str, np.ndarr
     if pos_key in tensors:
         mapped.append(("dec.pos_embed.weight", to_f32(tensors[pos_key])))
 
-    # Final layer norm
+    # Final layer norm (F32 to avoid mixed-type ggml_mul issues)
     for name_pair in [
         ("decoder.model.decoder.layer_norm.weight", "dec.final_norm.weight"),
         ("decoder.model.decoder.layer_norm.bias", "dec.final_norm.bias"),
     ]:
         if name_pair[0] in tensors:
-            mapped.append((name_pair[1], to_f16(tensors[name_pair[0]])))
+            mapped.append((name_pair[1], to_f32(tensors[name_pair[0]])))
 
     # LM heads: fused or per-codebook
     use_fused = config["decoder"].get("use_fused_lm_heads", False)
@@ -275,42 +275,58 @@ def map_decoder_tensors(tensors: dict, config: dict) -> list[tuple[str, np.ndarr
         lt = layer_tensors[layer_idx]
         pfx = f"dec.blk.{layer_idx}"
 
-        # Self-attention
-        sa_map = {
+        # Self-attention (projections F16, norms F32)
+        sa_proj = {
             "self_attn.q_proj.weight": f"{pfx}.self_attn_q.weight",
             "self_attn.k_proj.weight": f"{pfx}.self_attn_k.weight",
             "self_attn.v_proj.weight": f"{pfx}.self_attn_v.weight",
             "self_attn.out_proj.weight": f"{pfx}.self_attn_o.weight",
+        }
+        for src, dst in sa_proj.items():
+            if src in lt:
+                mapped.append((dst, to_f16(lt[src])))
+        # LayerNorm weights/biases stored as F32 (avoids F16×F32 ggml_mul issues)
+        sa_norm = {
             "self_attn_layer_norm.weight": f"{pfx}.self_attn_norm.weight",
             "self_attn_layer_norm.bias": f"{pfx}.self_attn_norm.bias",
         }
-        for src, dst in sa_map.items():
+        for src, dst in sa_norm.items():
             if src in lt:
-                mapped.append((dst, to_f16(lt[src])))
+                mapped.append((dst, to_f32(lt[src])))
 
-        # Cross-attention (encoder_attn)
-        ca_map = {
+        # Cross-attention (projections F16, norms F32)
+        ca_proj = {
             "encoder_attn.q_proj.weight": f"{pfx}.cross_attn_q.weight",
             "encoder_attn.k_proj.weight": f"{pfx}.cross_attn_k.weight",
             "encoder_attn.v_proj.weight": f"{pfx}.cross_attn_v.weight",
             "encoder_attn.out_proj.weight": f"{pfx}.cross_attn_o.weight",
+        }
+        for src, dst in ca_proj.items():
+            if src in lt:
+                mapped.append((dst, to_f16(lt[src])))
+        ca_norm = {
             "encoder_attn_layer_norm.weight": f"{pfx}.cross_attn_norm.weight",
             "encoder_attn_layer_norm.bias": f"{pfx}.cross_attn_norm.bias",
         }
-        for src, dst in ca_map.items():
+        for src, dst in ca_norm.items():
             if src in lt:
-                mapped.append((dst, to_f16(lt[src])))
+                mapped.append((dst, to_f32(lt[src])))
 
-        # FFN
-        ffn_map = {
+        # FFN (projections F16, norms F32)
+        ffn_proj = {
             "fc1.weight": f"{pfx}.fc1.weight",
             "fc2.weight": f"{pfx}.fc2.weight",
+        }
+        for src, dst in ffn_proj.items():
+            if src in lt:
+                mapped.append((dst, to_f16(lt[src])))
+        ffn_norm = {
             "final_layer_norm.weight": f"{pfx}.ffn_norm.weight",
             "final_layer_norm.bias": f"{pfx}.ffn_norm.bias",
         }
-        for src, dst in ffn_map.items():
+        for src, dst in ffn_norm.items():
             if src in lt:
-                mapped.append((dst, to_f16(lt[src])))
+                mapped.append((dst, to_f32(lt[src])))
 
     return mapped
 
@@ -321,67 +337,101 @@ def map_decoder_tensors(tensors: dict, config: dict) -> list[tuple[str, np.ndarr
 
 
 def map_dac_tensors(tensors: dict) -> list[tuple[str, np.ndarray]]:
-    """Map HuggingFace DAC audio encoder tensors to GGUF naming.
+    """Map HuggingFace transformers DacModel tensors to GGUF naming.
 
-    DAC uses weight normalization (weight_v + weight_g) which we fuse
-    into a single weight tensor.
+    HF transformers naming (parler-tts v0.2+, transformers 4.46+):
+      audio_encoder.quantizer.quantizers.K.codebook.weight  (1024, 8)
+      audio_encoder.quantizer.quantizers.K.out_proj.weight  (1024, 8, 1) Conv1d
+      audio_encoder.quantizer.quantizers.K.out_proj.bias    (1024,)
+      audio_encoder.decoder.conv1.weight  (1536, 1024, 7)  input conv
+      audio_encoder.decoder.block.B.snake1.alpha  pre-upsample snake
+      audio_encoder.decoder.block.B.conv_t1.*     ConvTranspose1d
+      audio_encoder.decoder.block.B.res_unitR.snake1/2.alpha
+      audio_encoder.decoder.block.B.res_unitR.conv1/2.*
+      audio_encoder.decoder.snake1.alpha   final snake
+      audio_encoder.decoder.conv2.*        output conv (96→1, k=7)
+
+    GGUF naming:
+      dac.quant.K.weight           codebook embedding
+      dac.quant_proj.K.weight      out_proj weight (squeezed to 2D)
+      dac.quant_proj.K.bias        out_proj bias
+      dac.dec.in_conv.weight/bias  input Conv1d
+      dac.dec.blk.B.0.alpha        pre-upsample snake
+      dac.dec.blk.B.1.weight/bias  ConvTranspose1d
+      dac.dec.blk.B.{2,3,4}.alpha0/alpha1/conv0.weight/conv0.bias/conv1.weight/conv1.bias
+      dac.dec.out_snake.alpha      final snake
+      dac.dec.out_conv.weight/bias output Conv1d
     """
     mapped = []
 
-    # Build set of weight_norm prefixes for fusing
-    wn_prefixes = set()
-    for name in tensors:
-        if name.endswith(".weight_v"):
-            wn_prefixes.add(name[:-len("weight_v")])
-
     # Quantizer: codebooks + out_proj
-    for name, data in tensors.items():
-        if not name.startswith("audio_encoder.model.quantizer."):
-            continue
-        # Skip in_proj (encoder-only)
-        if "in_proj" in name:
-            continue
-        # Skip weight_v (handled via weight_g fusing)
-        if name.endswith(".weight_v"):
-            continue
+    for k in range(9):
+        cb_key = f"audio_encoder.quantizer.quantizers.{k}.codebook.weight"
+        if cb_key in tensors:
+            mapped.append((f"dac.quant.{k}.weight", to_f16(tensors[cb_key])))
 
-        suffix = name[len("audio_encoder.model.quantizer."):]
+        op_w_key = f"audio_encoder.quantizer.quantizers.{k}.out_proj.weight"
+        if op_w_key in tensors:
+            # Conv1d weight (1024, 8, 1) -> squeeze to (1024, 8) for linear
+            w = tensors[op_w_key]
+            if w.ndim == 3:
+                w = w.squeeze(-1)  # (1024, 8)
+            mapped.append((f"dac.quant_proj.{k}.weight", to_f16(w)))
 
-        if name.endswith(".weight_g"):
-            # Fuse weight norm
-            prefix = name[:-len("weight_g")]
-            fused = fuse_weight_norm(tensors, prefix)
-            out_name = f"dac.quant.{suffix[:-len('.weight_g')]}.weight"
-            mapped.append((out_name, to_f16(fused)))
-        elif (name[:-len("weight")] if name.endswith("weight") else name + "NOMATCH") not in wn_prefixes:
-            # Regular tensor (not part of weight_norm pair)
-            out_name = f"dac.quant.{suffix}"
-            mapped.append((out_name, to_f16(data)))
-        else:
-            # codebook embeddings (no weight norm)
-            out_name = f"dac.quant.{suffix}"
-            mapped.append((out_name, to_f16(data)))
+        op_b_key = f"audio_encoder.quantizer.quantizers.{k}.out_proj.bias"
+        if op_b_key in tensors:
+            mapped.append((f"dac.quant_proj.{k}.bias", to_f32(tensors[op_b_key])))
 
-    # Decoder
-    for name, data in tensors.items():
-        if not name.startswith("audio_encoder.model.decoder."):
-            continue
-        if name.endswith(".weight_v"):
-            continue
+    # Decoder: input conv
+    for suffix in ["weight", "bias"]:
+        key = f"audio_encoder.decoder.conv1.{suffix}"
+        if key in tensors:
+            mapped.append((f"dac.dec.in_conv.{suffix}", to_f16(tensors[key])))
 
-        suffix = name[len("audio_encoder.model.decoder."):]
+    # Decoder blocks (4 blocks)
+    for b in range(4):
+        # Pre-upsample snake
+        key = f"audio_encoder.decoder.block.{b}.snake1.alpha"
+        if key in tensors:
+            mapped.append((f"dac.dec.blk.{b}.0.alpha", to_f16(tensors[key])))
 
-        if name.endswith(".weight_g"):
-            prefix = name[:-len("weight_g")]
-            fused = fuse_weight_norm(tensors, prefix)
-            out_name = f"dac.dec.{suffix[:-len('.weight_g')]}.weight"
-            mapped.append((out_name, to_f16(fused)))
-        elif (name[:-len("weight")] if name.endswith("weight") else "") in wn_prefixes:
-            # Part of a weight_norm pair, skip (handled by weight_g branch)
-            continue
-        else:
-            out_name = f"dac.dec.{suffix}"
-            mapped.append((out_name, to_f16(data)))
+        # ConvTranspose1d (upsample)
+        for suffix in ["weight", "bias"]:
+            key = f"audio_encoder.decoder.block.{b}.conv_t1.{suffix}"
+            if key in tensors:
+                mapped.append((f"dac.dec.blk.{b}.1.{suffix}", to_f16(tensors[key])))
+
+        # 3 residual units (res_unit1, res_unit2, res_unit3)
+        for r in range(3):
+            ru_prefix = f"audio_encoder.decoder.block.{b}.res_unit{r+1}"
+            gguf_idx = r + 2  # res units are at indices 2, 3, 4
+
+            # Snake alphas
+            key = f"{ru_prefix}.snake1.alpha"
+            if key in tensors:
+                mapped.append((f"dac.dec.blk.{b}.{gguf_idx}.alpha0", to_f16(tensors[key])))
+            key = f"{ru_prefix}.snake2.alpha"
+            if key in tensors:
+                mapped.append((f"dac.dec.blk.{b}.{gguf_idx}.alpha1", to_f16(tensors[key])))
+
+            # Conv1d weights
+            for suffix in ["weight", "bias"]:
+                key = f"{ru_prefix}.conv1.{suffix}"
+                if key in tensors:
+                    mapped.append((f"dac.dec.blk.{b}.{gguf_idx}.conv0.{suffix}", to_f16(tensors[key])))
+                key = f"{ru_prefix}.conv2.{suffix}"
+                if key in tensors:
+                    mapped.append((f"dac.dec.blk.{b}.{gguf_idx}.conv1.{suffix}", to_f16(tensors[key])))
+
+    # Final snake + output conv
+    key = "audio_encoder.decoder.snake1.alpha"
+    if key in tensors:
+        mapped.append(("dac.dec.out_snake.alpha", to_f16(tensors[key])))
+
+    for suffix in ["weight", "bias"]:
+        key = f"audio_encoder.decoder.conv2.{suffix}"
+        if key in tensors:
+            mapped.append((f"dac.dec.out_conv.{suffix}", to_f16(tensors[key])))
 
     return mapped
 
@@ -392,7 +442,60 @@ def map_dac_tensors(tensors: dict) -> list[tuple[str, np.ndarray]]:
 
 
 def load_tokenizer_vocab(model_dir: Path) -> tuple[list[str], list[float]]:
-    """Load the unigram tokenizer vocabulary and scores."""
+    """Load the tokenizer vocabulary and scores.
+
+    Parler TTS uses a LLaMA sentencepiece model. We prefer loading from
+    tokenizer.model (sentencepiece protobuf) which has proper unigram scores.
+    Falls back to tokenizer.json if no .model file exists.
+
+    IMPORTANT: tokens are stored WITH the sentencepiece ▁ prefix (U+2581),
+    NOT replaced with space. The C++ core_spm::tokenize expects ▁ in vocab.
+    """
+    # Prefer sentencepiece .model file
+    spm_path = model_dir / "tokenizer.model"
+    if spm_path.exists():
+        try:
+            import sentencepiece as spm_mod
+            sp = spm_mod.SentencePieceProcessor()
+            sp.Load(str(spm_path))
+            # Detect model type: 1=unigram, 2=bpe
+            import sentencepiece.sentencepiece_model_pb2 as model_pb2
+            m = model_pb2.ModelProto()
+            with open(str(spm_path), "rb") as mf:
+                m.ParseFromString(mf.read())
+            is_bpe = (m.trainer_spec.model_type == 2)
+
+            tokens = []
+            scores = []
+            for i in range(sp.GetPieceSize()):
+                piece = sp.IdToPiece(i)
+                tokens.append(piece)
+                s = sp.GetScore(i)
+                if is_bpe:
+                    # For BPE models, negate scores so Viterbi picks longer
+                    # (higher-rank) pieces, matching BPE merge order.
+                    # But byte-fallback pieces (score < -1e6) and special
+                    # tokens (score = 0, type != normal) must get LOW scores
+                    # so Viterbi only uses them as a last resort.
+                    p = m.pieces[i]
+                    if p.type in (2, 3, 6):
+                        # control/user_defined/byte: keep very low
+                        scores.append(-100.0)
+                    else:
+                        # Use piece LENGTH (in bytes) as the Viterbi score.
+                        # Longer pieces get higher scores → Viterbi prefers
+                        # the longest matching piece at each position,
+                        # approximating BPE merge behavior.
+                        scores.append(float(len(piece.encode('utf-8'))))
+                else:
+                    scores.append(s)
+            kind = "BPE (scores negated)" if is_bpe else "unigram"
+            print(f"  loaded sentencepiece .model ({kind}): {len(tokens)} tokens", file=sys.stderr)
+            return tokens, scores
+        except ImportError:
+            print("WARNING: sentencepiece not installed, falling back to tokenizer.json", file=sys.stderr)
+
+    # Fallback: tokenizer.json
     tok_json = model_dir / "tokenizer.json"
     if not tok_json.exists():
         print("WARNING: tokenizer.json not found, skipping vocab", file=sys.stderr)
@@ -402,20 +505,31 @@ def load_tokenizer_vocab(model_dir: Path) -> tuple[list[str], list[float]]:
         tok = json.load(f)
 
     model = tok.get("model", {})
-    vocab_items = model.get("vocab", [])
+    vocab = model.get("vocab", {})
 
-    tokens = []
-    scores = []
-    for item in vocab_items:
-        if isinstance(item, list) and len(item) == 2:
-            token, score = item
-            # Replace sentencepiece underscore with space
-            token = token.replace("\u2581", " ")
-            tokens.append(token)
-            scores.append(float(score))
-        else:
-            tokens.append(str(item))
-            scores.append(0.0)
+    if isinstance(vocab, dict):
+        # BPE-style dict: {token: id} — no scores
+        n = len(vocab)
+        tokens = [""] * n
+        scores = [0.0] * n
+        for token, idx in vocab.items():
+            if idx < n:
+                tokens[idx] = token
+        print(f"  loaded BPE vocab from tokenizer.json: {n} tokens (no scores)", file=sys.stderr)
+    elif isinstance(vocab, list):
+        # Unigram-style list: [[token, score], ...]
+        tokens = []
+        scores = []
+        for item in vocab:
+            if isinstance(item, list) and len(item) == 2:
+                tokens.append(item[0])
+                scores.append(float(item[1]))
+            else:
+                tokens.append(str(item))
+                scores.append(0.0)
+        print(f"  loaded unigram vocab from tokenizer.json: {len(tokens)} tokens", file=sys.stderr)
+    else:
+        return [], []
 
     return tokens, scores
 

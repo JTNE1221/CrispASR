@@ -55,8 +55,9 @@ public:
         cp.use_gpu = crispasr_backend_should_use_gpu(p);
         cp.flash_attn = p.flash_attn;
 
-        if (p.temperature > 0.0f)
-            cp.temperature = p.temperature;
+        // Parler TTS needs stochastic sampling (temp=1.0) by default.
+        // CLI default is 0.0 (greedy for ASR), so override unless user explicitly set -tp.
+        cp.temperature = (p.temperature > 0.0f) ? p.temperature : 1.0f;
         cp.seed = p.seed;
 
         std::string model_path = p.model;
@@ -86,8 +87,7 @@ public:
         if (!ctx_ || text.empty())
             return {};
 
-        if (params.temperature > 0.0f)
-            parler_tts_set_temperature(ctx_, params.temperature);
+        parler_tts_set_temperature(ctx_, (params.temperature > 0.0f) ? params.temperature : 1.0f);
         parler_tts_set_seed(ctx_, params.seed);
 
         // If --instruct changed since last call, re-encode description

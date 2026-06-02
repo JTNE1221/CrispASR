@@ -220,6 +220,11 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # Audio arg is a reference voice WAV for cloning (16 kHz); synth text
     # from F5_TTS_SYN_TEXT env var (default "Hello world.").
     "f5-tts":     "reference_backends.f5_tts",
+    # Parler TTS: T5 encoder + MusicGen decoder + DAC 44 kHz.
+    # model_dir = parler-tts/parler-tts-mini-v1.1 HF snapshot.
+    # Audio arg unused (text-driven). Text from PARLER_TEXT / PARLER_DESC
+    # env vars. See reference_backends/parler_tts.py for the full list.
+    "parler-tts": "reference_backends.parler_tts",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

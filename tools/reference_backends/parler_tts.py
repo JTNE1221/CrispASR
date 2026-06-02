@@ -1,185 +1,183 @@
-#!/usr/bin/env python3
-"""
-Parler TTS reference backend -- loads the HuggingFace model, runs
-inference, dumps intermediates for diff-testing the C++ port.
+"""Parler TTS reference dump backend — T5 encoder + MusicGen decoder + DAC.
 
-Usage:
-    python tools/reference_backends/parler_tts.py \\
-        --text "Hello, this is a test." \\
-        --description "A female speaker with a warm voice in a quiet room" \\
-        --output /mnt/storage/parler-tts/ref_output.wav \\
-        --dump-dir /mnt/storage/parler-tts/ref_intermediates
+Captures per-stage activations from the HuggingFace parler-tts model for
+diff-testing the C++ port.  Text inputs come from env vars:
 
-Requires: pip install parler-tts torch soundfile numpy
+  PARLER_TEXT       default: "Hello, this is a test of Parler TTS."
+  PARLER_DESC       default: "A female speaker with a warm, natural voice
+                     delivers her words at a moderate pace in a quiet
+                     environment."
+  PARLER_SEED       default: 42
+
+The audio arg from tools/dump_reference.py is unused (Parler is text-driven).
+
+Stages dumped (subset selectable via --stages):
+
+  description_ids     — T5 encoder input token IDs cast to F32
+  prompt_ids          — decoder prompt token IDs cast to F32
+  t5_encoder_output   — T5 encoder final hidden state (T_desc, D)
+  prefill_input       — decoder prefill input hidden (T_prefill, D)
+                        = cat(prompt_embed, bos_cb_sum) + pos_embed
+  prefill_kv_k_0      — self-attn K cache layer 0 after prefill (D, T)
+                        in ggml (D-fast) layout
+  prefill_kv_k_23     — same for layer 23
+  step1_input         — incremental step 1 input hidden (D,)
+  step1_logits_cb0    — step 1 codebook-0 logits (vocab_size,)
+  gen_codes_20        — first 20 greedy-decoded code steps (9, 20) as F32
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
+from pathlib import Path
+from typing import Any, Dict, Set
 
 import numpy as np
-import torch
+
+DEFAULT_STAGES = [
+    "description_ids",
+    "prompt_ids",
+    "t5_encoder_output",
+    "prefill_input",
+    "prefill_kv_k_0",
+    "prefill_kv_k_23",
+    "step1_input",
+    "step1_logits_cb0",
+    "gen_codes_20",
+]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Parler TTS reference inference")
-    parser.add_argument("--text", type=str, default="Hello, this is a test of Parler TTS.",
-                        help="Text to synthesize")
-    parser.add_argument("--description", type=str,
-                        default="A female speaker with a warm, natural voice delivers her words at a moderate pace in a quiet environment.",
-                        help="Voice description prompt")
-    parser.add_argument("--model", type=str, default="parler-tts/parler-tts-mini-v1.1",
-                        help="HuggingFace model ID")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output WAV file path")
-    parser.add_argument("--dump-dir", type=str, default=None,
-                        help="Directory to dump intermediate tensors for diff-testing")
-    parser.add_argument("--max-length", type=int, default=2580,
-                        help="Max generation length")
-    parser.add_argument("--temperature", type=float, default=1.0,
-                        help="Sampling temperature (1.0 = default)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
-    args = parser.parse_args()
+def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
+         max_new_tokens: int) -> Dict[str, np.ndarray]:
+    """Run Parler TTS forward, return captured stage tensors keyed by name."""
+    _ = audio  # unused — Parler is text-driven
+    import torch
 
-    try:
-        from parler_tts import ParlerTTSForConditionalGeneration
-        from transformers import AutoTokenizer
-    except ImportError:
-        sys.exit("pip install parler-tts transformers")
+    os.environ.setdefault("HF_HOME", "/mnt/storage/huggingface")
 
-    try:
-        import soundfile as sf
-    except ImportError:
-        sys.exit("pip install soundfile")
+    from parler_tts import ParlerTTSForConditionalGeneration
+    from transformers import AutoTokenizer
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float32  # CPU-safe
+    text = os.environ.get("PARLER_TEXT",
+                          "Hello, this is a test of Parler TTS.")
+    desc = os.environ.get("PARLER_DESC",
+                          "A female speaker with a warm, natural voice delivers "
+                          "her words at a moderate pace in a quiet environment.")
+    seed = int(os.environ.get("PARLER_SEED", "42"))
+    n_steps = min(max_new_tokens if max_new_tokens > 0 else 20, 20)
 
-    print(f"Loading model {args.model}...", file=sys.stderr)
+    print(f"parler_tts ref: loading {model_dir}", file=sys.stderr)
     model = ParlerTTSForConditionalGeneration.from_pretrained(
-        args.model, torch_dtype=torch_dtype
-    ).to(device)
-    model.eval()
+        str(model_dir), torch_dtype=torch.float32).eval()
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    decoder = model.decoder
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    desc_ids = tokenizer(desc, return_tensors="pt").input_ids
+    prompt_ids = tokenizer(text, return_tensors="pt").input_ids
+    num_cb = decoder.config.num_codebooks
+    bos = decoder.config.bos_token_id
+    D = decoder.config.hidden_size
 
-    # Also load the description tokenizer if available
-    desc_tokenizer = None
-    try:
-        desc_tokenizer = AutoTokenizer.from_pretrained(args.model, subfolder="description_tokenizer")
-    except Exception:
-        # Some versions don't have a separate description tokenizer
-        desc_tokenizer = tokenizer
+    captures: Dict[str, Any] = {}
 
-    print(f"Tokenizing description: '{args.description[:60]}...'", file=sys.stderr)
-    description_ids = desc_tokenizer(args.description, return_tensors="pt").input_ids.to(device)
+    if "description_ids" in stages:
+        captures["description_ids"] = desc_ids[0].numpy().astype(np.float32)
+    if "prompt_ids" in stages:
+        captures["prompt_ids"] = prompt_ids[0].numpy().astype(np.float32)
 
-    print(f"Tokenizing text: '{args.text[:60]}...'", file=sys.stderr)
-    prompt_ids = tokenizer(args.text, return_tensors="pt").input_ids.to(device)
-
-    # Dump tokenizer info
-    if args.dump_dir:
-        os.makedirs(args.dump_dir, exist_ok=True)
-        np.save(os.path.join(args.dump_dir, "description_ids.npy"),
-                description_ids.cpu().numpy())
-        np.save(os.path.join(args.dump_dir, "prompt_ids.npy"),
-                prompt_ids.cpu().numpy())
-
-    # Run T5 encoder on description
-    print("Running T5 encoder on description...", file=sys.stderr)
     with torch.no_grad():
-        # Get encoder outputs manually
-        encoder_outputs = model.text_encoder(
-            input_ids=description_ids,
+        # ── T5 encoder ──
+        enc_out = model.text_encoder(input_ids=desc_ids).last_hidden_state
+        if "t5_encoder_output" in stages:
+            captures["t5_encoder_output"] = enc_out[0].numpy()
+
+        # ── Prefill input construction (mirrors C++) ──
+        prompt_embed = model.embed_prompts(prompt_ids)     # (1, T_prompt, D)
+        bos_ids_3d = torch.full((1, num_cb, 1), bos, dtype=torch.long)
+        cb_sum = sum([decoder.model.decoder.embed_tokens[k](bos_ids_3d[:, k])
+                      for k in range(num_cb)])             # (1, 1, D)
+        full_embed = torch.cat([prompt_embed, cb_sum], dim=1)  # (1, T_pf, D)
+        T_pf = full_embed.shape[1]
+        pos_w = decoder.model.decoder.embed_positions.weights[:T_pf]
+        prefill_hidden = full_embed[0] + pos_w             # (T_pf, D)
+
+        if "prefill_input" in stages:
+            captures["prefill_input"] = prefill_hidden.numpy()
+
+        # ── Decoder prefill (get KV cache + first logits) ──
+        bos_ids = torch.full((num_cb, 1), bos, dtype=torch.long)
+        result = decoder(
+            input_ids=bos_ids,
+            encoder_hidden_states=enc_out,
+            prompt_hidden_states=prompt_embed,
+            use_cache=True,
         )
-        encoder_hidden = encoder_outputs.last_hidden_state
-        print(f"  T5 encoder output shape: {encoder_hidden.shape}", file=sys.stderr)
+        past_kv = result.past_key_values
 
-        if args.dump_dir:
-            np.save(os.path.join(args.dump_dir, "t5_encoder_output.npy"),
-                    encoder_hidden.cpu().numpy())
+        # Capture KV cache — convert to ggml (D, T) layout
+        # past_kv format: EncoderDecoderCache or legacy tuple
+        # For legacy tuple: past_kv[layer] = ((self_k, self_v), (cross_k, cross_v))
+        # For EncoderDecoderCache: .self_attention_cache.key_cache[layer]
+        for li in [0, 23]:
+            stage = f"prefill_kv_k_{li}"
+            if stage in stages:
+                # Legacy tuple: past_kv[layer] = (self_k, self_v, cross_k, cross_v)
+                # self_k shape: (batch, num_heads, T, head_dim)
+                k = past_kv[li][0][0]  # (nh, T, hd)
+                # To ggml (D, T): permute to (nh, hd, T) then reshape
+                k_flat = k.permute(0, 2, 1).reshape(-1, k.shape[1])  # (D, T)
+                captures[stage] = k_flat.numpy()
 
-    # Run full generation
-    print("Generating audio codes...", file=sys.stderr)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
+        # First token (greedy)
+        first_logits = result.logits[:, -1, :]         # (num_cb, vocab)
+        first_tokens = first_logits.argmax(dim=-1).tolist()
+        for k in range(1, num_cb):
+            first_tokens[k] = bos
+        all_tokens = [first_tokens]
 
-    with torch.no_grad():
-        generation = model.generate(
-            input_ids=description_ids,
-            prompt_input_ids=prompt_ids,
-            max_length=args.max_length,
-            temperature=args.temperature,
-            do_sample=args.temperature > 0,
-        )
+        print(f"parler_tts ref: step 0 tokens={first_tokens}", file=sys.stderr)
 
-    print(f"Generated codes shape: {generation.shape}", file=sys.stderr)
+        # ── Incremental decode ──
+        torch.manual_seed(seed)
+        for step in range(1, n_steps):
+            cur_ids = torch.tensor(all_tokens[-1], dtype=torch.long).unsqueeze(1)
+            out = decoder(
+                input_ids=cur_ids,
+                encoder_hidden_states=enc_out,
+                past_key_values=past_kv,
+                use_cache=True,
+            )
+            past_kv = out.past_key_values
+            next_logits = out.logits[:, -1, :]
+            next_tokens = next_logits.argmax(dim=-1).tolist()
+            for k in range(num_cb):
+                if step < k:
+                    next_tokens[k] = bos
 
-    if args.dump_dir:
-        np.save(os.path.join(args.dump_dir, "generated_codes.npy"),
-                generation.cpu().numpy())
+            if step == 1:
+                if "step1_logits_cb0" in stages:
+                    captures["step1_logits_cb0"] = next_logits[0].numpy()
+                # Build the step-1 input for comparison
+                if "step1_input" in stages:
+                    prev = torch.tensor(all_tokens[-1], dtype=torch.long)
+                    inp_3d = prev.reshape(1, num_cb, 1)
+                    emb_sum = sum([decoder.model.decoder.embed_tokens[k](inp_3d[:, k])
+                                   for k in range(num_cb)])  # (1, 1, D)
+                    pos = decoder.model.decoder.embed_positions.weights[T_pf]
+                    step1_inp = emb_sum[0, 0] + pos
+                    captures["step1_input"] = step1_inp.numpy()
 
-    # Decode audio
-    print("Decoding audio via DAC...", file=sys.stderr)
-    with torch.no_grad():
-        audio = model.audio_encoder.decode(
-            audio_codes=generation,
-            audio_scales=[None],
-            padding_mask=None,
-        ).audio_values
+            print(f"parler_tts ref: step {step} tokens={next_tokens}", file=sys.stderr)
+            all_tokens.append(next_tokens)
 
-    audio_np = audio.squeeze().cpu().numpy()
-    sample_rate = model.config.audio_encoder.sampling_rate
+        if "gen_codes_20" in stages:
+            codes = np.array(all_tokens, dtype=np.float32).T  # (num_cb, n_steps)
+            captures["gen_codes_20"] = codes
 
-    print(f"Audio shape: {audio_np.shape}, sample rate: {sample_rate}", file=sys.stderr)
-    print(f"Duration: {len(audio_np) / sample_rate:.2f}s", file=sys.stderr)
+    # Store metadata as string captures (dump_reference.py handles these)
+    captures["parler_text"] = text
+    captures["parler_desc"] = desc
+    captures["parler_seed"] = str(seed)
 
-    if args.dump_dir:
-        np.save(os.path.join(args.dump_dir, "audio_pcm.npy"), audio_np)
-
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        sf.write(args.output, audio_np, sample_rate)
-        print(f"Saved to {args.output}", file=sys.stderr)
-
-    # Dump model architecture info
-    print("\n=== Model Architecture ===", file=sys.stderr)
-    print(f"T5 encoder: d_model={model.config.text_encoder.d_model}, "
-          f"n_heads={model.config.text_encoder.num_heads}, "
-          f"n_layers={model.config.text_encoder.num_layers}, "
-          f"d_kv={model.config.text_encoder.d_kv}, "
-          f"d_ff={model.config.text_encoder.d_ff}", file=sys.stderr)
-    print(f"Decoder: hidden={model.config.decoder.hidden_size}, "
-          f"n_heads={model.config.decoder.num_attention_heads}, "
-          f"n_layers={model.config.decoder.num_hidden_layers}, "
-          f"ffn_dim={model.config.decoder.ffn_dim}, "
-          f"num_codebooks={model.config.decoder.num_codebooks}, "
-          f"vocab_size={model.config.decoder.vocab_size}", file=sys.stderr)
-    print(f"DAC: sample_rate={model.config.audio_encoder.sampling_rate}, "
-          f"n_codebooks={model.config.audio_encoder.n_codebooks}, "
-          f"codebook_size={model.config.audio_encoder.codebook_size}", file=sys.stderr)
-
-    # Dump some weight stats for diff-testing
-    if args.dump_dir:
-        stats = {}
-        for name, param in model.named_parameters():
-            stats[name] = {
-                "shape": list(param.shape),
-                "mean": float(param.float().mean()),
-                "std": float(param.float().std()),
-                "min": float(param.float().min()),
-                "max": float(param.float().max()),
-            }
-
-        import json
-        with open(os.path.join(args.dump_dir, "weight_stats.json"), "w") as f:
-            json.dump(stats, f, indent=2)
-        print(f"Dumped weight stats to {args.dump_dir}/weight_stats.json", file=sys.stderr)
-
-
-if __name__ == "__main__":
-    main()
+    return captures

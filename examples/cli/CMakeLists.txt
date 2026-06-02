@@ -185,6 +185,7 @@ target_link_libraries(crispasr-diff PRIVATE
     sensevoice
     cosyvoice3_tts
     csm-tts
+    parler-tts
     crispasr-diff-lib
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
