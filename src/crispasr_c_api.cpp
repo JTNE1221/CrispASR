@@ -123,6 +123,10 @@
 #include "fastpitch_tts.h"
 #define CA_HAVE_FASTPITCH 1
 #endif
+#if __has_include("speecht5_tts.h")
+#include "speecht5_tts.h"
+#define CA_HAVE_SPEECHT5 1
+#endif
 #if __has_include("voxcpm2_tts.h")
 #include "voxcpm2_tts.h"
 #define CA_HAVE_VOXCPM2 1
@@ -1312,6 +1316,10 @@ struct crispasr_session {
 #ifdef CA_HAVE_FASTPITCH
     fastpitch_tts_context* fastpitch_ctx = nullptr;
 #endif
+#ifdef CA_HAVE_SPEECHT5
+    speecht5_tts_context* speecht5_ctx = nullptr;
+    std::vector<float> speecht5_speaker; // 512-d x-vector
+#endif
 #ifdef CA_HAVE_VOXCPM2
     voxcpm2_context* voxcpm2_ctx = nullptr;
     std::vector<float> voxcpm2_ref_pcm; // 16 kHz mono cloning reference
@@ -1983,6 +1991,20 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_SPEECHT5
+    if (s->backend == "speecht5" || s->backend == "speecht5-tts" || s->backend == "speecht5_tts") {
+        s->backend = "speecht5";
+        speecht5_tts_params p = speecht5_tts_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls;
+        s->speecht5_ctx = speecht5_tts_init(model_path, p);
+        if (!s->speecht5_ctx) {
+            delete s;
+            return nullptr;
+        }
+        return s;
+    }
+#endif
 #ifdef CA_HAVE_VOXCPM2
     if (s->backend == "voxcpm2-tts" || s->backend == "voxcpm2" || s->backend == "voxcpm2_tts") {
         s->backend = "voxcpm2-tts";
@@ -2390,6 +2412,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_FASTPITCH
     list += ",fastpitch";
+#endif
+#ifdef CA_HAVE_SPEECHT5
+    list += ",speecht5";
 #endif
 #ifdef CA_HAVE_VOXCPM2
     list += ",voxcpm2-tts";
@@ -4690,6 +4715,26 @@ CA_EXPORT int crispasr_session_set_voice(crispasr_session* s, const char* path, 
         return kokoro_load_voice_pack(s->kokoro_ctx, path);
     }
 #endif
+#ifdef CA_HAVE_SPEECHT5
+    if (s->speecht5_ctx) {
+        // SpeechT5 needs a 512-d x-vector (raw float32 .bin file).
+        if (ends_with_wav(path))
+            return -2;
+        FILE* f = fopen(path, "rb");
+        if (!f)
+            return -1;
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        int n = (int)(sz / sizeof(float));
+        s->speecht5_speaker.resize(n);
+        size_t rd = fread(s->speecht5_speaker.data(), sizeof(float), n, f);
+        fclose(f);
+        if ((int)rd != n)
+            return -1;
+        return speecht5_tts_set_speaker(s->speecht5_ctx, s->speecht5_speaker.data(), n);
+    }
+#endif
 #ifdef CA_HAVE_INDEXTTS
     if (s->indextts_ctx) {
         // indextts clones from a reference clip. Decode the WAV (16 kHz
@@ -4963,6 +5008,12 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
         if (out_n_samples)
             *out_n_samples = n;
         return pcm;
+    }
+#endif
+#ifdef CA_HAVE_SPEECHT5
+    if (s->speecht5_ctx) {
+        // SpeechT5 emits 16 kHz mono float; PCM is malloc'd, freed via crispasr_pcm_free.
+        return speecht5_tts_synthesize(s->speecht5_ctx, text, out_n_samples);
     }
 #endif
 #ifdef CA_HAVE_VOXCPM2
@@ -5310,6 +5361,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
 #ifdef CA_HAVE_FASTPITCH
     if (s->fastpitch_ctx)
         fastpitch_tts_free(s->fastpitch_ctx);
+#endif
+#ifdef CA_HAVE_SPEECHT5
+    if (s->speecht5_ctx)
+        speecht5_tts_free(s->speecht5_ctx);
 #endif
 #ifdef CA_HAVE_VOXCPM2
     if (s->voxcpm2_ctx)

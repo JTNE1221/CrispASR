@@ -574,6 +574,13 @@ constexpr Entry k_registry[] = {
      "https://huggingface.co/cstr/csm-1b-GGUF/resolve/main/csm-1b-q4_k.gguf",
      "~1.4 GB", nullptr, nullptr},
 
+    // SpeechT5 TTS: 80M param AR mel decoder + HiFi-GAN vocoder.
+    // MIT license (microsoft/speecht5_tts). Needs a 512-d x-vector for
+    // speaker conditioning; pass via --voice <xvector.bin> or set_voice().
+    {"speecht5", "speecht5-tts-f16.gguf",
+     "https://huggingface.co/cstr/speecht5-tts-GGUF/resolve/main/speecht5-tts-f16.gguf",
+     "~300 MB", nullptr, nullptr},
+
     // Text-LID — three families, one auto-routing dispatcher
     // (`src/text_lid_dispatch.cpp`). `lid-cld3` is the default for
     // `crispasr-lid -m auto` because it's the smallest (440 KB F16),
