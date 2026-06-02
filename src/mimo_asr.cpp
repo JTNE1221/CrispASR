@@ -494,7 +494,13 @@ extern "C" struct mimo_asr_context* mimo_asr_init_from_file(const char* path_mod
         int n_be = 0;
         ggml_backend_t backends[2];
         backends[n_be++] = ctx->backend;
-        if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+        // PLAN #115 option C: with force_gpu the weights are GPU-resident, so
+        // the CPU backend MUST NOT be in the sched — otherwise its heuristic
+        // offloads a decode op to CPU, where dequantize_row_q4_K then reads a
+        // GPU pointer as host memory → SIGSEGV (the P100 crash, localised via
+        // gdb). Keep everything on the GPU where the weights live. The CPU
+        // fallback is only valid (and needed) when weights are CPU-resident.
+        if (!force_gpu && ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
             backends[n_be++] = ctx->backend_cpu;
         ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
     }
