@@ -8134,3 +8134,56 @@ General rule, same family as the StyleTTS/EMA traps: when a checkpoint
 stores `*_sum` + `*_usage`/`*_count` buffers, the inference weight is the
 quotient, computed lazily by a `@property`. Grep the reference module for
 `@property` over any buffer you're about to export raw.
+## Dia 1.6B TTS — what ACTUALLY fixed it (2026-06-02)
+
+The earlier "11 bugs in agent-generated runtime" notes were chasing the wrong
+target. With a TRUSTWORTHY reference the port came down to **three** structural
+bugs; encoder, decoder logits, CFG inputs and DAC decode were already correct.
+
+**Trustworthy reference first.** The handover's reference artifacts
+(`dec_step0_logits_uncond.npy`, `python_greedy_5.npy`) were bogus (from a broken
+script). Two symptoms gave it away: a "greedy" that didn't match the official
+sampler, and an `uncond` whose `cos(cond,uncond)=0.22` with `‖uncond‖>‖cond‖`
+(backwards for "no guidance"). Rebuilt the reference by running the **official
+nari-labs dia at the matching commit** (`git checkout 4a9e29b` — the checkpoint
+`nari-labs/Dia-1.6B` predates the `-0626` `encoder_config` refactor; HEAD won't
+load the old config.json), F16, MPS, `Dia._load_dac_model = lambda self: None`,
+on the Mac (the VPS is CPU + low-RAM, can't hold 6 GB). C++ then matched at
+step-0 cos 0.99994 (cond) / 1.00000 (uncond).
+
+**Bug 1 — CFG sampling policy.** The OLD checkpoint's `_decoder_step` samples
+from the **CFG-combined** logits `cond + s·(cond−uncond)` (greedy = argmax of
+those, eos-masked). The C++ had copied the **newer -0626** scheme (mask `cond`
+to the CFG top-k, sample `cond`) — its own comment cited "lines 442-445" of the
+*new* model.py. Result: ≈ raw-cond tokens, no real guidance → noise. Always pin
+the dia source commit to the checkpoint.
+
+**Bug 2 — self-attn KV-cache layout.** The cache vectors accumulated per step in
+`[step][batch]` order (`s0b0,s0b1,s1b0,…`) but the `past_k` graph input is
+`(kv_dim,T_past,B)` = ggml `[batch][step]`. They coincide only at `T_past==1`,
+so step 0/1 are perfect and everything corrupts from step 2 (`T_past≥2`).
+Caught by a **teacher-forced per-step logit diff** (force the reference's input
+sequence into the C++, compare per-step cond/uncond cosine): step1 cos 0.99998,
+step2 → 0.93. Reorder when feeding: `dst=(b*T_past+t)*kv_dim, src=(t*B+b)*kv_dim`.
+
+**Bug 3 — missing input-side delay pattern.** Dia is trained in the delay
+domain: at step t the model must see channel c's input **held at BOS until step
+delay[c]** (delay=[0,8,9,…,15]). The C++ fed all 9 sampled tokens back
+immediately → out-of-distribution → non-speech, even though per-step logits were
+correct (the teacher-forced diff passed because it fed the reference's already-
+delayed inputs). Fix: maintain a delayed-domain `gen[pos][c]` buffer (prefill
+`gen[t][c]=BOS if t<=delay[c]`), feed `gen[t]` as input, write the sampled
+(post-eos/delay-override) token to `gen[t+1]` with the start-of-sequence BOS
+mask (only fill positions still unset), emit `gen[1..]` to the delay-revert.
+
+**Method that worked (reusable for AR-codec TTS):** (1) get a byte-faithful
+reference at the right commit; (2) diff step-0 logits per CFG batch (cos);
+(3) isolate the codec by decoding the *reference* codes through the C++ DAC
+(bit-exact here); (4) teacher-force the C++ with the reference input sequence and
+diff per-step logits to separate per-step compute bugs from the sampling/feedback
+loop. Validate end-to-end by ASR-roundtripping a **>100-char** prompt (Dia is
+genuinely inconsistent on short prompts — the official model also outputs "music"
+for them; this is sampling variance, not a port bug). F16 and Q4_K both roundtrip
+verbatim. Debug hooks are env-gated with paths from the env value: `DIA_GREEDY`,
+`DIA_DUMP_TOKENS`, `DIA_MAX_STEPS`, `DIA_FORCE_TOKENS`, `DIA_DUMP_STEPLOGITS`,
+`DIA_DUMP_DIR`, `DIA_DECODE_CODES`.

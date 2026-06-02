@@ -1194,6 +1194,27 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
     auto& m = ctx->model;
     auto& p = ctx->params;
 
+    // DIA_DECODE_CODES=path: isolate the DAC. Load post-revert codebook (T*9 int32,
+    // interleaved [frame*9+ch]) and decode it directly, bypassing generation.
+    if (const char* cp = getenv("DIA_DECODE_CODES")) {
+        std::vector<uint32_t> codes;
+        FILE* f = fopen(cp, "rb");
+        if (f) {
+            int32_t v;
+            while (fread(&v, sizeof(int32_t), 1, f) == 1)
+                codes.push_back((uint32_t)v);
+            fclose(f);
+        }
+        size_t n_frames = codes.size() / m.n_output_heads;
+        fprintf(stderr, "DIA_DECODE_CODES: %zu frames\n", n_frames);
+        if (!m.has_dac || n_frames == 0)
+            return nullptr;
+        int ns = 0;
+        float* pcm = dac_decode(ctx, codes, n_frames, &ns);
+        *out_n_samples = ns;
+        return pcm;
+    }
+
     // Tokenize text
     auto tokens = dia_tokenize(text, m.max_encoder_context);
     if (tokens.empty()) {
@@ -1223,9 +1244,56 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
     }
 
     uint32_t max_gen = (p.max_tokens > (int)m.max_delay) ? (uint32_t)p.max_tokens : m.max_generation_size;
-    // TEMP: limit for CPU testing (full 3072 steps impractical on this CPU)
-    if (max_gen > 200)
-        max_gen = 200;
+    // TEMP: limit for CPU testing (full 3072 steps impractical on this CPU).
+    // Override with DIA_MAX_STEPS for longer prompts on faster backends.
+    uint32_t step_cap = 200;
+    if (const char* ms = getenv("DIA_MAX_STEPS"))
+        step_cap = (uint32_t)atoi(ms);
+    if (max_gen > step_cap)
+        max_gen = step_cap;
+
+    // --- diff/debug hooks (env-gated; output paths come from the env value, never hardcoded) ---
+    // DIA_GREEDY=1         : temperature=0 (argmax) for deterministic diffing
+    // DIA_DUMP_TOKENS=1    : print emitted 9-channel tokens per step to stderr
+    // DIA_FORCE_TOKENS=f   : teacher-force per-step input from file f (N*9 int32 raw); caps max_gen=N
+    // DIA_DUMP_STEPLOGITS=f: append per-step [uncond(9*V) | cond(9*V)] f32 to file f
+    // DIA_DUMP_DIR=d       : write step-0 stage dumps (encoder/cross/ca/final/logits) under dir d
+    const bool dia_greedy = getenv("DIA_GREEDY") != nullptr;
+    const bool dia_dump_tokens = getenv("DIA_DUMP_TOKENS") != nullptr;
+    const char* dia_dump_dir = getenv("DIA_DUMP_DIR");
+    auto dia_dpath = [&](const char* name) { return std::string(dia_dump_dir ? dia_dump_dir : ".") + "/" + name; };
+    std::vector<int32_t> dia_forced;
+    if (const char* fp = getenv("DIA_FORCE_TOKENS")) {
+        FILE* f = fopen(fp, "rb");
+        if (f) {
+            int32_t v;
+            while (fread(&v, sizeof(int32_t), 1, f) == 1)
+                dia_forced.push_back(v);
+            fclose(f);
+        }
+        fprintf(stderr, "DIA_FORCE_TOKENS: loaded %zu ints (%zu steps)\n", dia_forced.size(),
+                dia_forced.size() / m.n_output_heads);
+    }
+    const bool dia_force = !dia_forced.empty();
+    const char* dia_steplogits_path = getenv("DIA_DUMP_STEPLOGITS");
+    if (dia_force)
+        max_gen = (uint32_t)(dia_forced.size() / m.n_output_heads);
+    if (dia_steplogits_path)
+        remove(dia_steplogits_path); // truncate; we append per step
+
+    // Delayed-domain token buffer (mirrors Python dec_output.generated_tokens).
+    // The model is trained in the delay domain: channel c's INPUT is held at BOS
+    // until step delay[c], then consumes previously-generated tokens. Without this,
+    // free-run generation feeds all channels real tokens immediately (out-of-dist).
+    //   gen[t][c] = BOS for t <= delay[c] (prefill), else filled as generation proceeds.
+    const int dia_max_delay = (int)m.max_delay;
+    const int gen_len = (int)max_gen + dia_max_delay + 2;
+    std::vector<std::vector<int32_t>> gen(gen_len, std::vector<int32_t>(m.n_output_heads, -1));
+    for (int t = 0; t <= dia_max_delay && t < gen_len; t++)
+        for (uint32_t c = 0; c < m.n_output_heads; c++)
+            if (t <= (int)m.delay_pattern[c])
+                gen[t][c] = (int32_t)m.bos_token_id;
+    int bos_countdown = dia_max_delay; // apply_mask region (start-of-sequence delay)
 
     // ===================================================================
     // 1. Run encoder (batch=2: conditional + unconditional)
@@ -1336,6 +1404,12 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         for (int d = 0; d < enc_hidden; d++)
             norm0 += encoder_output[cond_offset + d] * encoder_output[cond_offset + d];
         fprintf(stderr, "dia_tts: enc cond pos0 norm: %.4f (ref: 2.2434)\n", sqrtf(norm0));
+        if (dia_dump_dir) {
+            float un0 = 0;
+            for (int d = 0; d < enc_hidden; d++)
+                un0 += encoder_output[d] * encoder_output[d]; // uncond = batch 0, pos 0
+            fprintf(stderr, "dia_tts: enc uncond pos0 norm: %.4f\n", sqrtf(un0));
+        }
     }
 
     // ===================================================================
@@ -1411,6 +1485,21 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                                     cross_v[l].size() * sizeof(float));
         }
 
+        if (dia_dump_dir) {
+            // cross_k[0]/cross_v[0] layout (cross_kv_dim, T_enc, B)
+            FILE* fk = fopen(dia_dpath("cpp_cross_k0.f32").c_str(), "wb");
+            FILE* fv = fopen(dia_dpath("cpp_cross_v0.f32").c_str(), "wb");
+            if (fk) {
+                fwrite(cross_k[0].data(), sizeof(float), cross_k[0].size(), fk);
+                fclose(fk);
+            }
+            if (fv) {
+                fwrite(cross_v[0].data(), sizeof(float), cross_v[0].size(), fv);
+                fclose(fv);
+            }
+            fprintf(stderr, "DIA_DUMP: cpp_cross_{k,v}0.f32 (cross_kv_dim=%d T_enc=%d B=%d)\n", cross_kv_dim, T_enc, B);
+        }
+
         ggml_gallocr_free(alloc);
         ggml_free(ctx0);
     }
@@ -1431,6 +1520,18 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         ctx->current_position = step;
         if (step == 0 && p.verbosity >= 1)
             fprintf(stderr, "dia_tts: starting decoder loop (max_gen=%u, T_past=%d)\n", max_gen, (int)step);
+
+        // Step input tokens. Free-run: read the delayed-domain buffer (channels held at
+        // BOS until their delay elapses). Teacher-forcing: use the reference sequence.
+        if (dia_force) {
+            for (uint32_t h = 0; h < m.n_output_heads; h++)
+                ctx->current_audio_tokens[h] = (uint32_t)dia_forced[(size_t)step * m.n_output_heads + h];
+        } else {
+            for (uint32_t h = 0; h < m.n_output_heads; h++) {
+                int32_t g = gen[step][h];
+                ctx->current_audio_tokens[h] = (g >= 0) ? (uint32_t)g : m.bos_token_id;
+            }
+        }
 
         // Build decoder step graph
         size_t ctx_size = 128 * 1024 * 1024;
@@ -1620,6 +1721,10 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
                 kqv = ggml_cont(ctx0, ggml_permute(ctx0, kqv, 0, 2, 1, 3));
                 cur = ggml_reshape_3d(ctx0, kqv, dec_hidden, T_cur, B);
                 cur = ggml_mul_mat(ctx0, layer.cross_o_proj, cur);
+                if (step == 0 && l == 0 && dia_dump_dir) {
+                    ggml_set_name(cur, "ca0_out");
+                    ggml_set_output(cur);
+                }
             }
 
             cur = ggml_add(ctx0, cur, residual);
@@ -1641,6 +1746,10 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         // Final norm
         cur = dia_rms_norm(ctx0, cur, m.decoder.norm, m.rms_norm_eps);
         // cur: (dec_hidden, 1, B)
+        if (step == 0 && dia_dump_dir) {
+            ggml_set_name(cur, "dia_final_hidden");
+            ggml_set_output(cur);
+        }
 
         // Project to logits for each codebook head
         // We need all 9 heads' logits. Output shape: (output_vocab_size * n_output_heads, 1, B)
@@ -1687,15 +1796,28 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         int32_t pos_val = (int32_t)step;
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_pos"), &pos_val, 0, sizeof(int32_t));
 
-        // Past self-attention K/V
+        // Past self-attention K/V.
+        // The cache vectors accumulate per step in [step][batch] order:
+        //   self_k[l] = [s0b0, s0b1, s1b0, s1b1, ...]  (each block kv_dim floats)
+        // but the past_k_* input tensor is (kv_dim, T_past, B), i.e. ggml [batch][step]:
+        //   [b0: t0,t1,..,t_{T-1}][b1: t0,t1,...].
+        // These coincide only at T_past==1, so without reordering the cache the
+        // self-attention silently corrupts from the 3rd decode step on. Reorder here.
         for (int l = 0; l < (int)m.n_decoder_layers; l++) {
             if (T_past > 0) {
                 std::string kn = "past_k_" + std::to_string(l);
                 std::string vn = "past_v_" + std::to_string(l);
-                ggml_backend_tensor_set(ggml_graph_get_tensor(gf, kn.c_str()), self_k[l].data(), 0,
-                                        self_k[l].size() * sizeof(float));
-                ggml_backend_tensor_set(ggml_graph_get_tensor(gf, vn.c_str()), self_v[l].data(), 0,
-                                        self_v[l].size() * sizeof(float));
+                std::vector<float> pk((size_t)kv_dim * T_past * B), pv((size_t)kv_dim * T_past * B);
+                for (int t = 0; t < T_past; t++) {
+                    for (int b = 0; b < B; b++) {
+                        const size_t src = ((size_t)t * B + b) * kv_dim;      // [step][batch]
+                        const size_t dst = ((size_t)b * T_past + t) * kv_dim; // (kv_dim,T_past,B)
+                        std::memcpy(&pk[dst], &self_k[l][src], kv_dim * sizeof(float));
+                        std::memcpy(&pv[dst], &self_v[l][src], kv_dim * sizeof(float));
+                    }
+                }
+                ggml_backend_tensor_set(ggml_graph_get_tensor(gf, kn.c_str()), pk.data(), 0, pk.size() * sizeof(float));
+                ggml_backend_tensor_set(ggml_graph_get_tensor(gf, vn.c_str()), pv.data(), 0, pv.size() * sizeof(float));
             }
             // Cross-attention K/V
             std::string ckn = "cross_k_in_" + std::to_string(l);
@@ -1713,6 +1835,29 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
+        }
+
+        if (step == 0 && dia_dump_dir) {
+            ggml_tensor* fh = ggml_graph_get_tensor(gf, "dia_final_hidden");
+            if (fh) {
+                std::vector<float> hbuf(dec_hidden * B);
+                ggml_backend_tensor_get(fh, hbuf.data(), 0, hbuf.size() * sizeof(float));
+                FILE* f = fopen(dia_dpath("cpp_final_hidden.f32").c_str(), "wb");
+                if (f) {
+                    fwrite(hbuf.data(), sizeof(float), hbuf.size(), f);
+                    fclose(f);
+                }
+            }
+            ggml_tensor* ca = ggml_graph_get_tensor(gf, "ca0_out");
+            if (ca) {
+                std::vector<float> cbuf(dec_hidden * B);
+                ggml_backend_tensor_get(ca, cbuf.data(), 0, cbuf.size() * sizeof(float));
+                FILE* f = fopen(dia_dpath("cpp_ca0_out.f32").c_str(), "wb");
+                if (f) {
+                    fwrite(cbuf.data(), sizeof(float), cbuf.size(), f);
+                    fclose(f);
+                }
+            }
         }
 
         // Read new K/V and append to self-attention cache
@@ -1733,6 +1878,14 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         if (step == 0 && p.verbosity >= 1) {
             fprintf(stderr, "dia_tts: decoder step 0 logits dump (for diff-testing):\n");
         }
+        // Capture step-0 cond+uncond logits (9 x V) for DIA_DUMP_DIR, and per-step for STEPLOGITS.
+        const bool dia_dump_logits = (step == 0) && (dia_dump_dir != nullptr);
+        const bool dia_cap = dia_dump_logits || (dia_steplogits_path != nullptr);
+        std::vector<float> dump_cond, dump_uncond;
+        if (dia_cap) {
+            dump_cond.resize((size_t)m.n_output_heads * m.output_vocab_size);
+            dump_uncond.resize((size_t)m.n_output_heads * m.output_vocab_size);
+        }
         for (int h = 0; h < (int)m.n_output_heads; h++) {
             std::string hn = "logits_" + std::to_string(h);
             // Logits shape: (output_vocab_size, 1, B) = (1028, 1, 2)
@@ -1746,20 +1899,17 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             // 2. Apply mask to CONDITIONAL logits (not CFG) for sampling
             float* uncond = logits_raw.data();                     // batch 0
             float* cond = logits_raw.data() + m.output_vocab_size; // batch 1
-            std::vector<float> cfg_logits(m.output_vocab_size);
+            if (dia_cap) {
+                std::memcpy(&dump_cond[(size_t)h * m.output_vocab_size], cond, m.output_vocab_size * sizeof(float));
+                std::memcpy(&dump_uncond[(size_t)h * m.output_vocab_size], uncond, m.output_vocab_size * sizeof(float));
+            }
+            // CFG combine (nari-labs/Dia-1.6B OLD checkpoint: official _decoder_step does
+            //   logits = cond + cfg_scale*(cond - uncond)
+            // and samples from THESE combined logits — NOT from cond masked to the CFG top-k
+            // (that masked scheme is the newer -0626 code and does not match this checkpoint).
+            std::vector<float> final_logits(m.output_vocab_size);
             for (uint32_t i = 0; i < m.output_vocab_size; i++)
-                cfg_logits[i] = cond[i] + p.cfg_scale * (cond[i] - uncond[i]);
-            // Top-k from CFG logits
-            int topk = (p.top_k > 0) ? p.top_k : 45;
-            std::vector<std::pair<float, int>> sorted_cfg(m.output_vocab_size);
-            for (uint32_t i = 0; i < m.output_vocab_size; i++)
-                sorted_cfg[i] = {cfg_logits[i], (int)i};
-            std::partial_sort(sorted_cfg.begin(), sorted_cfg.begin() + topk, sorted_cfg.end(),
-                              [](auto& a, auto& b) { return a.first > b.first; });
-            // Final logits = COND masked by CFG top-k
-            std::vector<float> final_logits(m.output_vocab_size, -INFINITY);
-            for (int k = 0; k < topk; k++)
-                final_logits[sorted_cfg[k].second] = cond[sorted_cfg[k].second];
+                final_logits[i] = cond[i] + p.cfg_scale * (cond[i] - uncond[i]);
 
             if (step == 0 && h == 0 && p.verbosity >= 1) {
                 fprintf(stderr, "  cond h0 first4: %.4f %.4f %.4f %.4f argmax=%d\n", cond[0], cond[1], cond[2], cond[3],
@@ -1780,24 +1930,70 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             }
 
             // Sample token for this codebook
-            uint32_t token =
-                dia_sample_token(final_logits.data(), m.output_vocab_size, p.temperature, p.top_p, p.top_k, ctx->rng);
+            uint32_t token = dia_sample_token(final_logits.data(), m.output_vocab_size,
+                                              dia_greedy ? 0.0f : p.temperature, p.top_p, p.top_k, ctx->rng);
             ctx->current_audio_tokens[h] = token;
+        }
+
+        if (dia_dump_tokens) {
+            fprintf(stderr, "DIA_TOK step %u:", step);
+            for (int h = 0; h < (int)m.n_output_heads; h++)
+                fprintf(stderr, " %u", ctx->current_audio_tokens[h]);
+            fprintf(stderr, "\n");
+        }
+
+        if (dia_dump_logits) {
+            FILE* fc = fopen(dia_dpath("cpp_step0_cond.f32").c_str(), "wb");
+            FILE* fu = fopen(dia_dpath("cpp_step0_uncond.f32").c_str(), "wb");
+            if (fc) {
+                fwrite(dump_cond.data(), sizeof(float), dump_cond.size(), fc);
+                fclose(fc);
+            }
+            if (fu) {
+                fwrite(dump_uncond.data(), sizeof(float), dump_uncond.size(), fu);
+                fclose(fu);
+            }
+            fprintf(stderr, "DIA_DUMP_DIR: wrote cpp_step0_{cond,uncond}.f32 (%zu floats each)\n", dump_cond.size());
+        }
+        if (dia_steplogits_path) {
+            // append per step: [uncond(9*V) | cond(9*V)] to match ref (N,2,9,V)
+            FILE* fs = fopen(dia_steplogits_path, "ab");
+            if (fs) {
+                fwrite(dump_uncond.data(), sizeof(float), dump_uncond.size(), fs);
+                fwrite(dump_cond.data(), sizeof(float), dump_cond.size(), fs);
+                fclose(fs);
+            }
         }
 
         ggml_gallocr_free(alloc);
         ggml_free(ctx0);
 
-        // Append current tokens to output
-        for (int h = 0; h < (int)m.n_output_heads; h++) {
-            ctx->output_tokens.push_back(ctx->current_audio_tokens[h]);
+        // EOS/delay override on the sampled tokens (end-of-sequence delay) + stop check.
+        bool stop = dia_check_stopping(*ctx);
+
+        if (dia_force) {
+            // teacher-forcing: emit sampled directly (output unused for diffing)
+            for (uint32_t h = 0; h < m.n_output_heads; h++)
+                ctx->output_tokens.push_back(ctx->current_audio_tokens[h]);
+        } else {
+            // Write sampled (post-override) into the delayed buffer at step+1, with the
+            // start-of-sequence BOS mask (only fill positions still unwritten), mirroring
+            // Python update_one(pred, step+1, apply_mask=bos_countdown>0). Then emit gen[step+1].
+            const bool apply_mask = (bos_countdown > 0);
+            if (step + 1 < (uint32_t)gen_len) {
+                for (uint32_t c = 0; c < m.n_output_heads; c++)
+                    if (!apply_mask || gen[step + 1][c] == -1)
+                        gen[step + 1][c] = (int32_t)ctx->current_audio_tokens[c];
+                for (uint32_t c = 0; c < m.n_output_heads; c++)
+                    ctx->output_tokens.push_back((uint32_t)gen[step + 1][c]);
+            }
+            if (bos_countdown > 0)
+                bos_countdown--;
         }
 
-        // Check stopping condition
-        if (dia_check_stopping(*ctx)) {
-            if (p.verbosity >= 1) {
+        if (stop) {
+            if (p.verbosity >= 1)
                 fprintf(stderr, "dia_tts: stopped at step %u\n", step + 1);
-            }
             break;
         }
 

@@ -466,6 +466,18 @@ constexpr Entry k_registry[] = {
      "~1.4 GB",
      "chatterbox-s3gen-q8_0.gguf",
      "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-s3gen-q8_0.gguf"},
+    // Nari Labs Dia-1.6B (nari-labs/Dia-1.6B): byte-level text encoder (12L) +
+    // AR audio decoder (18L, GQA 16q/4kv, classifier-free guidance) emitting 9
+    // interleaved DAC codebooks under a delay pattern, decoded by a 44.1 kHz DAC
+    // codec companion. Surfaces as `--backend dia` with CAP_TTS + AUTO_DOWNLOAD +
+    // TEMPERATURE. Dialogue style with [S1]/[S2] speaker tags; use >100-char
+    // prompts — Dia is inconsistent on very short inputs. `--model-quant`
+    // selects F16 / Q4_K for the main model; the DAC companion is quant-agnostic.
+    {"dia", "dia-1.6b-q4_k.gguf",
+     "https://huggingface.co/cstr/dia-1.6b-GGUF/resolve/main/dia-1.6b-q4_k.gguf",
+     "~3.0 GB",
+     "dac-44khz.gguf",
+     "https://huggingface.co/cstr/dia-1.6b-GGUF/resolve/main/dac-44khz.gguf"},
     // IndexTTS-1.5: GPT-2 AR mel-code generator + BigVGAN vocoder.
     // Voice cloning via Conformer+Perceiver conditioning on reference audio.
     // Two-file setup: GPT (mel codes) + BigVGAN (vocoder). Q8_0 recommended
