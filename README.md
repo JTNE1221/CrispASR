@@ -133,6 +133,7 @@ quick-start commands and engine selection guidance.
 | **csm** | [`cstr/csm-1b-GGUF`](https://huggingface.co/cstr/csm-1b-GGUF) | Sesame CSM-1B conversational TTS: Llama-3.2 1B backbone + 100M depth decoder (32-codebook RVQ) + Kyutai Mimi codec at 24 kHz ([more](docs/architecture.md#csm)) | en | Apache-2.0 |
 | **dia** | [`nari-labs/Dia-1.6B`](https://huggingface.co/cstr/dia-1.6b-GGUF) | Byte-level text encoder (12L) + AR audio decoder (18L GQA + CFG) → 9 delayed DAC codebooks + 44.1 kHz DAC codec; dialogue style with `[S1]`/`[S2]` tags (use >100-char prompts) | en | Apache-2.0 |
 | **speecht5** | [`cstr/speecht5-tts-GGUF`](https://huggingface.co/cstr/speecht5-tts-GGUF) | SpeechT5 80M: char-level encoder (12L) + AR mel decoder (6L) + 5-layer conv postnet + HiFi-GAN at 16 kHz; speaker via 512-d x-vector (`--voice <xvector.bin>`) | en | MIT |
+| **parler-tts** | [`cstr/parler-tts-mini-v1.1-GGUF`](https://huggingface.co/cstr/parler-tts-mini-v1.1-GGUF) | Parler TTS Mini v1.1 (~900M): T5 encoder + MusicGen decoder + DAC 44.1 kHz; prompt-conditioned (describe voice in text via `--instruct`) | en | Apache-2.0 |
 
 > _Status:_ end-to-end runnable on both Q4_K and F16; zero-shot synth and
 > voice cloning (`--voice <wav>`) both work and ASR-roundtrip correctly.

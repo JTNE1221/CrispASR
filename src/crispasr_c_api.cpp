@@ -111,6 +111,10 @@
 #include "chatterbox.h"
 #define CA_HAVE_CHATTERBOX 1
 #endif
+#if __has_include("parler_tts.h")
+#include "parler_tts.h"
+#define CA_HAVE_PARLER_TTS 1
+#endif
 #if __has_include("csm_tts.h")
 #include "csm_tts.h"
 #define CA_HAVE_CSM 1
@@ -1061,6 +1065,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "indextts";
     else if (strcmp(arch, "f5-tts") == 0 || strcmp(arch, "f5tts") == 0)
         backend = "f5-tts";
+    else if (strcmp(arch, "parler-tts") == 0 || strcmp(arch, "parler_tts") == 0)
+        backend = "parler-tts";
     else if (strcmp(arch, "m2m100") == 0)
         backend = "m2m100";
     else if (strcmp(arch, "t5") == 0)
@@ -1306,6 +1312,10 @@ struct crispasr_session {
 #endif
 #ifdef CA_HAVE_CHATTERBOX
     chatterbox_context* chatterbox_ctx = nullptr;
+#endif
+#ifdef CA_HAVE_PARLER_TTS
+    parler_tts_context* parler_tts_ctx = nullptr;
+    std::string parler_description; // voice description for prompt-conditioned TTS
 #endif
 #ifdef CA_HAVE_CSM
     csm_tts_context* csm_tts_ctx = nullptr;
@@ -1930,6 +1940,30 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->backend == "parler-tts" || s->backend == "parler_tts" || s->backend == "parler") {
+        s->backend = "parler-tts";
+        parler_tts_context_params p = parler_tts_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
+        p.flash_attn = g_open_flash_attn_tls;
+        // Default temperature to 1.0 (parler upstream default) unless
+        // the user set a non-zero override via the session API.
+        p.temperature = 1.0f;
+        s->parler_tts_ctx = parler_tts_init_from_file(model_path, p);
+        if (!s->parler_tts_ctx) {
+            delete s;
+            return nullptr;
+        }
+        // Set a default voice description if the user hasn't provided one
+        // via --instruct (stored in tts_instruct / set_instruct).
+        const char* default_desc = "A female speaker with a warm, clear voice in a quiet room.";
+        parler_tts_set_description(s->parler_tts_ctx, default_desc);
+        s->parler_description = default_desc;
+        return s;
+    }
+#endif
 #ifdef CA_HAVE_CSM
     if (s->backend == "csm" || s->backend == "csm-tts" || s->backend == "sesame" || s->backend == "sesame-csm") {
         s->backend = "csm";
@@ -2403,6 +2437,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_CHATTERBOX
     list += ",chatterbox";
+#endif
+#ifdef CA_HAVE_PARLER_TTS
+    list += ",parler-tts";
 #endif
 #ifdef CA_HAVE_CSM
     list += ",csm";
@@ -4912,6 +4949,13 @@ CA_EXPORT int crispasr_session_set_instruct(crispasr_session* s, const char* ins
         return rc;
     }
 #endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->parler_tts_ctx) {
+        parler_tts_set_description(s->parler_tts_ctx, instruct);
+        s->parler_description = instruct;
+        return 0;
+    }
+#endif
     return -3;
 }
 
@@ -4994,6 +5038,27 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
 #ifdef CA_HAVE_CHATTERBOX
     if (s->chatterbox_ctx) {
         return chatterbox_synthesize(s->chatterbox_ctx, text, out_n_samples);
+    }
+#endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->parler_tts_ctx) {
+        // parler_tts_synthesize returns malloc'd PCM at 44.1 kHz mono;
+        // caller frees via crispasr_pcm_free → parler_tts_pcm_free.
+        int n = 0;
+        float* pcm = parler_tts_synthesize(s->parler_tts_ctx, text, &n);
+        if (pcm && n > 0) {
+            // Copy to our own allocation so crispasr_pcm_free works uniformly.
+            float* out = (float*)malloc((size_t)n * sizeof(float));
+            if (out) {
+                memcpy(out, pcm, (size_t)n * sizeof(float));
+                *out_n_samples = n;
+            }
+            parler_tts_pcm_free(pcm);
+            return out;
+        }
+        if (pcm)
+            parler_tts_pcm_free(pcm);
+        return nullptr;
     }
 #endif
 #ifdef CA_HAVE_CSM
@@ -5363,6 +5428,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
     if (s->chatterbox_ctx)
         chatterbox_free(s->chatterbox_ctx);
 #endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->parler_tts_ctx)
+        parler_tts_free(s->parler_tts_ctx);
+#endif
 #ifdef CA_HAVE_CSM
     if (s->csm_tts_ctx)
         csm_tts_free(s->csm_tts_ctx);
@@ -5629,6 +5698,13 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
         touched++;
     }
 #endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->parler_tts_ctx) {
+        parler_tts_set_temperature(s->parler_tts_ctx, temperature);
+        (void)seed;
+        touched++;
+    }
+#endif
 #ifdef CA_HAVE_CSM
     if (s->csm_tts_ctx) {
         csm_tts_set_temperature(s->csm_tts_ctx, temperature);
@@ -5666,6 +5742,12 @@ CA_EXPORT int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed) 
 #ifdef CA_HAVE_CHATTERBOX
     if (s->chatterbox_ctx) {
         chatterbox_set_seed((chatterbox_context*)s->chatterbox_ctx, (uint32_t)seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_PARLER_TTS
+    if (s->parler_tts_ctx) {
+        parler_tts_set_seed(s->parler_tts_ctx, (uint32_t)seed);
         touched++;
     }
 #endif

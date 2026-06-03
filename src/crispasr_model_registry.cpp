@@ -560,7 +560,6 @@ constexpr Entry k_registry[] = {
     // (community voices hosted on rhasspy/piper, not HuggingFace GGUF).
     {"piper", "piper-en_US-lessac-medium-f16.gguf", "", "~30 MB", nullptr, nullptr},
 
-<<<<<<< Updated upstream
     // Bark — suno/bark 3-stage hierarchical TTS (MIT). bark-small ~300M,
     // 24 kHz, 10 DE speakers (v2/de_speaker_0..9). Single GGUF packs all
     // 3 sub-models + EnCodec decoder. No companion needed.
@@ -581,14 +580,13 @@ constexpr Entry k_registry[] = {
     {"speecht5", "speecht5-tts-f16.gguf",
      "https://huggingface.co/cstr/speecht5-tts-GGUF/resolve/main/speecht5-tts-f16.gguf",
      "~300 MB", nullptr, nullptr},
-=======
-    // Bark — suno/bark 3-stage hierarchical TTS (MIT). bark-small ~300M params,
-    // 24 kHz, 10 German speakers (v2/de_speaker_0..9). Single GGUF packs all
-    // 3 sub-models (semantic + coarse + fine GPT-2) + EnCodec decoder.
-    {"bark", "bark-small-q8_0.gguf",
-     "https://huggingface.co/cstr/bark-small-GGUF/resolve/main/bark-small-q8_0.gguf",
-     "~500 MB", nullptr, nullptr},
->>>>>>> Stashed changes
+
+    // Parler TTS Mini v1.1: prompt-conditioned TTS (~900M). T5 encoder +
+    // MusicGen decoder + DAC 44.1 kHz codec. Describe the voice in text
+    // via --instruct. Apache-2.0.
+    {"parler-tts", "parler-mini-v1.1-q8_0.gguf",
+     "https://huggingface.co/cstr/parler-tts-mini-v1.1-GGUF/resolve/main/parler-mini-v1.1-q8_0.gguf",
+     "~900 MB", nullptr, nullptr},
 
     // Text-LID — three families, one auto-routing dispatcher
     // (`src/text_lid_dispatch.cpp`). `lid-cld3` is the default for
