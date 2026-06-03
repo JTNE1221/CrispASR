@@ -479,6 +479,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "pocket-tts";
     if (contains_ci("fastpitch"))
         return "fastpitch";
+    if (contains_ci("piper") && !contains_ci("piper-phonemize"))
+        return "piper";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
         return "chatterbox";
     if (contains_ci("m2m100") || (contains_ci("m2m") && contains_ci("100")) || contains_ci("wmt21"))
@@ -573,6 +575,10 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "cosyvoice3-tts";
             else if (a == "fastpitch" || a == "fastpitch-tts" || a == "fastpitch_tts")
                 result = "fastpitch";
+            else if (a == "piper" || a == "piper-tts" || a == "piper_tts" || a == "vits")
+                result = "piper";
+            else if (a == "f5-tts" || a == "f5_tts" || a == "f5tts")
+                result = "f5-tts";
             else if (a == "chatterbox" || a == "chatterbox_turbo" || a == "kartoffelbox")
                 result = "chatterbox";
             else if (a == "m2m100" || a == "m2m_100")

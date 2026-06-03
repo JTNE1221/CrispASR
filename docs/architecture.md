@@ -590,3 +590,61 @@ T5 encoder-decoder (12L+12L, d=2048, gated-GELU FFN, RMSNorm, bucketed
 relative-position bias) + SentencePiece (256K vocab). Target language
 specified as `<2xx>` input prefix. Tokens match Python SentencePiece
 bit-by-bit; output matches HF reference.
+
+### piper
+
+[rhasspy/piper](https://github.com/rhasspy/piper) VITS architecture (~60M
+params, Apache-2.0). Text encoder (TextConv + Transformer) → flow-based
+decoder → HiFi-GAN vocoder @ 22 kHz. Uses espeak-ng for phonemization.
+Single speaker per model. Lightweight, fast inference.
+
+### indextts
+
+IndexTTS-1.5: GPT-2 AR (24L, 1280-d) mel-code generator + BigVGAN
+vocoder. Designed for Chinese + English. Zero-shot voice cloning from
+any reference WAV. Two GGUFs: GPT AR model + BigVGAN vocoder.
+
+### outetts
+
+OuteTTS: OLMo-0.5B LM backbone AR codec-token generator +
+WavTokenizer codec (CC BY 4.0). Generates speech tokens
+autoregressively, decoded to PCM by the WavTokenizer.
+
+### voxcpm2-tts
+
+VoxCPM2: Qwen2-2B backbone + flow matching + BigVGAN @ 48 kHz. Two-stage:
+AR text-to-semantic-tokens via the Qwen2 LM, then flow matching
+continuous diffusion + BigVGAN vocoder. Zero-shot voice cloning from
+reference WAV. Output is 48 kHz, decimated to 24 kHz for the standard
+CrispASR TTS pipeline.
+
+### cosyvoice3-tts
+
+CosyVoice3 0.5B (FunAudioLLM, Apache-2.0): three-stage pipeline — Qwen2-0.5B
+AR speech-token LM → DiT-based conditional flow matching (10-step Euler ODE) →
+HiFT vocoder (NSF + iSTFT) @ 24 kHz. Supports 9 languages + 18 Chinese
+dialects. Zero-shot voice cloning via baked voice packs. Three separate GGUFs:
+LLM, flow, HiFT.
+
+### pocket-tts
+
+Kyutai Pocket TTS: Llama-1B backbone (causal LM) generating Mimi RVQ codec
+tokens + Mimi decoder (SEANet with causal convolutions) @ 24 kHz.
+Streaming-capable architecture. Uses raw tensor operations on CPU (no ggml
+graph), KV-cached AR decode for the Llama backbone, per-frame Mimi decoding.
+
+### f5-tts
+
+F5-TTS: DiT (Diffusion Transformer) for flow-matching text-to-speech.
+Converts text + reference audio to mel spectrograms via ODE-based diffusion
+(typically 32 Euler steps), then vocodes with a shared vocoder. Zero-shot
+voice cloning.
+
+### bark
+
+Suno Bark (MIT, ~400M): three-stage GPT-2 pipeline — text → semantic tokens
+(12L, 1024-d) → coarse acoustic tokens (12L, 1024-d) → fine acoustic tokens
+(12L, 1024-d) → EnCodec decoder @ 24 kHz. All sub-models packed into one
+GGUF with selective Q4_K quantization. Speaker conditioning via `.npz`
+voice prompts.
+
