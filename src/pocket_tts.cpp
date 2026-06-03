@@ -140,12 +140,14 @@ struct pocket_tts_transformer_layer {
 // ── Flow network (consistency head) weights ────────────────────────
 
 struct pocket_tts_flow_resblock {
-    ggml_tensor* ln_w = nullptr;        // LayerNorm weight
-    ggml_tensor* ln_b = nullptr;        // LayerNorm bias
-    ggml_tensor* mlp_linear1 = nullptr; // (flow_dim, flow_dim)
-    ggml_tensor* mlp_linear2 = nullptr; // (flow_dim, flow_dim)
-    ggml_tensor* ada_linear = nullptr;  // (3*flow_dim, flow_dim)
-    ggml_tensor* ada_bias = nullptr;    // (3*flow_dim,)
+    ggml_tensor* ln_w = nullptr;          // LayerNorm weight
+    ggml_tensor* ln_b = nullptr;          // LayerNorm bias
+    ggml_tensor* mlp_linear1 = nullptr;   // (flow_dim, flow_dim)
+    ggml_tensor* mlp_linear1_b = nullptr; // (flow_dim,)
+    ggml_tensor* mlp_linear2 = nullptr;   // (flow_dim, flow_dim)
+    ggml_tensor* mlp_linear2_b = nullptr; // (flow_dim,)
+    ggml_tensor* ada_linear = nullptr;    // (3*flow_dim, flow_dim)
+    ggml_tensor* ada_bias = nullptr;      // (3*flow_dim,)
 };
 
 struct pocket_tts_flow_net {
@@ -492,11 +494,11 @@ static bool load_flow_lm_tensors(struct ggml_context* ctx, pocket_tts_model& m) 
         snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.mlp.0.weight", i);
         rb.mlp_linear1 = try_get_tensor(ctx, buf);
         snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.mlp.0.bias", i);
-        // bias for mlp.0
-        auto* b0 = try_get_tensor(ctx, buf);
-        (void)b0; // mlp uses bias=True
+        rb.mlp_linear1_b = try_get_tensor(ctx, buf);
         snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.mlp.2.weight", i);
         rb.mlp_linear2 = try_get_tensor(ctx, buf);
+        snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.mlp.2.bias", i);
+        rb.mlp_linear2_b = try_get_tensor(ctx, buf);
         snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.adaLN_modulation.1.weight", i);
         rb.ada_linear = try_get_tensor(ctx, buf);
         snprintf(buf, sizeof(buf), "flow_lm.flow_net.res_blocks.%u.adaLN_modulation.1.bias", i);
@@ -1117,11 +1119,11 @@ static void flow_net_eval(pocket_tts_context* pctx, const float* cond, // (d_mod
         for (int i = 0; i < FD; i++)
             normed[i] = normed[i] * (1.0f + scale[i]) + shift[i];
 
-        // MLP: Linear -> SiLU -> Linear
-        linear_f32(h_mlp.data(), normed.data(), rb.mlp_linear1, nullptr, FD, FD);
+        // MLP: Linear -> SiLU -> Linear (both with bias)
+        linear_f32(h_mlp.data(), normed.data(), rb.mlp_linear1, rb.mlp_linear1_b, FD, FD);
         for (int i = 0; i < FD; i++)
             h_mlp[i] = silu_f(h_mlp[i]);
-        linear_f32(h_out.data(), h_mlp.data(), rb.mlp_linear2, nullptr, FD, FD);
+        linear_f32(h_out.data(), h_mlp.data(), rb.mlp_linear2, rb.mlp_linear2_b, FD, FD);
 
         // x = x + gate * h_out
         for (int i = 0; i < FD; i++)
@@ -1977,13 +1979,39 @@ float* pocket_tts_synthesize(struct pocket_tts_context* ctx, const char* text, i
         } else {
             // Sample noise
             std::vector<float> noise(LD);
-            float temp = ctx->params.temperature;
-            float noise_clamp = ctx->params.noise_clamp;
-            for (int i = 0; i < LD; i++) {
-                float n = noise_dist(ctx->rng) * std::sqrt(temp);
-                if (noise_clamp > 0.0f)
-                    n = std::max(-noise_clamp, std::min(noise_clamp, n));
-                noise[i] = n;
+            // Allow forcing step-0 noise from file for diff testing
+            bool noise_forced = false;
+            if (frame == 0) {
+                const char* nf = getenv("POCKET_FORCE_NOISE");
+                if (nf) {
+                    FILE* fn = fopen(nf, "rb");
+                    if (fn) {
+                        if (fread(noise.data(), sizeof(float), LD, fn) == (size_t)LD)
+                            noise_forced = true;
+                        fclose(fn);
+                        fprintf(stderr, "POCKET_FORCE_NOISE: loaded %d floats from %s\n", LD, nf);
+                    }
+                }
+            }
+            if (!noise_forced) {
+                float temp = ctx->params.temperature;
+                float noise_clamp = ctx->params.noise_clamp;
+                for (int i = 0; i < LD; i++) {
+                    float n = noise_dist(ctx->rng) * std::sqrt(temp);
+                    if (noise_clamp > 0.0f)
+                        n = std::max(-noise_clamp, std::min(noise_clamp, n));
+                    noise[i] = n;
+                }
+            }
+
+            // Dump step-0 noise
+            if (frame == 0 && pocket_dump_dir) {
+                std::string p = dump_path("cpp_noise0.f32");
+                FILE* f = fopen(p.c_str(), "wb");
+                if (f) {
+                    fwrite(noise.data(), sizeof(float), LD, f);
+                    fclose(f);
+                }
             }
 
             // Flow net: predict latent from backbone output + noise
