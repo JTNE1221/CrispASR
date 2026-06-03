@@ -68,6 +68,35 @@ public:
             return false;
         }
 
+        // Pocket TTS produces near-silence without voice conditioning.
+        // Auto-load samples/jfk.wav as default voice if --voice not specified.
+        if (p.tts_voice.empty()) {
+            const char* fallbacks[] = {"samples/jfk.wav", "../../samples/jfk.wav", nullptr};
+            bool loaded = false;
+            for (const char** fb = fallbacks; *fb; fb++) {
+                FILE* f = fopen(*fb, "rb");
+                if (f) {
+                    fclose(f);
+                    std::vector<float> ref_pcm;
+                    int ref_sr = 0;
+                    if (crispasr::core::read_wav_mono_pcm16(*fb, ref_pcm, ref_sr) && !ref_pcm.empty()) {
+                        if (ref_sr != 24000)
+                            ref_pcm = core_audio::resample_polyphase(ref_pcm.data(), (int)ref_pcm.size(), ref_sr, 24000);
+                        if (pocket_tts_set_voice(ctx_, ref_pcm.data(), (int)ref_pcm.size()) == 0) {
+                            if (!p.no_prints)
+                                fprintf(stderr, "crispasr[pocket-tts]: auto-loaded voice from '%s'\n", *fb);
+                            loaded = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!loaded && !p.no_prints) {
+                fprintf(stderr, "crispasr[pocket-tts]: WARNING: no --voice specified; "
+                                "output will be near-silent without voice conditioning\n");
+            }
+        }
+
         return true;
     }
 
