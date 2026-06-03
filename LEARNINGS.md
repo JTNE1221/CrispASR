@@ -8577,3 +8577,214 @@ The algorithm per encoder frame:
 
 Config defaults (matching NeMo): beam=4, num_steps=2, gamma=2.3, beta=2.
 Enable via `CRISPASR_PARAKEET_MAES=1` + `--beam-size 4`.
+---
+
+## Bark TTS — what ACTUALLY fixed it (June 2026)
+
+Bark is a 3-stage hierarchical TTS (text→semantic GPT-2 → coarse GPT-2 →
+fine bidirectional GPT → EnCodec decoder → 24 kHz PCM). The runtime was
+written (`src/bark_tts.cpp`) but had three classes of bug: a Q4_K crash,
+incoherent output even at F16, and Q4_K producing silence after the crash
+was fixed.
+
+### Bug 1 — Q4_K crash: hardcoded F16 row stride in embedding lookups
+
+**Symptom.** `bark-small-q4_k.gguf` aborted with
+`GGML_ASSERT(offset + size <= ggml_nbytes(tensor))` inside
+`ggml_backend_tensor_set` for the `inputs_embeds` graph input.
+
+**Root cause.** `compute_embeddings()` computed the byte offset for each
+embedding row as `tok * D * sizeof(ggml_fp16_t)`. For F16 tensors this
+is correct (row stride = D × 2 bytes). For Q4_K, the row stride is
+`ggml_row_size(Q4_K, D)` — typically smaller because the quantised block
+packs 32 elements into 18 bytes instead of 64. The hardcoded offset
+overran the tensor's backing buffer.
+
+The same F16 assumption infected **six call sites**: `compute_embeddings`
+(text/coarse models), `generate_fine` (fine model per-codebook embeddings),
+`fold_weight_norm` (EnCodec weight-normalised convolutions), `cpu_lstm_forward`
+(EnCodec LSTM weights), and `encodec_decode` (RVQ codebook lookups).
+
+**Fix.** Two generic helpers: `tensor_get_row_f32(tensor, row, dst, ne0)`
+reads one row of any ggml type (F32 fast path, F16 conversion, quantised
+via `ggml_get_type_traits(type)->to_float`); `tensor_get_all_f32(tensor,
+dst, n)` reads the entire tensor. All six sites refactored to use these.
+
+**Lesson.** Embedding lookup in ggml C++ runtimes must never assume a
+specific storage type. `ggml_row_size(type, ne0)` gives the correct
+byte stride for any type, and the type-traits `to_float` callback handles
+dequantisation. This pattern (`tensor_get_row_f32`) is now reusable for
+any backend that does CPU-side embedding lookups on potentially-quantised
+tensors — Bark, the EnCodec decoders, Chatterbox vocoder, etc.
+
+### Bug 2 — semantic stage sampling: EOS never fires, logits never populated
+
+**Symptom.** F16 runs completed all 3 stages but produced incoherent
+speech. The semantic stage always ran to `max_steps` (768) instead of
+stopping naturally.
+
+**Root cause.** Two bugs in `generate_text_semantic`:
+
+1. **`sample_logits` was allocated but never filled.** The code declared
+   `std::vector<float> sample_logits(10001)` for the
+   "relevant logits" (10000 semantic + 1 EOS) but then sampled directly
+   from the raw model `logits` pointer — without copying the relevant
+   slice into `sample_logits`. The min_eos_p early-stopping code then
+   read zeroes from `sample_logits`, so EOS probability was always ~0.
+
+2. **EOS excluded from sampling.** `sample_from_logits(logits, 10000, ...)`
+   sampled from exactly 10000 elements — indices 0…9999. The EOS token
+   sits at index 10000 (the `SEMANTIC_PAD_TOKEN` position in the model's
+   output vocab). Python bark builds `relevant_logits =
+   hstack([logits[:10000], logits[10000]])` and samples from 10001 values;
+   the C++ never included that last element.
+
+**Fix.** Before sampling, copy `logits[0:10000]` + `logits[SEMANTIC_PAD_TOKEN]`
+into `sample_logits`, then sample from `sample_logits` with vocab size 10001.
+This matches the Python bark `relevant_logits` construction exactly.
+
+**Lesson.** When porting AR sampling code, check that the "relevant logits"
+slice matches the reference exactly — both the range and the EOS append.
+Zeroed-but-unused buffers are a classic "works by coincidence on F32, fails
+subtly" bug because the sampling softmax over 10001 values with a zeroed
+EOS slot makes EOS vanishingly unlikely.
+
+### Bug 3 — Q4_K silence: aggressive quantization of embeddings + EnCodec
+
+**Symptom.** After fixing the crash, Q4_K loaded and ran all stages but
+produced near-zero audio (peak amplitude 0.0014 vs 0.38 at F16).
+
+**Root cause.** `crispasr-quantize` quantised every 2D weight tensor to
+Q4_K, including token embeddings (129600×768 for text, 12096×768 for
+coarse), position embeddings (1024×768), output lm_heads, and the entire
+EnCodec decoder (weight-normalised convolutions, LSTM weights, RVQ
+codebook embeddings). All of these are read by CPU-side tensor lookups
+(not through the ggml graph) and are precision-sensitive.
+
+The embeddings are the first and most damaging: a Q4_K embedding lookup
+for token ID X returns an approximation that's off by enough to push
+the GPT-2 into different semantic token trajectories. The cascading error
+through 3 stages (semantic→coarse→fine→EnCodec) compounds into garbage.
+
+**Diagnosis path.** Ran F16 vs Q4_K vs Q8_0 with the same seed+text:
+
+| Model   | Size  | Peak amp | Tokens |
+|---------|-------|----------|--------|
+| F16     | 772M  | 0.38     | 167    |
+| Q8_0    | 415M  | 0.43     | 113    |
+| Q4_K-v1 | 225M  | 0.001   | 113    |
+| Q4_K-v2 | 423M  | 0.50     | 145    |
+
+Q8_0 works → the compute graph is correct. Q4_K-v1 fails → quantisation
+noise is the issue. Selective Q4_K-v2 (only attn_qkv, attn_output,
+ffn_up, ffn_down) works → embeddings/codec are the sensitive tensors.
+
+**Fix.** Added a bark-specific rule in `crispasr-quantize/main.cpp`: skip
+any tensor matching `token_embd`, `pos_embd`, `output` (but not
+`attn_output`), or `encodec.*`. Only the 144 attention/FFN projection
+weights (across all 3 sub-models) are quantised.
+
+**Lesson.** For multi-stage AR-codec TTS models, embedding and codec
+weights are typically precision-critical. The quantiser must skip them.
+The telltale sign is "Q8_0 works, Q4_K doesn't" — if the full graph is
+correct at Q8_0, the remaining delta is quantisation noise in the
+non-graph (CPU-side tensor-read) path. The `output` skip was tricky
+because `sname.find("output")` also catches `attn_output` — use
+`sname.find("output") != npos && sname.find("attn_output") == npos`.
+
+### Tokenizer: BERT WordPiece from GGUF, modular in core/
+
+**What.** Bark's text stage expects BERT wordpiece token IDs (from
+`bert-base-multilingual-cased`) offset by `TEXT_ENCODING_OFFSET` (10048).
+The original code used byte-level encoding (each UTF-8 byte + 10048),
+which produces valid but wrong token IDs → the semantic model generates
+incoherent semantic tokens.
+
+**Fix.** The converter (`convert-bark-to-gguf.py`) already embeds the
+BERT vocab via `w.add_token_list(toks)` → `tokenizer.ggml.tokens` KV
+array. Added `core/wordpiece.h` — a shared BERT WordPiece tokenizer
+(auto-detects cased vs uncased, BERT BasicTokenizer punctuation splitting,
+UTF-8 greedy longest-match). DRY: replaces the inline copy in
+`fireredpunc.cpp` and serves bark. Loads at init via
+`core_gguf::kv_str_array(g, "tokenizer.ggml.tokens")`.
+
+**Lesson.** Tokeniser code is always reusable — put it in `core/` from
+day one. The "byte-level fallback" pattern (warn + degrade gracefully when
+the GGUF lacks vocab) is good practice for backwards compatibility with
+older GGUFs.
+
+### NPZ speaker prompt loader: minimal ZIP+NPY parser
+
+**What.** Bark voice conditioning requires `.npz` files containing
+`semantic_prompt`, `coarse_prompt` (2,T), `fine_prompt` (8,T) as int64
+arrays. The `bark_set_speaker_npz` was a TODO returning -1.
+
+**Fix.** Implemented a minimal ZIP local-file-header parser (`parse_npz`)
+and NPY parser (`parse_npy_to_int32`) — handles version 1.0/2.0, int64/
+int32/int16 dtypes, arbitrary shapes. ~150 lines, no external deps. The
+semantic history is prepended as the second 256-token block in
+`generate_text_semantic` (merge_context sums them with the text
+embeddings). Coarse history is interleaved as full-vocab tokens and
+prepended after `COARSE_INFER_TOKEN`.
+
+**Lesson.** NPZ is just a ZIP of .npy files; .npy v1/v2 is a trivial
+header + raw data. A minimal parser is ~100 lines and avoids pulling in
+cnpy or similar. Bark's speaker conditioning is essential for coherent
+output — without it the model free-hallucinates.
+
+### CIFS + git worktree = data loss
+
+During this work, a git worktree on the CIFS mount (`/mnt/storage/`)
+suffered file corruption: `Edit` tool writes succeeded (the data hit the
+CIFS cache) but the underlying inode was deleted (Links: 0), making the
+file unreadable by `cat`, `cp`, or git. The edits were lost.
+
+**Fix.** Moved the worktree to the local SSD (`/mnt/volume1/worktree-bark-fix`).
+Build dirs also on local SSD (`/mnt/volume1/build-bark-fix`). Models and
+large data on CIFS; code and builds on local disk.
+
+**Lesson.** Never put git worktrees on CIFS mounts. The `actimeo=60` cache
+and async writeback can leave files in a "visible in `ls -la` but
+unreadable" ghost state. Local SSD for worktrees; CIFS for data only.
+
+### NPZ ZIP64: NumPy writes ZIP64 even for tiny files
+
+NumPy's `np.savez` writes ZIP64 extra fields (local header `comp_size =
+0xFFFFFFFF`, actual size in extra tag `0x0001`) even for files under 1 KB.
+The initial NPZ parser only checked the 32-bit size field and broke on
+`0xFFFFFFFF` (tried to read 4 GB). **Fix:** when `comp_size32 ==
+0xFFFFFFFF`, parse the ZIP64 extra field (tag `0x0001`, offset +12, 8-byte
+little-endian compressed size).
+
+**Lesson.** Always handle ZIP64 in NPZ parsers — NumPy defaults to it
+regardless of file size.
+
+### n_threads non-determinism in AR sampling
+
+With the same seed, switching from 4 to 2 threads produces different audio
+(cos=0.50 at Q4_K, cos=0.87 at F16). This is inherent to multi-threaded
+GEMM: floating-point reduction order differs across thread counts, producing
+slightly different intermediate values that accumulate through 768+ AR steps.
+
+This is NOT a bug — it matches upstream PyTorch behavior (different
+`torch.set_num_threads()` also produces different samples). Seed
+reproducibility is only guaranteed at the same thread count.
+
+### Integration test results (June 2026)
+
+Full test matrix on CPU (VPS, no GPU):
+
+| Test | Q4_K v2 | F16 | Q8_0 |
+|------|---------|-----|------|
+| Model load | PASS | PASS | PASS |
+| BERT tokenizer | PASS (119547 tok) | PASS | PASS |
+| NPZ speaker load | PASS | — | — |
+| Synthesis peak | 0.70 | 0.79 | 0.43 |
+| Seed repro (cos) | 1.000000 | 1.000000 | — |
+| Cross-seed diverge | cos=-0.003 | cos=0.010 | — |
+| Temperature setter | PASS | PASS | — |
+| ASR roundtrip | "Hello!" ✓ | "And" (stochastic) | — |
+| Q4_K v1 (all quant) | BLANK_AUDIO | — | — |
+
+GPU dispatch is wired (`ggml_backend_init_best()` + dual-backend scheduler)
+but untested on this CPU-only VPS. Pattern matches csm_tts, kokoro, voxtral.
