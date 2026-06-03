@@ -20,8 +20,9 @@ trade-off:
 | **`csm`** | Sesame CSM-1B: Llama-3.2 1B backbone (first-codebook AR) + 100M depth decoder (codebooks 1–31) + Kyutai Mimi codec (32-codebook RVQ → SEANet) @ 24 kHz. Single GGUF. Apache-2.0. | No (single built-in voice) | ~1.4 GB via `-m auto` (single Q4_K GGUF) |
 | **`dia`** | Nari Labs Dia 1.6B: byte-level text encoder (12L) + AR audio decoder (18L GQA) + 9-codebook DAC codec @ 44.1 kHz. CFG-guided, dialogue-style with `[S1]`/`[S2]` speaker tags. Apache-2.0. | No (dialogue via speaker tags) | ~1.6 GB via `-m auto` |
 | **`speecht5`** | Microsoft SpeechT5 80M: char-level encoder (12L) + AR mel decoder (6L) + 5-conv postnet + HiFi-GAN @ 16 kHz. MIT. Speaker via 512-d x-vector. | Yes (`--voice <xvector.bin>`, raw float32) | ~300 MB via `-m auto` (F16 GGUF) |
+| **`fastpitch`** | NVIDIA FastPitch 60M: non-autoregressive parallel TTS — 6L FFTransformer encoder + duration/pitch predictors + length regulator + 6L FFTransformer decoder + HiFi-GAN @ 22 kHz. Deterministic (no sampling). CC-BY-4.0. | No (single speaker) | ~230 MB via `-m auto` (Q8_0 GGUF) |
 
-All backends write mono WAV via `--tts-output` (22 kHz for piper, 16 kHz for speecht5, 24 kHz for most others).
+All backends write mono WAV via `--tts-output` (22 kHz for piper/fastpitch, 16 kHz for speecht5, 24 kHz for most others).
 
 ### Reproducible / diverse generation (`--seed`)
 

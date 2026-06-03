@@ -476,6 +476,36 @@ Speaker conditioning requires a 512-d x-vector (e.g. from
 `--voice`. The prenet uses "consistent dropout" at inference in the
 original; the C++ port omits it (deterministic).
 
+### fastpitch
+
+NVIDIA FastPitch (`nvidia/tts_en_fastpitch`, CC-BY-4.0, ~60M params),
+single GGUF (~230 MB including HiFi-GAN vocoder), 22 kHz mono.
+**Non-autoregressive** — the entire mel spectrogram is generated in a
+single parallel forward pass (no AR loop, no sampling, no KV cache).
+
+- **Text encoder** — Embedding(115, 384) + sinusoidal PE (cat [sin, cos])
+  + 6L FFTransformer (1-head, d_head=64, d_inner=1536, Conv1d(k=3) FFN,
+  post-LN). Bidirectional (no causal mask).
+- **Duration predictor** — 2-layer Conv1d(k=3, 256 filters) + LayerNorm
+  + ReLU → Linear(256→1). Output: log-durations per token, converted via
+  `round(exp(x) - 1)`.
+- **Pitch predictor** — same architecture as duration predictor. Output:
+  normalized pitch per token.
+- **Length regulator** — repeat_interleave encoder features by rounded
+  durations. Pitch expanded similarly, then embedded via Conv1d(1→384, k=3)
+  and added to the expanded features.
+- **Mel decoder** — 6L FFTransformer (same architecture as encoder), then
+  Linear(384→80) → mel spectrogram.
+- **HiFi-GAN vocoder** — `nvidia/tts_hifigan`, conv_pre(80→512) + 4×
+  upsample (rates [8,8,2,2], kernels [16,16,4,4]) with MRF resblocks
+  (kernels [3,7,11], dilations [[1,3,5]×3]) + conv_post → 22 kHz PCM.
+  Weight-norm fused at conversion.
+
+Deterministic output — same input always produces the same audio.
+Tokenizer: ARPABET vocabulary (115 tokens: space + 24 consonants +
+45 stressed vowels + 26 lowercase chars + apostrophe + 15 punct +
+pad/blank/oov). Currently character-level; G2P not yet implemented.
+
 ### m2m100 / wmt21
 
 12L encoder + 12L decoder transformer (d=1024, 16 heads, FFN=4096, ReLU,

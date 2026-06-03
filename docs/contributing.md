@@ -134,7 +134,7 @@ The `--list-backends` capability row is read live from the backend's
 
 ### C ABI — `src/crispasr_c_api.cpp` (this is what the bindings/server call)
 Python/Go/Dart/server use the **session C ABI**, not the CLI factory.
-Eight edit points, each mirroring the `CA_HAVE_CHATTERBOX` blocks:
+Nine edit points, each mirroring the `CA_HAVE_CHATTERBOX` blocks:
 1. **include + flag:** `#if __has_include("yourmodel.h")` → `#include` →
    `#define CA_HAVE_YOURMODEL 1` → `#endif`.
 2. **session struct field:** `#ifdef CA_HAVE_YOURMODEL  yourmodel_context* yourmodel_ctx = nullptr;  #endif`.
@@ -148,6 +148,12 @@ Eight edit points, each mirroring the `CA_HAVE_CHATTERBOX` blocks:
 8. **`crispasr_session_available_backends()`:** append `,yourmodel`. The
    Python binding rejects any backend missing from this list, so this is
    not optional.
+9. **`set_ask` wiring** — if the backend is an instruct-tuned audio-LLM
+   (has a user/system prompt template): add a `yourmodel_set_ask(ctx,
+   prompt)` setter to the runtime, and forward `s->ask` in the transcribe
+   dispatch. This lets `set_ask()` override the default transcription
+   instruction. Currently wired for: granite, voxtral, qwen3-asr,
+   glm-asr, gemma4-e2b, mimo-asr.
 
 ### CMake — link into the C-ABI library, `src/CMakeLists.txt`
 §4 links the backend into the CLI binary. The C ABI needs it in

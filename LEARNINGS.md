@@ -8236,3 +8236,129 @@ for them; this is sampling variance, not a port bug). F16 and Q4_K both roundtri
 verbatim. Debug hooks are env-gated with paths from the env value: `DIA_GREEDY`,
 `DIA_DUMP_TOKENS`, `DIA_MAX_STEPS`, `DIA_FORCE_TOKENS`, `DIA_DUMP_STEPLOGITS`,
 `DIA_DUMP_DIR`, `DIA_DECODE_CODES`.
+
+## FastPitch TTS — non-autoregressive parallel TTS port (§133, 2026-06-02/03)
+
+FastPitch is the simplest TTS architecture in the project: a single deterministic
+forward pass (no AR loop, no sampling, no KV cache, no CFG). That made diffing
+unusually clean — every stage should match the reference at cos ≈ 1.0, and any
+deviation is a real bug rather than sampling variance. The port surfaced six bugs,
+all in the converter or runtime graph, none in the model logic itself.
+
+### Bug 1 — post-norm vs pre-norm (critical)
+
+NeMo FastPitch defaults to `pre_lnorm=False`, meaning LayerNorm is **post-norm**:
+`x = LayerNorm(x + sublayer(x))`. The stub had pre-norm:
+`x = x + sublayer(LayerNorm(x))`. This silently produces plausible-looking but
+wrong encoder output (cos ≈ 0.89 instead of 1.0). The fix is trivial once
+identified: move the LayerNorm call from before the sublayer to after the
+residual add. Both encoder and decoder use the same pattern.
+
+**Lesson:** Always check `pre_lnorm` / `pre_norm` flags in the reference config.
+NeMo, Fairseq, and HuggingFace transformers all default differently.
+
+### Bug 2 — sinusoidal PE layout: cat [sin, cos] vs interleaved
+
+NeMo's `PositionalEmbedding` stores `inv_freq` (not precomputed positions) and
+computes PE on-the-fly as `cat([sin(pos·freq), cos(pos·freq)], dim=-1)` — the
+first half of the embedding is all sines, the second half all cosines. The
+converter initially generated interleaved `[sin₀, cos₀, sin₁, cos₁, ...]`.
+This drops encoder cos from 1.0 to 0.89. The fix is a one-line change in the
+converter's `generate_sinusoidal_pe()`.
+
+**Lesson:** Every sinusoidal PE implementation chooses a different interleaving.
+Always dump and compare the first few values of position 0 to verify layout.
+
+### Bug 3 — ggml conv1d input layout
+
+`ggml_conv_1d(weight, input)` expects input with `ne[0]=T` (spatial) and
+`ne[1]=Cin` (channels). The encoder/decoder data flows in `(D, T)` =
+`ne[0]=D, ne[1]=T`, which is the transpose. Without explicit `transpose_2d()`
+calls around every conv1d operation, the assertion `b->ne[1] == a->ne[1]`
+fires or (worse) the conv silently reads garbage.
+
+The hifigan.h shared vocoder also expects `(T, Cin)`. SpeechT5 creates its mel
+tensor as `ggml_new_tensor_2d(T_mel, mel_bins)` directly — it never goes through
+the `(D, T)` intermediate that FastPitch uses.
+
+**Lesson:** ggml is column-major (`ne[0]` contiguous). A 2D tensor `(ne0, ne1)`
+stores `ne0` values contiguously, then repeats for each `ne1`. When calling
+`ggml_conv_1d`, `ne[0]` must be the spatial axis. When passing data between
+ggml stages and CPU-side buffers, be explicit about which axis is contiguous —
+"(80, 191)" in ggml means 80 contiguous values per timestep (channel-first), not
+the numpy (80, 191) which is 191 contiguous values per mel bin (batch-of-rows).
+
+### Bug 4 — conv1d output is 3D, not 2D
+
+`ggml_conv_1d` returns a 3D tensor `(OL, OC, N)` even for unbatched input
+(`N=1`). Adding a 2D bias `(1, OC)` to a 3D result fails
+`ggml_can_repeat()`. Fix: `ggml_reshape_2d(y, y->ne[0], y->ne[1])` before
+the bias add.
+
+### Bug 5 — vocoder mel data transpose
+
+The decoder output is ggml `(ne[0]=n_mel, ne[1]=T)`, storing `n_mel` contiguous
+values per timestep. The HiFi-GAN vocoder expects ggml `(ne[0]=T, ne[1]=n_mel)`
+where `ne[0]` is the spatial conv1d axis. Feeding the raw flat buffer produces
+quiet buzzy noise (RMS ≈ 0.017 vs reference 0.072). CPU-side transpose of the
+mel data (`data[c·T+t] = src[t·n_mel+c]`) before `ggml_backend_tensor_set()`
+fixes it. ASR roundtrip goes from empty transcript to correct.
+
+**Lesson:** When piping between ggml sub-graphs via CPU buffers, always verify
+the data layout matches the destination tensor's `ne` expectations. A flat
+`memcpy` that silently transposes the semantic axes is the hardest bug to spot
+because the model "runs" but produces garbage.
+
+### Bug 6 — NeMo naming conventions differ across model versions
+
+The converter was written for the German multispeaker model, which uses one NeMo
+naming convention (`.norm1.`, `.norm2.`, `.pos_ff.conv_1.`). The English model
+(`nvidia/tts_en_fastpitch`) uses a different convention (`.dec_attn.layer_norm.`,
+`.pos_ff.layer_norm.`, `.pos_ff.CoreNet.0.`). The converter now handles both by
+applying all rename rules and letting whichever matches stick.
+
+Also: `.nemo` archives can be plain tar or gzip; the English model is plain tar.
+The `weight_g`/`weight_v` weight-norm fusion and discriminator/aligner weight
+stripping work the same for both.
+
+### Conv weight transpose was wrong — no transpose needed
+
+The converter had `transpose_conv_weight()` doing `arr.transpose(2,1,0)` to
+convert PyTorch `(Cout, Cin, K)` to ggml `(K, Cin, Cout)`. But numpy row-major →
+ggml column-major mapping already handles this: numpy `(Cout, Cin, K)` stores `K`
+as the innermost dimension, which becomes ggml `ne[0]=K`. So the "transpose" was
+actually double-transposing, producing `ne[0]=Cout` instead of `ne[0]=K`. Fix:
+remove the transpose entirely (identity function).
+
+**Lesson:** When writing a GGUF converter, numpy `(A, B, C)` row-major → ggml
+`ne[0]=C, ne[1]=B, ne[2]=A`. If ggml expects `ne[0]=K, ne[1]=Cin, ne[2]=Cout`
+and PyTorch is `(Cout, Cin, K)`, the numpy array is already in the right order.
+Don't transpose.
+
+### Quantization yields minimal size reduction for small conv-heavy models
+
+FastPitch is ~60M params, mostly in 3D Conv1d weights and 1D biases/norms. The
+quantizer only compresses 2D matrices (attention projections). Result: F32 = 231 MB,
+Q8_0 = 227 MB, Q4_K = 227 MB — almost no savings. All three pass ASR roundtrip.
+For conv-heavy models, quantization is about speed (SIMD Q4 matmul), not size.
+
+### GGUF `add_array` with numpy arrays fails
+
+The `gguf-py` library's `add_array()` raises "Invalid GGUF metadata array,
+expecting sequence" when passed numpy arrays. Plain Python lists work fine.
+Convert with `[int(x) for x in arr]` before calling `add_array()`.
+
+### NeMo import on this host requires overrides patching
+
+NeMo 2.7.3 + Python 3.13 + the `overrides` library hits a signature-check
+TypeError in `OneLoggerPTLTrainer.save_checkpoint`. Patching all three functions
+in `overrides.signature` to swallow `TypeError` lets import succeed. The
+tokenizer and model both work correctly after the patch.
+
+### Diff-test harness for deterministic models
+
+For non-autoregressive models, every stage should match the reference at cos ≈ 1.0.
+The harness: (1) dump reference per-stage with forward hooks, (2) teacher-force
+tokens via `FASTPITCH_FORCE_TOKENS=<file>`, (3) dump C++ per-stage via
+`FASTPITCH_DUMP_DIR=<dir>`, (4) compare with numpy cosine similarity. First
+divergent stage is the bug. Debug hooks: `FASTPITCH_DUMP_DIR`, `FASTPITCH_FORCE_TOKENS`.
