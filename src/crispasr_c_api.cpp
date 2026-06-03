@@ -1995,7 +1995,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
             std::string dir(model_path);
             auto sep = dir.find_last_of("/\\");
             if (sep != std::string::npos)
-                dir = dir.substr(0, sep);
+                dir.resize(sep);
             else
                 dir = ".";
             const char* names[] = {"wavtokenizer-decoder-f16.gguf", "wavtokenizer-decoder.gguf"};
