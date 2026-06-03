@@ -30,7 +30,7 @@ Single GGUF contains all three components (T5 encoder + decoder + DAC codec).
 |---|---|---:|---|
 | `parler-tts-mini-v1.1-f16.gguf`  | F16  | 1.8 GB | Reference quality |
 | `parler-tts-mini-v1.1-q8_0.gguf` | Q8_0 | 979 MB | Recommended |
-| `parler-tts-mini-v1.1-q4_k.gguf` | Q4_K | 120 MB | Smallest — reduced audio quality |
+| `parler-tts-mini-v1.1-q4_k.gguf` | Q4_K | 569 MB | Smallest (DAC codec kept at F16) |
 
 ## Quick start
 
@@ -82,12 +82,20 @@ python models/convert-parler-to-gguf.py \
     --output parler-tts-mini-v1.1-f16.gguf
 ```
 
+## Quantization notes
+
+DAC audio codec weights are kept at F16 in all quantized variants — audio codecs are
+precision-sensitive and quantization noise produces audible artefacts. Only T5 encoder
+and MusicGen decoder weights are quantized. The BPE tokenizer is embedded in the GGUF
+(`parler.tokenizer.is_bpe=true`) so the C++ runtime auto-selects the correct algorithm.
+
 ## Limitations
 
 - Greedy decoding (temperature=0) produces degenerate output; use temperature=1.0 (default)
+- C++ RNG (`std::mt19937`) differs from PyTorch RNG — same seed produces different audio
 - Generation quality varies with the voice description — more specific descriptions yield better results
 - No streaming support yet — audio is generated in one pass
-- Maximum generation length capped at 500 steps (~5.7s at 44.1 kHz) on memory-constrained systems
+- Maximum ~30 s audio per generation (2580 AR steps at 44.1 kHz / 512 hop)
 
 ## License
 
