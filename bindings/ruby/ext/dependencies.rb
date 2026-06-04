@@ -38,7 +38,11 @@ class Dependencies
       else
         nil
       end
-    }.reverse.collect {|lib| "lib#{lib}.a"}
+    }.reverse.collect {|lib|
+      # cmake target name → output name (OUTPUT_NAME property)
+      lib = "crispasr" if lib == "crispasr-lib"
+      "lib#{lib}.a"
+    }
   end
 
   def to_s
