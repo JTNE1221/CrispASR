@@ -51,7 +51,7 @@ def get_libs(dot_path):
     sys.path.insert(0, SCRIPT_DIR)
     from cmake_graphviz_targets import get_static_libs
 
-    return get_static_libs(dot_path, ["crispasr", "common"])
+    return get_static_libs(dot_path, ["crispasr"])
 
 
 def build_linux_line(libs):
