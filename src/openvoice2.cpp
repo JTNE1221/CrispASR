@@ -640,14 +640,15 @@ static bool ref_enc_forward(openvoice2_context * ctx,
         }
     }
 
-    // Reshape to (1, n_bins, T_spec) for Conv2d — treat as (batch=1, C=1, H=n_bins, W=T_spec)
-    // 6 Conv2d layers: k=3x3, stride=2x2
-    int H = n_bins, W = T_spec, C_in = 1;
+    dump_stage(ctx, "ref_enc_layernorm", x.data(), x.size());
+
+    // Reshape to (batch=1, C=1, H=T_spec, W=n_bins) for Conv2d.
+    // Python: x.transpose(1,2) → (1,T,513) → unsqueeze(1) → (1,1,T,513)
+    // So H=T_spec, W=n_bins — NOT transposed from (T,bins) layout.
+    int H = T_spec, W = n_bins, C_in = 1;
     std::vector<float> feat(C_in * H * W);
-    // Transpose from (T, bins) to (bins, T) = (H, W)
-    for (int h = 0; h < H; h++)
-        for (int w = 0; w < W; w++)
-            feat[h * W + w] = x[w * H + h];
+    // x is already (T, bins) — copy directly as (H=T, W=bins)
+    memcpy(feat.data(), x.data(), H * W * sizeof(float));
 
     static const int filters[] = {1, 32, 32, 64, 64, 128, 128};
 
@@ -691,6 +692,22 @@ static bool ref_enc_forward(openvoice2_context * ctx,
         H = H_out;
         W = W_out;
         C_in = C_out;
+
+        // Per-layer dump for diff debugging
+        {
+            char label[64];
+            snprintf(label, sizeof(label), "ref_enc_conv%d", li);
+            dump_stage(ctx, label, feat.data(), feat.size());
+            if (ctx->verbosity >= 2) {
+                float mn = *std::min_element(feat.begin(), feat.end());
+                float mx = *std::max_element(feat.begin(), feat.end());
+                double sm = 0;
+                for (auto v : feat)
+                    sm += v;
+                fprintf(stderr, "openvoice2: %s (%d×%d×%d) mean=%.6f min=%.4f max=%.4f\n", label, C_in, H, W,
+                        sm / feat.size(), mn, mx);
+            }
+        }
     }
 
     // Reshape: (C_out=128, H, W) → (H, C_out * W) for GRU
@@ -741,6 +758,8 @@ static bool ref_enc_forward(openvoice2_context * ctx,
             h_state[i] = (1.0f - z) * n + z * h_state[i];
         }
     }
+
+    dump_stage(ctx, "ref_enc_gru_out", h_state.data(), h_state.size());
 
     // Linear projection: (128) → (256)
     std::vector<float> w_proj, b_proj;
