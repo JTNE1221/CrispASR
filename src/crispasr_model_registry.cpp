@@ -331,6 +331,15 @@ constexpr Entry k_registry[] = {
      "~986 MB",
      "qwen3-tts-tokenizer-12hz.gguf",
      "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
+    // gwen-tts-0.6B: Vietnamese-optimized Qwen3-TTS-0.6B-Base finetune
+    // (MIT, g-group-ai-lab). Same architecture as qwen3-tts-0.6B-Base,
+    // trained on ~1000h Vietnamese TikTok audio. Supports all 10 Qwen3-TTS
+    // languages but excels at Vietnamese. Uses the same 12 Hz tokenizer.
+    {"gwen-tts", "gwen-tts-0.6b-q8_0.gguf",
+     "https://huggingface.co/cstr/gwen-tts-0.6b-GGUF/resolve/main/gwen-tts-0.6b-q8_0.gguf",
+     "~968 MB",
+     "qwen3-tts-tokenizer-12hz.gguf",
+     "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"},
     // Qwen3-TTS-CustomVoice: fixed-speaker fine-tune of qwen3-tts-Base
     // with 9 baked speakers (aiden, dylan, eric, ono_anna, ryan, serena,
     // sohee, uncle_fu, vivian). Runtime path: pick a speaker via

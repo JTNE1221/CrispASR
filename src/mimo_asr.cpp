@@ -964,6 +964,14 @@ static ggml_cgraph* mimo_asr_build_step_graph(mimo_asr_context* ctx, int n_past,
     ggml_set_input(text_ids);
     ggml_set_name(text_ids, "text_input_ids");
     ggml_tensor* inputs_embeds = ggml_get_rows(ctx0, m.llm.embed_w, text_ids); // [d, 1]
+    // PLAN #115 option B: when embed_w lives on CPU (force_gpu split-load
+    // keeps Q4_K embeds off GPU to avoid the CUDA GET_ROWS SIGSEGV), the
+    // get_rows output is CPU-resident. Insert a named ggml_cont bridge so
+    // mimo_asr_run_lm_step can pin it to the GPU backend — the scheduler
+    // then inserts a CPU→GPU copy node, preventing the "ADD failed" abort
+    // that occurs when a CPU embed output meets a GPU-resident residual.
+    inputs_embeds = ggml_cont(ctx0, inputs_embeds);
+    ggml_set_name(inputs_embeds, "step_embed_bridge");
 
     // Positions for RoPE; doubles as kv_indices when fixed_kv_len > 0.
     ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
@@ -1462,6 +1470,15 @@ static float* mimo_asr_run_lm_step(mimo_asr_context* ctx, int32_t next_token, in
         if (!gf)
             return nullptr;
         ggml_backend_sched_reset(ctx->sched);
+        // PLAN #115 option B: pin the embed bridge to GPU so the scheduler
+        // inserts a CPU→GPU copy for the get_rows output. Without this,
+        // the decode ADD fails ("ggml_cuda_compute_forward: ADD failed")
+        // because the CPU-resident embed output meets GPU-resident weights.
+        if (ctx->backend && ctx->backend != ctx->backend_cpu) {
+            ggml_tensor* bridge = ggml_graph_get_tensor(gf, "step_embed_bridge");
+            if (bridge)
+                ggml_backend_sched_set_tensor_backend(ctx->sched, bridge, ctx->backend);
+        }
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "mimo_asr_run_lm_step: alloc_graph failed\n");
             return nullptr;

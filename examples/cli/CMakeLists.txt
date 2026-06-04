@@ -292,6 +292,7 @@ target_link_libraries(${TARGET} PRIVATE
     $<$<BOOL:${WIN32}>:crypt32>
     $<$<BOOL:${WIN32}>:bcrypt>
     $<$<BOOL:${WIN32}>:iphlpapi>
+    $<$<BOOL:${WIN32}>:shell32>
     $<$<BOOL:${CRISPASR_CURL}>:CURL::libcurl>
 )
 

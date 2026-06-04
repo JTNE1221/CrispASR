@@ -55,8 +55,9 @@ static bool vox_env_bool(const char* k) {
 // Like vox_env_bool but defaults to true (opt-out instead of opt-in).
 static bool vox_env_bool_default_on(const char* k) {
     const char* v = std::getenv(k);
-    if (!v || !*v) return true;           // unset → on
-    return std::strcmp(v, "0") != 0;      // "0" → off, anything else → on
+    if (!v || !*v)
+        return true;                 // unset → on
+    return std::strcmp(v, "0") != 0; // "0" → off, anything else → on
 }
 
 static double vox_now_ms() {
