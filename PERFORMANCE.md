@@ -34,7 +34,7 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
 | backend | KV_QUANT | KV_QUANT_K/_V | KV_ON_CPU | N_GPU_LAYERS | notes |
 |---|:-:|:-:|:-:|:-:|---|
 | canary (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext default, -17 % on JFK with q8_0/q4_0 |
-| cohere (2B) | ✓ | ✓ | ✓ | · | flash_attn_ext available; +11 % regression vs cast-on-read on JFK with q8_0/q4_0 — long-form rerun needed before promoting (see PLAN) |
+| cohere (2B) | ✓ | ✓ | ✓ | · | flash default; -26 % win at 300 s, +13 % regression at 60 s — crossover between 1-5 min (see §5 below) |
 | kyutai-stt (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext native, quant-safe |
 | firered-asr (900M) | — | — | — | — | inline AED, no exposed transformer KV |
 | moonshine-tiny / streaming | — | — | — | — | tiny decoder, no exposed KV |
@@ -83,13 +83,21 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
    dGPU should be even more favourable; deferred until a CUDA host
    is available. If a platform regresses, gate via env
    (`CRISPASR_FORCE_CPU_WEIGHTS=1`).
-5. **Cohere flash_attn_ext regresses on short audio.** JFK (~11 s)
-   with q8_0 K / q4_0 V is +11 % slower under flash than under the
-   cast-on-read fallback (canary on the same workload is -17 %, so
-   the kernel works — cohere's cache layout or head dim flips the
-   crossover). Need a multi-minute clip to confirm flash pulls ahead
-   on long-form before promoting it to the recommended path; until
-   then short-form users on cohere should treat flash as opt-in.
+5. **Cohere flash_attn_ext: crossover confirmed (PLAN #73 closeout,
+   2026-06-04).** Long-form rerun on FLEURS EN, VPS x86 CPU, 2
+   threads, `cohere-transcribe-q4_k.gguf`:
+
+   | audio | flash-attn (s) | cast-on-read (s) | delta |
+   |---|---:|---:|---|
+   | 60 s | 202.72 | 179.13 | flash **+13% slower** |
+   | 300 s | 820.37 | 1114.96 | flash **-26% faster** |
+
+   Crossover is between 60 s and 300 s. Flash wins decisively on
+   long-form (5+ min) due to O(n) vs O(n²) attention scaling.
+   Short-form (<2 min) should use cast-on-read (`-nfa`).
+   **Recommendation:** flash is now the default (`-fa`, already true
+   since cli.cpp:96); users transcribing only short clips can opt
+   out with `-nfa` for ~13% gain on sub-minute audio.
 
 ### Stacking the four knobs
 

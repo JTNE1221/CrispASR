@@ -2364,14 +2364,18 @@ chunked transfer.
 - Any changes to AR decoding itself — the AR loop stays
   unchanged; only the post-AR codec / VAE side is chunked.
 
-## 73-follow-up. Long-context cohere FA vs cast-on-read benchmark — open
+## 73-follow-up. Long-context cohere FA vs cast-on-read benchmark — DONE (2026-06-04)
 
 Parent #73 (quant-safe KV cache write for canary / cohere / kyutai_stt)
 shipped → HISTORY §79. #71 + #72 also there (test-runner under-invocation
 + cap-honesty audit; gemma4_e2b / mimo_asr GPU residency for Q4_K weights
 — gemma4 2.2× on M1, mimo-asr -22 %, Linux/CUDA validation deferred).
-Only residual: long-context perf comparison of cohere flash-attn vs
-cast-on-read — JFK is too short to surface the long-context win.
+
+**Benchmark result (VPS x86 CPU, 2 threads, cohere-transcribe-q4_k.gguf,
+FLEURS EN):** flash wins by 26% on 300s audio (820s vs 1115s), loses by
+13% on 60s audio (203s vs 179s). Crossover between 1-5 min. Flash
+stays as default (`-fa`); short-clip users can opt out with `-nfa`.
+Full results in PERFORMANCE.md §5.
 
 ## 74. Feature-matrix uplift round 2 — chatterbox family + matrix tooling ✓
 
