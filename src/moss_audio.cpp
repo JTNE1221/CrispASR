@@ -1426,10 +1426,36 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     free(mel);
     if (!encoder_out) { fprintf(stderr, "moss_audio: encoder failed\n"); return nullptr; }
 
-    if (ctx->params.verbosity >= 1)
+    if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "moss_audio: encoder done: %d frames × %d dims\n", T_enc, enc_d);
+        // Print first few values of encoder output for diagnostic
+        float sum = 0, absmax = 0;
+        for (int i = 0; i < T_enc * enc_d; i++) {
+            sum += encoder_out[i];
+            float a = fabsf(encoder_out[i]);
+            if (a > absmax) absmax = a;
+        }
+        fprintf(stderr, "moss_audio: encoder out: mean=%.6f absmax=%.6f first=[%.4f %.4f %.4f %.4f]\n",
+                sum / (T_enc * enc_d), absmax,
+                encoder_out[0], encoder_out[1], encoder_out[2], encoder_out[3]);
+    }
 
     // 3. Run audio adapter (encoder output → LLM space)
+    // DIAGNOSTIC: test adapter with small random input (simulates "correct" encoder)
+    if (ctx->params.verbosity >= 2) {
+        std::vector<float> small_in((size_t)T_enc * enc_d);
+        std::mt19937 rng(42);
+        std::normal_distribution<float> dist(0.0f, 0.1f);
+        for (auto& v : small_in) v = dist(rng);
+        int zt = 0, zd = 0;
+        float* small_out = moss_audio_run_adapter(ctx, small_in.data(), T_enc, enc_d, &zt, &zd);
+        if (small_out) {
+            float zm = 0, za = 0;
+            for (int i = 0; i < zt * zd; i++) { zm += small_out[i]; float a = fabsf(small_out[i]); if (a > za) za = a; }
+            fprintf(stderr, "moss_audio: adapter(N(0,0.1)): mean=%.6f absmax=%.6f\n", zm/(zt*zd), za);
+            free(small_out);
+        }
+    }
     int adapt_T = 0, adapt_d = 0;
     float* audio_embeds = moss_audio_run_adapter(ctx, encoder_out, T_enc, enc_d,
                                                   &adapt_T, &adapt_d);
@@ -1437,6 +1463,17 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         free(encoder_out);
         free(ds_tap_0); free(ds_tap_1); free(ds_tap_2);
         return nullptr;
+    }
+
+    if (ctx->params.verbosity >= 1) {
+        float sum = 0, absmax = 0;
+        for (int i = 0; i < T_enc * adapt_d; i++) {
+            sum += audio_embeds[i];
+            float a = fabsf(audio_embeds[i]);
+            if (a > absmax) absmax = a;
+        }
+        fprintf(stderr, "moss_audio: adapter out: mean=%.6f absmax=%.6f\n",
+                sum / (T_enc * adapt_d), absmax);
     }
 
     // 4. Run DeepStack mergers on captured taps
@@ -1481,13 +1518,32 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     }
     free(audio_embeds);
 
-    // 7. Build pre-scattered DeepStack tensors for per-layer injection.
+    if (ctx->params.verbosity >= 1) {
+        // Check text_embeds stats after scatter
+        float sum = 0, absmax = 0;
+        int n_audio = 0;
+        for (int pos = 0; pos < n_prompt; pos++) {
+            if (prompt_ids[pos] == (int32_t)hp.audio_token_id) n_audio++;
+            for (int j = 0; j < d_llm; j++) {
+                float v = text_embeds[(size_t)pos * d_llm + j];
+                sum += v;
+                float a = fabsf(v);
+                if (a > absmax) absmax = a;
+            }
+        }
+        fprintf(stderr, "moss_audio: embeds after scatter: mean=%.6f absmax=%.6f n_audio=%d/%d\n",
+                sum / ((size_t)n_prompt * d_llm), absmax, n_audio, n_prompt);
+    }
+
+    // 7. Build pre-scattered DeepStack tensors
+    // DIAGNOSTIC: try without deepstack to isolate the issue
+    bool skip_deepstack = true; // TODO: remove after debugging for per-layer injection.
     //    For each of the 3 injection layers, we build a (d_llm, n_prompt)
     //    tensor that is zero everywhere except at audio-token positions,
     //    where it contains the projected deepstack embeddings. The LLM
     //    graph adds ds_full_N to the hidden state after layer N.
     std::vector<float> ds_full[3];
-    for (uint32_t t = 0; t < hp.ds_num_inject && t < 3; t++) {
+    for (uint32_t t = 0; t < hp.ds_num_inject && t < 3 && !skip_deepstack; t++) {
         if (!ds_projs[t]) continue;
         ds_full[t].assign((size_t)d_llm * n_prompt, 0.0f);
         int audio_idx = 0;
@@ -1540,6 +1596,11 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         free(logits);
         logits = nullptr;
 
+        if (ctx->params.verbosity >= 1 && step < 5)
+            fprintf(stderr, "moss_audio: step %d argmax=%d (%.4f) token='%s'\n",
+                    step, best_id, best_val,
+                    (best_id >= 0 && best_id < (int)ctx->vocab.id_to_token.size())
+                        ? ctx->vocab.id_to_token[best_id].c_str() : "?");
         if (best_id == (int)hp.eos_token_id) break;
         generated.push_back(best_id);
 
