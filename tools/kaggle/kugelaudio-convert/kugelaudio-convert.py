@@ -15,106 +15,90 @@ WORK = Path("/kaggle/working")
 REPO = WORK / "CrispASR"
 BUILD = WORK / "build"
 
-# ── Phase 0: HF token ──────────────────────────────────────────────────────
-hf_token = None
-# Try Kaggle Secrets first (works in UI-triggered runs)
-try:
-    from kaggle_secrets import UserSecretsClient
-    hf_token = UserSecretsClient().get_secret("HF_TOKEN")
-    print("[phase 0] HF_TOKEN from Kaggle Secrets OK")
-except Exception:
-    pass
-# Fallback: dataset file
-if not hf_token:
-    token_path = "/kaggle/input/crispasr-hf-token/hf_token.txt"
-    if os.path.exists(token_path):
-        hf_token = open(token_path).read().strip()
-        print("[phase 0] HF_TOKEN from dataset file OK")
-# Fallback: env
-if not hf_token:
-    hf_token = os.environ.get("HF_TOKEN")
-if hf_token:
-    os.environ["HF_TOKEN"] = hf_token
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-else:
-    print("[phase 0] WARNING: no HF_TOKEN — will stage for local pickup")
-
-# ── Phase 1: Clone repo + install deps ──────────────────────────────────────
-print("=== Phase 1: clone + deps ===", flush=True)
+# ── Phase 0: Clone repo (harness lives in it) ──────────────────────────────
+print("=== Phase 0: clone repo ===", flush=True)
 if not REPO.exists():
     subprocess.check_call([
         "git", "clone", "--depth", "1", "-b", "feature/kugelaudio-tts",
         "https://github.com/CrispStrobe/CrispASR", str(REPO),
     ])
-subprocess.check_call([
-    sys.executable, "-m", "pip", "install", "--quiet",
-    "torch", "transformers", "safetensors", "gguf", "huggingface_hub",
-    "hf_transfer",
-])
-print("[phase 1] deps installed")
 
-# ── Phase 2: Download source model ─────────────────────────────────────────
-print("=== Phase 2: download model ===", flush=True)
+# Import harness AFTER clone
+sys.path.insert(0, os.path.join(str(REPO), "tools", "kaggle"))
+import kaggle_harness as kh
+
+kh.init_progress()
+
+# ── Phase 1: Install deps ──────────────────────────────────────────────────
+kh.step("install deps")
+kh.install_build_toolchain()  # ninja + ccache + mold
+kh.sh_with_progress("pip install -q torch transformers safetensors gguf huggingface_hub hf_transfer")
+
+# ── Phase 2: Resolve HF token ──────────────────────────────────────────────
+kh.step("resolve HF token")
+hf_token = kh.resolve_hf_token()
+if hf_token:
+    os.environ["HF_TOKEN"] = hf_token
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+    print("  HF_TOKEN resolved OK")
+else:
+    print("  WARNING: no HF_TOKEN — will stage for local pickup")
+
+# ── Phase 3: Download source model ─────────────────────────────────────────
+kh.step("download model")
 from huggingface_hub import snapshot_download
 
-# Use /kaggle/temp for the source cache (not /kaggle/working — capped at ~20 GB)
+# Use /kaggle/temp for source cache (not /kaggle/working — capped at ~20 GB)
 for candidate in ("/kaggle/temp", "/tmp"):
     if os.path.isdir(candidate):
         scratch = Path(candidate) / "kugelaudio-src"
         break
 scratch.mkdir(parents=True, exist_ok=True)
-print(f"  source cache: {scratch} (free: {shutil.disk_usage(scratch).free / (1024**3):.1f} GiB)")
+free = kh.free_gb(str(scratch))
+print(f"  source cache: {scratch} (free: {free:.1f} GiB)" if free else f"  source cache: {scratch}")
 
 src = snapshot_download(
     repo_id="kugelaudio/kugelaudio-0-open",
     cache_dir=str(scratch),
+    token=hf_token,
 )
 print(f"  source dir: {src}")
 
-# ── Phase 3: Convert to F16 GGUF ───────────────────────────────────────────
-print("=== Phase 3: convert to F16 GGUF ===", flush=True)
+# ── Phase 4: Convert to F16 GGUF ───────────────────────────────────────────
+kh.step("convert F16 GGUF")
 f16_path = WORK / "kugelaudio-0-open-f16.gguf"
 
-subprocess.check_call([
-    sys.executable, "models/convert-kugelaudio-to-gguf.py",
-    "--input", src,
-    "--output", str(f16_path),
-    "--no-encoders",
-    "--type", "f16",
-], cwd=str(REPO))
+kh.sh_with_progress(
+    f"python models/convert-kugelaudio-to-gguf.py "
+    f"--input {src} --output {f16_path} --no-encoders --type f16",
+    cwd=str(REPO),
+)
 print(f"  F16 GGUF: {f16_path} ({f16_path.stat().st_size / (1024**3):.1f} GiB)")
 
-# ── Phase 4: Build crispasr-quantize ────────────────────────────────────────
-print("=== Phase 4: build quantizer ===", flush=True)
-# Install ninja for faster builds
-subprocess.run(["pip", "install", "--quiet", "ninja"], check=False)
-
+# ── Phase 5: Build crispasr-quantize ────────────────────────────────────────
+kh.step("build quantizer")
 BUILD.mkdir(parents=True, exist_ok=True)
-subprocess.check_call([
-    "cmake", "-G", "Ninja",
-    "-B", str(BUILD), "-S", str(REPO),
-    "-DCMAKE_BUILD_TYPE=Release", "-DGGML_CUDA=OFF",
-])
+flags = kh.cache_and_link_flags()
+kh.sh_with_progress(
+    f"cmake -G Ninja -B {BUILD} -S {REPO} "
+    f"-DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF "
+    + " ".join(flags),
+)
+with kh.build_heartbeat("cmake.build"):
+    kh.sh_with_progress(f"cmake --build {BUILD} -j{kh.safe_build_jobs(gpu=False)} --target crispasr-quantize")
 
-# Only build the quantize target
-subprocess.check_call([
-    "cmake", "--build", str(BUILD),
-    "-j4", "--target", "crispasr-quantize",
-])
 quantize_bin = BUILD / "bin" / "crispasr-quantize"
-print(f"  quantizer: {quantize_bin} ({quantize_bin.stat().st_size / (1024**2):.1f} MiB)")
+print(f"  quantizer: {quantize_bin}")
 
-# ── Phase 5: Quantize to Q4_K ──────────────────────────────────────────────
-print("=== Phase 5: quantize Q4_K ===", flush=True)
+# ── Phase 6: Quantize to Q4_K ──────────────────────────────────────────────
+kh.step("quantize Q4_K")
 q4k_path = WORK / "kugelaudio-0-open-q4_k.gguf"
 
-subprocess.check_call([
-    str(quantize_bin), str(f16_path), str(q4k_path), "q4_k",
-])
+kh.sh_with_progress(f"{quantize_bin} {f16_path} {q4k_path} q4_k")
 print(f"  Q4_K GGUF: {q4k_path} ({q4k_path.stat().st_size / (1024**3):.1f} GiB)")
 
-# ── Phase 6: Upload to HF ──────────────────────────────────────────────────
-print("=== Phase 6: upload to HF ===", flush=True)
+# ── Phase 7: Upload to HF ──────────────────────────────────────────────────
+kh.step("upload to HF")
 HF_REPO = "cstr/kugelaudio-0-open-GGUF"
 
 if hf_token:
@@ -122,7 +106,6 @@ if hf_token:
     from huggingface_hub import HfApi
     api = HfApi(token=hf_token)
 
-    # Create repo if needed
     try:
         api.create_repo(repo_id=HF_REPO, repo_type="model", exist_ok=True)
     except Exception as e:
@@ -147,6 +130,8 @@ else:
     print(f"  No HF_TOKEN — staged for local pickup:")
     print(f"    kaggle kernels output chr1str/crispasr-kugelaudio-convert -p .")
     for p in [f16_path, q4k_path]:
-        print(f"    {p.name}: {p.stat().st_size / (1024**3):.1f} GiB")
+        if p.exists():
+            print(f"    {p.name}: {p.stat().st_size / (1024**3):.1f} GiB")
 
-print("\n=== Done ===")
+kh.step("done")
+print("=== All done ===")
