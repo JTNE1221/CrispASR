@@ -28,6 +28,11 @@ SYSTEM_LIBS_DARWIN = ["-lm", "-lstdc++"]
 # Darwin-only extra libs (Metal/BLAS backends, not in the base dot on Linux)
 DARWIN_EXTRA_LIBS = ["-lggml-metal", "-lggml-blas"]
 
+# Targets that appear in the CMake dependency graph but are not built
+# by the Go CI (which only builds src/, not examples/). Exclude them
+# from the LDFLAGS so the linker doesn't fail with -lcommon not found.
+EXCLUDE_LIBS = {"common"}
+
 
 def generate_dot(dot_path):
     """Run cmake --graphviz to produce the dependency dot file."""
@@ -51,7 +56,8 @@ def get_libs(dot_path):
     sys.path.insert(0, SCRIPT_DIR)
     from cmake_graphviz_targets import get_static_libs
 
-    return get_static_libs(dot_path, ["crispasr-lib", "common"])
+    libs = get_static_libs(dot_path, ["crispasr-lib"])
+    return [lib for lib in libs if lib not in EXCLUDE_LIBS]
 
 
 def build_linux_line(libs):
