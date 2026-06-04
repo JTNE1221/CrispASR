@@ -42,6 +42,13 @@ public interface WhisperCppJnaLibrary extends Library {
     Pointer whisper_init_from_file_with_params(String path_model, WhisperContextParams.ByValue params);
 
     /**
+     * Pointer-arg variant — avoids JNA struct-by-value alignment issues on
+     * Windows x64 where MSVC padding for structs with size_t + pointer
+     * members differs from JNA's computed layout.
+     */
+    Pointer whisper_init_from_file_with_params_by_ref(String path_model, Pointer params);
+
+    /**
      * Allocate (almost) all memory needed for the model by loading from a buffer.
      *
      * @param buffer       Model buffer
