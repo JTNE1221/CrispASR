@@ -19,7 +19,7 @@ OUTPUT = Path("/kaggle/working/output")
 print("=== Phase 0: clone repo ===", flush=True)
 if not REPO.exists():
     subprocess.check_call(
-        ["git", "clone", "--depth", "1",
+        ["git", "clone", "--depth", "1", "-b", "feature/kugelaudio-tts",
          "https://github.com/CrispStrobe/CrispASR",
          str(REPO)])
 
