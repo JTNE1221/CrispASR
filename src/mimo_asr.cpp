@@ -1476,6 +1476,16 @@ static float* mimo_asr_run_lm_step(mimo_asr_context* ctx, int32_t next_token, in
         if (!gf)
             return nullptr;
         ggml_backend_sched_reset(ctx->sched);
+        // PLAN #115: when using the F32 embed input, pin it to the GPU
+        // backend so the scheduler allocates it there and all downstream
+        // ops stay on GPU. Without this, the scheduler may assign the
+        // input to CPU (no weight reference to anchor it) and CUDA
+        // kernels would read an invalid pointer.
+        if (ctx->gpu_embed_split) {
+            ggml_tensor* ei = ggml_graph_get_tensor(gf, "step_embed_input");
+            if (ei)
+                ggml_backend_sched_set_tensor_backend(ctx->sched, ei, ctx->backend);
+        }
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "mimo_asr_run_lm_step: alloc_graph failed\n");
             return nullptr;
