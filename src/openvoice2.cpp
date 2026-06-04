@@ -679,8 +679,9 @@ static bool ref_enc_forward(openvoice2_context * ctx,
         C_in = C_out;
     }
 
-    // Reshape: (C_out=128, H, W) -> (W, C_out * H) for GRU
-    int gru_input_size = C_in * H; // 128 * H
+    // Reshape: (C_out=128, H, W) → (H, C_out * W) for GRU
+    // GRU processes along the H (frequency) axis, with input_size = C_out * W
+    int gru_input_size = C_in * W; // 128 * W
     int gru_hidden = 128;
 
     // Read GRU weights
@@ -690,14 +691,14 @@ static bool ref_enc_forward(openvoice2_context * ctx,
     read_f32(re.gru_b_ih, b_ih);
     read_f32(re.gru_b_hh, b_hh);
 
-    // GRU forward: process W time steps
+    // GRU forward: process H time steps (frequency axis)
     std::vector<float> h_state(gru_hidden, 0.0f);
-    for (int t = 0; t < W; t++) {
-        // Build input vector: flatten (C_in, H) at time step t
+    for (int t = 0; t < H; t++) {
+        // Build input vector: flatten (C_in, W) at frequency step t
         std::vector<float> x_t(gru_input_size);
         for (int c = 0; c < C_in; c++)
-            for (int h_idx = 0; h_idx < H; h_idx++)
-                x_t[c * H + h_idx] = feat[(c * H + h_idx) * W + t];
+            for (int w_idx = 0; w_idx < W; w_idx++)
+                x_t[c * W + w_idx] = feat[(c * H + t) * W + w_idx];
 
         // GRU gates: r, z, n
         // gates_ih = W_ih @ x_t + b_ih   (3*hidden)
@@ -1042,6 +1043,16 @@ static bool hifigan_decode_cpu(openvoice2_context * ctx,
     pcm_out.resize(T_audio);
     ggml_backend_tensor_get(x, pcm_out.data(), 0, T_audio * sizeof(float));
 
+    // Debug: PCM stats
+    {
+        float mn = *std::min_element(pcm_out.begin(), pcm_out.end());
+        float mx = *std::max_element(pcm_out.begin(), pcm_out.end());
+        double sum = 0;
+        for (auto v : pcm_out) sum += v;
+        fprintf(stderr, "openvoice2: HiFi-GAN output %d samples, min=%.6f max=%.6f mean=%.6f\n",
+                T_audio, mn, mx, (float)(sum / T_audio));
+    }
+
     ggml_free(gc);
     return true;
 }
@@ -1089,16 +1100,35 @@ extern "C" bool openvoice2_convert(
         return false;
     }
 
-    if (ctx->verbosity >= 1)
-        fprintf(stderr, "openvoice2: target_se extracted (256-d)\n");
+    if (ctx->verbosity >= 1) {
+        float se_min = *std::min_element(target_se.begin(), target_se.end());
+        float se_max = *std::max_element(target_se.begin(), target_se.end());
+        float se_mean = 0; for (auto v : target_se) se_mean += v; se_mean /= target_se.size();
+        fprintf(stderr, "openvoice2: target_se (256-d) min=%.4f max=%.4f mean=%.6f\n",
+                se_min, se_max, se_mean);
+    }
+
+    // Helper for vector stats
+    auto vec_stats = [](const char * label, const std::vector<float> & v) {
+        float mn = *std::min_element(v.begin(), v.end());
+        float mx = *std::max_element(v.begin(), v.end());
+        double sum = 0, sum2 = 0;
+        for (auto x : v) { sum += x; sum2 += x * (double)x; }
+        float mean = (float)(sum / v.size());
+        float std_dev = (float)std::sqrt(sum2 / v.size() - mean * (double)mean);
+        fprintf(stderr, "openvoice2: %s n=%zu min=%.4f max=%.4f mean=%.6f std=%.6f\n",
+                label, v.size(), mn, mx, mean, std_dev);
+    };
 
     // 3. Posterior encoder: src_spec → z (with g=0 for zero_g)
     std::vector<float> g_zero(hp.gin_channels, 0.0f);
     std::vector<float> z;
     enc_q_forward(ctx, src_spec, T_src, g_zero, z);
 
-    if (ctx->verbosity >= 1)
+    if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: enc_q → z (%d × %d)\n", hp.inter_channels, T_src);
+        vec_stats("enc_q_z", z);
+    }
 
     // 4. For voice conversion we need the source speaker embedding too.
     //    Extract from source audio.
@@ -1108,14 +1138,18 @@ extern "C" bool openvoice2_convert(
     // 5. Flow forward: z → z_p (normalize with source voice)
     flow_wavenet(ctx, z, T_src, src_se, /*reverse=*/false);
 
-    if (ctx->verbosity >= 1)
+    if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: flow forward (source → prior)\n");
+        vec_stats("z_after_flow_fwd", z);
+    }
 
     // 6. Flow reverse: z_p → z_hat (denormalize with target voice)
     flow_wavenet(ctx, z, T_src, target_se, /*reverse=*/true);
 
-    if (ctx->verbosity >= 1)
+    if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: flow reverse (prior → target)\n");
+        vec_stats("z_after_flow_rev", z);
+    }
 
     // 7. HiFi-GAN decode: z_hat → audio (with g=0 for zero_g)
     std::vector<float> pcm;
