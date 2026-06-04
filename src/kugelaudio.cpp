@@ -472,6 +472,76 @@ extern "C" void kugelaudio_free(struct kugelaudio_context* ctx) {
     delete ctx;
 }
 
+// ── Qwen2.5 byte encoder (GPT-2 style) ────────────────────────────────────
+
+static const std::vector<int>& qwen_byte_encoder() {
+    static std::vector<int> enc(256, -1);
+    static bool initialized = false;
+    if (initialized) return enc;
+
+    std::vector<int> bs, cs;
+    for (int b = 0x21; b <= 0x7e; ++b) { bs.push_back(b); cs.push_back(b); }
+    for (int b = 0xa1; b <= 0xac; ++b) { bs.push_back(b); cs.push_back(b); }
+    for (int b = 0xae; b <= 0xff; ++b) { bs.push_back(b); cs.push_back(b); }
+    int n = 0;
+    for (int b = 0; b < 256; ++b) {
+        bool found = false;
+        for (int x : bs) if (x == b) { found = true; break; }
+        if (!found) { bs.push_back(b); cs.push_back(256 + n); ++n; }
+    }
+    for (size_t i = 0; i < bs.size(); ++i) enc[bs[i]] = cs[i];
+    initialized = true;
+    return enc;
+}
+
+// Greedy longest-match tokenizer for Qwen2.5 BPE vocabulary
+static std::vector<int32_t> tokenize_text_greedy(const kugelaudio_model& m, const char* text) {
+    static std::map<std::string, int> vocab_map;
+    static int max_token_len = 0;
+    static bool built = false;
+    if (!built && !m.vocab.empty()) {
+        for (int i = 0; i < (int)m.vocab.size(); i++) {
+            if (!m.vocab[i].empty()) vocab_map[m.vocab[i]] = i;
+            if ((int)m.vocab[i].size() > max_token_len)
+                max_token_len = (int)m.vocab[i].size();
+        }
+        built = true;
+    }
+
+    // Convert text to GPT-2 byte-encoded string
+    const auto& enc = qwen_byte_encoder();
+    std::string encoded;
+    for (const uint8_t* p = (const uint8_t*)text; *p; p++) {
+        int cp = enc[*p];
+        if (cp < 0) continue;
+        if (cp < 0x80) {
+            encoded += (char)cp;
+        } else if (cp < 0x800) {
+            encoded += (char)(0xC0 | (cp >> 6));
+            encoded += (char)(0x80 | (cp & 0x3F));
+        } else {
+            encoded += (char)(0xE0 | (cp >> 12));
+            encoded += (char)(0x80 | ((cp >> 6) & 0x3F));
+            encoded += (char)(0x80 | (cp & 0x3F));
+        }
+    }
+
+    // Greedy longest match
+    std::vector<int32_t> ids;
+    size_t pos = 0;
+    while (pos < encoded.size()) {
+        int best_len = 0, best_id = -1;
+        int try_len = std::min(max_token_len, (int)(encoded.size() - pos));
+        for (int len = try_len; len >= 1; len--) {
+            auto it = vocab_map.find(encoded.substr(pos, len));
+            if (it != vocab_map.end()) { best_len = len; best_id = it->second; break; }
+        }
+        if (best_id >= 0) { ids.push_back(best_id); pos += best_len; }
+        else pos++;
+    }
+    return ids;
+}
+
 // ── ConvRMSNorm: transpose → rms_norm → mul(weight) → transpose ───────────
 
 static ggml_tensor* build_conv_rms_norm(ggml_context* ctx0, ggml_tensor* x, ggml_tensor* w, float eps = 1e-5f) {
@@ -977,21 +1047,15 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx,
     std::string text_section = " Text input:\n Speaker 0: " + std::string(text) + "\n Speech output:\n";
     std::string full_prompt = system_prompt + text_section;
 
-    // Tokenize using embedded vocabulary
+    // Tokenize using Qwen2.5 BPE vocabulary
     std::vector<int32_t> token_ids;
     if (!ctx->model.vocab.empty()) {
-        // Simple BPE encoding (Qwen2.5 tokenizer)
-        // TODO: use proper BPE tokenizer from core_bpe
-        // For now, encode character by character as a basic fallback
-        for (unsigned char ch : full_prompt) {
-            // Map ASCII to vocab IDs — this is a placeholder
-            // Real implementation needs proper BPE encoding
-            token_ids.push_back((int32_t)ch);
-        }
+        token_ids = tokenize_text_greedy(ctx->model, full_prompt.c_str());
     }
 
     if (token_ids.empty()) {
-        fprintf(stderr, "kugelaudio: tokenization failed\n");
+        fprintf(stderr, "kugelaudio: tokenization failed (vocab has %zu entries)\n",
+                ctx->model.vocab.size());
         return nullptr;
     }
 
