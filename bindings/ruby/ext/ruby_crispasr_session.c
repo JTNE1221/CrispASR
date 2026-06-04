@@ -147,6 +147,157 @@ extern int                    crispasr_mic_stop(struct crispasr_mic* m);
 extern void                   crispasr_mic_close(struct crispasr_mic* m);
 extern const char*            crispasr_mic_default_device_name(void);
 
+// --- Full C-ABI parity additions ---
+extern void crispasr_stream_set_live_decode(struct CrispasrStream* s, int enabled);
+
+// params_set_* on whisper_full_params
+extern void crispasr_params_set_language(void* p, const char* lang);
+extern void crispasr_params_set_translate(void* p, int v);
+extern void crispasr_params_set_detect_language(void* p, int v);
+extern void crispasr_params_set_token_timestamps(void* p, int v);
+extern void crispasr_params_set_n_threads(void* p, int n);
+extern void crispasr_params_set_max_len(void* p, int n);
+extern void crispasr_params_set_best_of(void* p, int n);
+extern void crispasr_params_set_split_on_word(void* p, int v);
+extern void crispasr_params_set_no_context(void* p, int v);
+extern void crispasr_params_set_single_segment(void* p, int v);
+extern void crispasr_params_set_print_realtime(void* p, int v);
+extern void crispasr_params_set_print_progress(void* p, int v);
+extern void crispasr_params_set_print_timestamps(void* p, int v);
+extern void crispasr_params_set_print_special(void* p, int v);
+extern void crispasr_params_set_suppress_blank(void* p, int v);
+extern void crispasr_params_set_temperature(void* p, float t);
+extern void crispasr_params_set_max_tokens(void* p, int n);
+extern void crispasr_params_set_initial_prompt(void* p, const char* prompt);
+extern void crispasr_params_set_alt_n(void* p, int n);
+extern void crispasr_params_set_vad(void* p, int v);
+extern void crispasr_params_set_vad_model_path(void* p, const char* path);
+extern void crispasr_params_set_vad_threshold(void* p, float t);
+extern void crispasr_params_set_vad_min_speech_ms(void* p, int ms);
+extern void crispasr_params_set_vad_min_silence_ms(void* p, int ms);
+extern void crispasr_params_set_tdrz(void* p, int v);
+
+// Token-level accessors
+extern int64_t crispasr_token_t0(void* ctx, int i_seg, int i_tok);
+extern int64_t crispasr_token_t1(void* ctx, int i_seg, int i_tok);
+extern float   crispasr_token_p(void* ctx, int i_seg, int i_tok);
+extern int     crispasr_token_n_alts(void* ctx, int i_seg, int i_tok);
+extern int32_t crispasr_token_alt_id(void* ctx, int i_seg, int i_tok, int i_alt);
+extern float   crispasr_token_alt_p(void* ctx, int i_seg, int i_tok, int i_alt);
+extern int     crispasr_token_alt_text(void* ctx, int i_seg, int i_tok, int i_alt, char* out, int out_cap);
+
+// Language detection (whisper context)
+extern float crispasr_detect_language(void* ctx, const float* pcm, int n_samples,
+                                      int n_threads, char* out_code, int out_cap);
+
+// VAD slices
+extern int crispasr_vad_slices(const char* vad_model_path, const float* pcm, int n_samples,
+                               int sample_rate, float threshold, int min_speech_ms, int min_silence_ms,
+                               int speech_pad_ms, float max_chunk_duration_s, int n_threads,
+                               float** out_spans);
+
+// LCS dedup
+extern int crispasr_lcs_dedup_prefix_count(const int32_t* prev_tail_tokens, int n_prev,
+                                           const int32_t* curr_tokens, int n_curr, int min_lcs_length);
+
+// Direct Parakeet API
+extern void* crispasr_parakeet_init(const char* model_path, int n_threads, int use_flash);
+extern void  crispasr_parakeet_free(void* ctx);
+extern void* crispasr_parakeet_transcribe(void* ctx, const float* pcm, int n_samples, const char* language);
+extern const char* crispasr_parakeet_result_text(void* r);
+extern int         crispasr_parakeet_result_n_words(void* r);
+extern const char* crispasr_parakeet_result_word_text(void* r, int i);
+extern int64_t     crispasr_parakeet_result_word_t0(void* r, int i);
+extern int64_t     crispasr_parakeet_result_word_t1(void* r, int i);
+extern int         crispasr_parakeet_result_n_tokens(void* r);
+extern const char* crispasr_parakeet_result_token_text(void* r, int i);
+extern int64_t     crispasr_parakeet_result_token_t0(void* r, int i);
+extern int64_t     crispasr_parakeet_result_token_t1(void* r, int i);
+extern float       crispasr_parakeet_result_token_p(void* r, int i);
+extern void        crispasr_parakeet_result_free(void* r);
+
+// TitaNet
+extern void* crispasr_titanet_init(const char* model_path, int32_t n_threads);
+extern void  crispasr_titanet_free(void* ctx);
+extern int32_t crispasr_titanet_embed(void* ctx, const float* pcm_16k, int32_t n_samples, float* out);
+extern float   crispasr_titanet_cosine_sim(const float* a, const float* b, int32_t dim);
+
+// Speaker database
+extern void* crispasr_speaker_db_load(const char* dir_path);
+extern void  crispasr_speaker_db_free(void* db);
+extern int32_t crispasr_speaker_db_count(const void* db);
+extern float   crispasr_speaker_db_match(const void* db, const float* embedding, int32_t dim,
+                                         float threshold, char* out_name, int32_t out_cap);
+extern int32_t crispasr_speaker_db_enroll(const char* dir_path, const char* name,
+                                          const float* embedding, int32_t dim);
+
+// Pluggable speaker embedder + clustering + pyannote cache
+extern void*   crispasr_speaker_embedder_make_abi(const char* model_spec, int32_t n_threads, const char* cache_dir);
+extern void    crispasr_speaker_embedder_free_abi(void* embedder);
+extern int32_t crispasr_speaker_embedder_dim_abi(const void* embedder);
+extern int32_t crispasr_speaker_embedder_embed_abi(void* embedder, const float* pcm_16k, int32_t n_samples, float* out);
+extern const char* crispasr_speaker_embedder_name_abi(const void* embedder);
+extern int32_t crispasr_speaker_cluster_abi(const float* embeddings, int32_t n, int32_t dim,
+                                            float merge_threshold, int32_t max_speakers, int32_t* labels_out);
+extern void*   crispasr_pyannote_cache_compute_abi(const float* full_audio, int32_t n_samples,
+                                                   const char* model_path, int32_t n_threads);
+extern void    crispasr_pyannote_cache_free_abi(void* cache);
+extern int32_t crispasr_pyannote_cache_apply_abi(const void* cache, int64_t slice_t0_cs,
+                                                 void* segs, int32_t n_segs);
+
+// Kokoro lang helpers
+extern int  crispasr_kokoro_lang_is_german_abi(const char* lang);
+extern int  crispasr_kokoro_lang_has_native_voice_abi(const char* lang);
+
+// Backend detection
+extern int crispasr_detect_backend_from_gguf(const char* path, char* out_name, int out_cap);
+extern int crispasr_detect_language_pcm(const float* samples, int32_t n_samples, int32_t method,
+                                        const char* model_path, int32_t n_threads, int32_t use_gpu,
+                                        int32_t gpu_device, int32_t flash_attn,
+                                        char* out_lang, int32_t out_lang_cap, float* out_confidence);
+
+// RNNoise audio enhancement
+extern int crispasr_enhance_audio_rnnoise(const float* in_pcm, int32_t n_samples,
+                                          float* out_pcm, int32_t out_cap);
+
+// Text-LID
+extern int crispasr_text_detect_language(const char* text, const char* model_path, int32_t n_threads,
+                                         char* out_label, int32_t out_label_cap, float* out_confidence);
+
+// Registry extras
+extern int crispasr_registry_lookup_abi(const char* backend, char* out_filename, int32_t filename_cap,
+                                        char* out_url, int32_t url_cap, char* out_size, int32_t size_cap);
+extern int crispasr_registry_lookup_by_filename_abi(const char* filename, char* out_filename, int32_t filename_cap,
+                                                    char* out_url, int32_t url_cap, char* out_size, int32_t size_cap);
+extern int crispasr_registry_list_backends_abi(char* out_csv, int32_t out_cap);
+extern int crispasr_cache_ensure_file_abi(const char* filename, const char* url, int32_t quiet,
+                                          const char* cache_dir_override, char* out_buf, int32_t out_cap);
+extern int crispasr_cache_dir_abi(const char* cache_dir_override, char* out_buf, int32_t out_cap);
+
+// Session extras
+extern int crispasr_session_available_backends(char* out_csv, int out_cap);
+extern struct CrispasrSession* crispasr_session_open_explicit(const char* model_path, const char* backend_name, int n_threads);
+extern struct CrispasrSession* crispasr_session_open_with_params(const char* model_path, const char* backend_name, const void* params);
+extern struct crispasr_session_result* crispasr_session_transcribe_vad(struct CrispasrSession* s, const float* pcm, int n_samples,
+                                                                       int sample_rate, const char* vad_model_path, void* opts);
+extern struct crispasr_session_result* crispasr_session_transcribe_vad_lang(struct CrispasrSession* s, const float* pcm, int n_samples,
+                                                                            int sample_rate, const char* vad_model_path, void* opts,
+                                                                            const char* language);
+extern char* crispasr_session_translate_text(struct CrispasrSession* s, const char* text, const char* src_lang,
+                                             const char* tgt_lang, int max_tokens);
+extern void  crispasr_session_translate_text_free(char* text);
+extern int   crispasr_session_result_word_n_alts(struct crispasr_session_result* r, int i_seg, int i_word);
+extern const char* crispasr_session_result_word_alt_text(struct crispasr_session_result* r, int i_seg, int i_word, int i_alt);
+extern float crispasr_session_result_word_alt_p(struct crispasr_session_result* r, int i_seg, int i_word, int i_alt);
+
+// Streaming (whisper context)
+extern struct CrispasrStream* crispasr_stream_open(void* ctx, int n_threads, int step_ms,
+                                                    int length_ms, int keep_ms, const char* language, int translate);
+
+// Diarization
+extern int crispasr_diarize_segments_abi(const float* left_pcm, const float* right_pcm, int32_t n_samples,
+                                         int32_t is_stereo, void* segs, int32_t n_segs, const void* opts);
+
 static VALUE mCrispASR;
 static VALUE mSession;
 static VALUE mStream;
