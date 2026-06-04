@@ -282,6 +282,9 @@ public interface WhisperCppJnaLibrary extends Library {
      */
     int whisper_full(Pointer ctx, WhisperFullParams.ByValue params, final float[] samples, int n_samples);
 
+    /** Pointer-arg variant — avoids JNA struct-by-value alignment issues on Win64. */
+    int whisper_full_by_ref(Pointer ctx, Pointer params, final float[] samples, int n_samples);
+
     public int whisper_full_with_state(Pointer ctx, Pointer state, WhisperFullParams.ByValue params, float[] samples, int n_samples);
     //int whisper_full_with_state(Pointer ctx, Pointer state, WhisperFullParams params, final float[] samples, int n_samples);
 
