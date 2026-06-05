@@ -41,7 +41,7 @@ DEFAULT_STAGES = [
 ]
 
 
-def dump(model_dir: Path, audio: np.ndarray, stages: set) -> dict:
+def dump(model_dir: Path, audio: np.ndarray, stages: set, **kwargs) -> dict:
     """Run KugelAudio TTS and capture intermediate tensors."""
     import torch
 
