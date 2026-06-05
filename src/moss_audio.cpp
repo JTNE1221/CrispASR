@@ -519,6 +519,24 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
         samples, n_samples, hann.data(), n_fft,
         mel_filters.data(), n_freqs, fft_fn, mel_params, T_mel_actual);
 
+    // Pad to 3000 frames (30s Whisper convention) — WhisperFeatureExtractor
+    // always pads to nb_max_frames=3000. The encoder chunks this into 400-frame
+    // pieces, so the padding adds extra zero-content chunks that produce
+    // near-zero encoder output (masked by the padding mask). Without this
+    // padding, the number of encoder tokens differs from the Python reference.
+    const int T_padded = 3000;
+    if (T_mel_actual < T_padded) {
+        std::vector<float> padded((size_t)n_mels_val * T_padded, 0.0f);
+        // mel_out is (n_mels, T_mel_actual) row-major
+        for (int f = 0; f < n_mels_val; f++) {
+            memcpy(padded.data() + (size_t)f * T_padded,
+                   mel_out.data() + (size_t)f * T_mel_actual,
+                   (size_t)T_mel_actual * sizeof(float));
+        }
+        mel_out = std::move(padded);
+        T_mel_actual = T_padded;
+    }
+
     float* result = (float*)malloc(mel_out.size() * sizeof(float));
     memcpy(result, mel_out.data(), mel_out.size() * sizeof(float));
     if (out_n_mels) *out_n_mels = n_mels_val;
