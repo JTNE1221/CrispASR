@@ -707,6 +707,14 @@ constexpr Entry k_registry[] = {
     {"truecaser-de", "truecaser-de.bin",
      "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-de.bin",
      "~2 MB", nullptr, nullptr},
+    // Zonos v0.1 — Zyphra 500M-param transformer TTS with emotion/pitch/rate
+    // control, speaker cloning, 44.1 kHz via DAC codec. Apache 2.0.
+    // Needs the DAC 44.1 kHz decoder (shared with Dia backend).
+    {"zonos", "zonos-v0.1-transformer-q4_k.gguf",
+     "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-q4_k.gguf",
+     "~872 MB",
+     "dac-44khz.gguf",
+     "https://huggingface.co/cstr/dia-1.6b-GGUF/resolve/main/dac-44khz.gguf"},
 };
 
 // Multi-companion extras. When a backend needs >1 auxiliary file the
