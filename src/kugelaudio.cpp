@@ -895,15 +895,29 @@ static ggml_cgraph* build_lm_graph(kugelaudio_context* ctx, int n_tokens, int n_
         int T_cur = (int)cur->ne[1];
         int Lk = n_past + T_cur;
 
-        ggml_tensor* Q = ggml_mul_mat(ctx0, G(std::string(p) + ".self_attn.q_proj.weight"), cur);
-        if (auto* qb = G(std::string(p) + ".self_attn.q_proj.bias"))
-            Q = ggml_add(ctx0, Q, qb);
-        ggml_tensor* K = ggml_mul_mat(ctx0, G(std::string(p) + ".self_attn.k_proj.weight"), cur);
-        if (auto* kb = G(std::string(p) + ".self_attn.k_proj.bias"))
-            K = ggml_add(ctx0, K, kb);
-        ggml_tensor* V = ggml_mul_mat(ctx0, G(std::string(p) + ".self_attn.v_proj.weight"), cur);
-        if (auto* vb = G(std::string(p) + ".self_attn.v_proj.bias"))
-            V = ggml_add(ctx0, V, vb);
+        ggml_tensor* q_w = G(std::string(p) + ".self_attn.q_proj.weight");
+        ggml_tensor* k_w = G(std::string(p) + ".self_attn.k_proj.weight");
+        ggml_tensor* v_w = G(std::string(p) + ".self_attn.v_proj.weight");
+        ggml_tensor* q_b = G(std::string(p) + ".self_attn.q_proj.bias");
+        ggml_tensor* k_b = G(std::string(p) + ".self_attn.k_proj.bias");
+        ggml_tensor* v_b = G(std::string(p) + ".self_attn.v_proj.bias");
+        if (il == 0) {
+            fprintf(stderr, "kugelaudio: L0 q_w=[%lld,%lld] k_w=[%lld,%lld] v_w=[%lld,%lld]\n",
+                    (long long)q_w->ne[0], (long long)q_w->ne[1],
+                    (long long)k_w->ne[0], (long long)k_w->ne[1],
+                    (long long)v_w->ne[0], (long long)v_w->ne[1]);
+            if (q_b) fprintf(stderr, "kugelaudio: L0 q_b=[%lld,%lld] k_b=[%lld,%lld] v_b=[%lld,%lld]\n",
+                    (long long)q_b->ne[0], (long long)q_b->ne[1],
+                    k_b ? (long long)k_b->ne[0] : -1, k_b ? (long long)k_b->ne[1] : -1,
+                    v_b ? (long long)v_b->ne[0] : -1, v_b ? (long long)v_b->ne[1] : -1);
+        }
+        ggml_tensor* Q = ggml_mul_mat(ctx0, q_w, cur);
+        if (il == 0) fprintf(stderr, "kugelaudio: L0 Q=[%lld,%lld]\n", (long long)Q->ne[0], (long long)Q->ne[1]);
+        if (q_b) Q = ggml_add(ctx0, Q, q_b);
+        ggml_tensor* K = ggml_mul_mat(ctx0, k_w, cur);
+        if (k_b) K = ggml_add(ctx0, K, k_b);
+        ggml_tensor* V = ggml_mul_mat(ctx0, v_w, cur);
+        if (v_b) V = ggml_add(ctx0, V, v_b);
 
         // Reshape for GQA
         Q = ggml_reshape_3d(ctx0, Q, hp.head_dim, hp.n_heads, T_cur);
