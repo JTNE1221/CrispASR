@@ -760,22 +760,38 @@ static ggml_cgraph* build_pred_head_graph(kugelaudio_context* ctx, int n_frames)
 
     // Final layer: AdaLN(2-way) + Linear → [vae_dim]
     {
+        fprintf(stderr, "pred: final layer x=[%lld,%lld]\n", (long long)x->ne[0],(long long)x->ne[1]);
         ggml_tensor* c_silu_f = ggml_silu(ctx0, c);
-        ggml_tensor* adaln_out = ggml_mul_mat(ctx0,
-            G("model.prediction_head.final_layer.adaLN_modulation.1.weight"), c_silu_f);
+        ggml_tensor* final_adaln_w = G("model.prediction_head.final_layer.adaLN_modulation.1.weight");
+        fprintf(stderr, "pred: final adaln_w=[%lld,%lld] c_silu=[%lld,%lld]\n",
+                (long long)final_adaln_w->ne[0],(long long)final_adaln_w->ne[1],
+                (long long)c_silu_f->ne[0],(long long)c_silu_f->ne[1]);
+        ggml_tensor* adaln_out = ggml_mul_mat(ctx0, final_adaln_w, c_silu_f);
+        fprintf(stderr, "pred: final adaln_out=[%lld,%lld]\n", (long long)adaln_out->ne[0],(long long)adaln_out->ne[1]);
         size_t nb1_f = adaln_out->nb[1];
         ggml_tensor* shift = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f, 0);
         ggml_tensor* scale = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f,
                                            (size_t)d_lm * sizeof(float));
+        fprintf(stderr, "pred: final shift=[%lld,%lld] scale=[%lld,%lld]\n",
+                (long long)shift->ne[0],(long long)shift->ne[1],
+                (long long)scale->ne[0],(long long)scale->ne[1]);
 
         // RMSNorm without affine (elementwise_affine=False in Python)
         ggml_tensor* h = ggml_rms_norm(ctx0, x, hp.diff_norm_eps);
+        fprintf(stderr, "pred: final rms h=[%lld,%lld]\n", (long long)h->ne[0],(long long)h->ne[1]);
         ggml_tensor* h_scaled = ggml_mul(ctx0, h, scale);
+        fprintf(stderr, "pred: final mul(h,scale) OK\n");
         h = ggml_add(ctx0, h, h_scaled);
+        fprintf(stderr, "pred: final add(h,h_scaled) OK\n");
         h = ggml_add(ctx0, h, shift);
+        fprintf(stderr, "pred: final add(h,shift) OK\n");
 
-        ggml_tensor* output = ggml_mul_mat(ctx0,
-            G("model.prediction_head.final_layer.linear.weight"), h);
+        ggml_tensor* final_lin_w = G("model.prediction_head.final_layer.linear.weight");
+        fprintf(stderr, "pred: final linear_w=[%lld,%lld] h=[%lld,%lld]\n",
+                (long long)final_lin_w->ne[0],(long long)final_lin_w->ne[1],
+                (long long)h->ne[0],(long long)h->ne[1]);
+        ggml_tensor* output = ggml_mul_mat(ctx0, final_lin_w, h);
+        fprintf(stderr, "pred: final output=[%lld,%lld] OK\n", (long long)output->ne[0],(long long)output->ne[1]);
         ggml_set_name(output, "pred_output");
         ggml_set_output(output);
         ggml_build_forward_expand(gf, output);
