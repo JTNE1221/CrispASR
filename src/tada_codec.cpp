@@ -493,6 +493,11 @@ static ggml_cgraph* build_decode_graph(tada_codec_context* c, int n_frames) {
     // 4 decoder blocks with strides [4,4,5,6]
     for (int b = 0; b < 4; b++) {
         cur = dec_block(ctx0, cur, c->blocks[b], c->strides[b]);
+        char dname[32];
+        snprintf(dname, sizeof(dname), "dump_blk%d", b);
+        ggml_tensor* dblk = ggml_cont(ctx0, cur);
+        ggml_set_name(dblk, dname);
+        ggml_build_forward_expand(gf, dblk);
     }
     ggml_tensor* dump_dac_out = ggml_cont(ctx0, cur);
     ggml_set_name(dump_dac_out, "dump_dac_out");
@@ -624,6 +629,10 @@ float* tada_codec_decode(struct tada_codec_context* ctx,
     dump("dump_proj");
     dump("dump_attn");
     dump("dump_dac_in");
+    dump("dump_blk0");
+    dump("dump_blk1");
+    dump("dump_blk2");
+    dump("dump_blk3");
     dump("dump_dac_out");
 
     ggml_tensor* pcm_t = ggml_graph_get_tensor(gf, "pcm");
