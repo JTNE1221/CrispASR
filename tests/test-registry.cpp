@@ -151,3 +151,70 @@ TEST_CASE("registry: quantized companion filename lookup preserves the requested
     REQUIRE(e.filename == "qwen3-tts-tokenizer-12hz-q8_0.gguf");
     REQUIRE(e.url.find("qwen3-tts-tokenizer-12hz-q8_0.gguf") != std::string::npos);
 }
+
+// ── companion_approx_size (#146 / #148) ──────────────────────────────
+
+TEST_CASE("registry: companion_approx_size populated for mimo-asr", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("mimo-asr", e));
+    REQUIRE(!e.companion_filename.empty());
+    REQUIRE(!e.companion_approx_size.empty());
+    REQUIRE(e.companion_approx_size != e.approx_size); // tokenizer != LM size
+    REQUIRE(e.companion_approx_size.find("MB") != std::string::npos);
+}
+
+TEST_CASE("registry: companion_approx_size populated for qwen3-tts", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("qwen3-tts", e));
+    REQUIRE(!e.companion_approx_size.empty());
+    REQUIRE(e.companion_approx_size != e.approx_size);
+}
+
+TEST_CASE("registry: companion_approx_size populated for orpheus", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("orpheus", e));
+    REQUIRE(!e.companion_approx_size.empty());
+    REQUIRE(e.companion_approx_size != e.approx_size);
+}
+
+TEST_CASE("registry: companion_approx_size populated for chatterbox", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("chatterbox", e));
+    REQUIRE(!e.companion_approx_size.empty());
+    REQUIRE(e.companion_approx_size != e.approx_size);
+}
+
+TEST_CASE("registry: companion_approx_size empty for backends without companion", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("whisper", e));
+    REQUIRE(e.companion_filename.empty());
+    REQUIRE(e.companion_approx_size.empty());
+}
+
+TEST_CASE("registry: companion filename lookup uses companion size, not LM size (#146)", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    // Look up mimo-tokenizer by filename — should get the tokenizer's
+    // size (~395 MB), not the LM's size (~4.2 GB).
+    REQUIRE(crispasr_registry_lookup_by_filename("mimo-tokenizer-q4_k.gguf", e));
+    REQUIRE(e.approx_size.find("MB") != std::string::npos);
+    REQUIRE(e.approx_size.find("GB") == std::string::npos); // must NOT be the LM's 4.2 GB
+}
+
+TEST_CASE("registry: qwen3-tts tokenizer filename lookup uses companion size (#146)", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup_by_filename("qwen3-tts-tokenizer-12hz.gguf", e));
+    // The tokenizer is ~60 MB, the LM is ~986 MB. The size should
+    // reflect the tokenizer, not the LM.
+    REQUIRE(e.approx_size.find("60") != std::string::npos);
+}
+
+TEST_CASE("registry: all entries with companions have companion_approx_size set", "[unit][registry]") {
+    const int n = crispasr_registry_count();
+    for (int i = 0; i < n; ++i) {
+        CrispasrRegistryEntry e;
+        if (!crispasr_registry_get_at(i, e)) continue;
+        if (!e.companion_filename.empty()) {
+            REQUIRE(!e.companion_approx_size.empty());
+        }
+    }
+}

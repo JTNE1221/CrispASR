@@ -1169,14 +1169,42 @@ int crispasr_run_backend(const whisper_params& params_in) {
     // --auto-download set. Doing it here in the dispatcher covers every
     // current and future backend uniformly. Companion lands in the same
     // cache_dir as the LM so the backend's local `discover_*` finds it.
-    if (!backend_name.empty()) {
+    //
+    // Fix for #146 / #148: skip the companion pre-download when the user
+    // already told us where the codec is (--codec-model), or when the
+    // companion already sits next to the model file or in the cache dir
+    // (the backend's discover_* will find it without a download prompt).
+    if (!backend_name.empty() && params.tts_codec_model.empty()) {
         CrispasrRegistryEntry entry;
         if (crispasr_registry_lookup(backend_name, entry, params.model_quant) && !entry.companion_filename.empty()) {
-            const std::string resolved_companion =
-                crispasr_resolve_model_cli(entry.companion_filename, backend_name, params.no_prints, params.cache_dir,
-                                           params.auto_download, params.model_quant);
-            if (params.verbose) {
-                fprintf(stderr, "crispasr[verbose]: resolved companion = '%s'\n", resolved_companion.c_str());
+            // Check whether the companion already exists locally before
+            // triggering the resolve → download-prompt path:
+            //   1. next to the model file (sibling directory)
+            //   2. in the cache dir / well-known search dirs
+            bool companion_found = false;
+            {
+                const auto sep = params.model.find_last_of("/\\");
+                if (sep != std::string::npos) {
+                    const std::string sibling = params.model.substr(0, sep + 1) + entry.companion_filename;
+                    FILE* f = fopen(sibling.c_str(), "rb");
+                    if (f) { fclose(f); companion_found = true; }
+                }
+            }
+            if (!companion_found) {
+                const std::string cached = crispasr_cache::probe_cached_file(entry.companion_filename, params.cache_dir);
+                if (!cached.empty()) companion_found = true;
+            }
+
+            if (!companion_found) {
+                const std::string resolved_companion =
+                    crispasr_resolve_model_cli(entry.companion_filename, backend_name, params.no_prints, params.cache_dir,
+                                               params.auto_download, params.tts_codec_quant.empty() ? params.model_quant : params.tts_codec_quant);
+                if (params.verbose) {
+                    fprintf(stderr, "crispasr[verbose]: resolved companion = '%s'\n", resolved_companion.c_str());
+                }
+            } else if (params.verbose) {
+                fprintf(stderr, "crispasr[verbose]: companion '%s' found locally, skipping download\n",
+                        entry.companion_filename.c_str());
             }
             // Soft-fail: backend init prints its own actionable error if
             // the companion is genuinely required and didn't resolve.

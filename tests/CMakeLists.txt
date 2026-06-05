@@ -780,6 +780,28 @@ catch_discover_tests(test-registry
     PROPERTIES LABELS "unit"
 )
 
+# ─── test-companion-resolve — Catch2 unit tests for companion resolution (#146 / #148)
+#
+# Verifies the companion pre-download guard: sibling discovery, cache probe,
+# and correct companion size in download prompts. No network, no models.
+add_executable(test-companion-resolve test-companion-resolve.cpp
+    ${PROJECT_SOURCE_DIR}/src/crispasr_model_registry.cpp
+    ${PROJECT_SOURCE_DIR}/src/crispasr_cache.cpp
+)
+target_include_directories(test-companion-resolve PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-companion-resolve PRIVATE
+    Catch2::Catch2WithMain
+)
+if(WIN32)
+    target_link_libraries(test-companion-resolve PRIVATE winhttp)
+endif()
+catch_discover_tests(test-companion-resolve
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
 # ─── test_server_wav_writer — Catch2 unit tests for crispasr_make_wav_int16
 #
 #Header - only WAV serializer used by / v1 / audio / speech and crispasr_diff.
