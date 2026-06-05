@@ -976,13 +976,22 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     it = ctx->vocab.token_to_id.find("<|eot_id|>");
     if (it != ctx->vocab.token_to_id.end()) eot = it->second;
 
-    // Prefix: <|start_header_id|>assistant<|end_header_id|>
+    // Build: [BOS] + system_prefix + prompt_text + synth_text + [EOS]*shift
+    // The prompt text is the transcript of the reference audio.
     std::string prefix = "<|start_header_id|>assistant<|end_header_id|>";
     std::vector<int32_t> prefix_ids = tokenize(ctx, prefix);
+
+    // Prompt text tokens (transcript of reference audio for voice conditioning)
+    std::vector<int32_t> prompt_text_ids;
+    const char* prompt_text_env = getenv("TADA_PROMPT_TEXT");
+    if (prompt_text_env && ctx->n_prompt > 0) {
+        prompt_text_ids = tokenize(ctx, std::string(prompt_text_env));
+    }
 
     std::vector<int32_t> full_ids;
     full_ids.push_back(bos);
     full_ids.insert(full_ids.end(), prefix_ids.begin(), prefix_ids.end());
+    full_ids.insert(full_ids.end(), prompt_text_ids.begin(), prompt_text_ids.end());
     full_ids.insert(full_ids.end(), text_ids.begin(), text_ids.end());
     for (int i = 0; i < shift; i++) full_ids.push_back(eot);
 
@@ -1110,15 +1119,36 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     float ac_std = hp.acoustic_std;
     float ac_mean = hp.acoustic_mean;
 
+    // Skip prompt features + transition steps (Python: num_prompt_tokens + num_transition_steps - 1)
+    // Only decode the GENERATED features, not the prompt conditioning.
+    int skip_frames = 0;
+    if (ctx->n_prompt > 0) {
+        int num_transition_steps = 5; // default in model.generate()
+        skip_frames = ctx->n_prompt + num_transition_steps - 1;
+        if (skip_frames >= (int)acoustic_features.size()) {
+            skip_frames = std::max(0, (int)acoustic_features.size() - 1);
+        }
+        if (ctx->params.verbosity >= 1) {
+            fprintf(stderr, "tada: skipping %d prompt+transition frames, decoding %d\n",
+                    skip_frames, (int)acoustic_features.size() - skip_frames);
+        }
+    }
+
     // Expand with time_before durations (same as model._decode_wav)
     std::vector<float> expanded;
     std::vector<int32_t> token_masks;
-    // time_before[0] gives leading zeros, then feature[0], etc.
     std::vector<int> all_times;
-    all_times.push_back(0); // first position has no leading silence
-    for (int t : time_before_list) all_times.push_back(t);
+    // time_before for the decode portion starts at skip_frames
+    all_times.push_back(0);
+    for (int i = skip_frames; i < (int)time_before_list.size(); i++) {
+        all_times.push_back(time_before_list[i]);
+    }
 
-    for (size_t i = 0; i < acoustic_features.size(); i++) {
+    // Use only features from skip_frames onwards
+    std::vector<std::vector<float>> decode_feats(
+        acoustic_features.begin() + skip_frames, acoustic_features.end());
+
+    for (size_t i = 0; i < decode_feats.size(); i++) {
         // Insert (time - 1) zero frames before this feature
         int n_zeros = std::max(0, all_times[i] - 1);
         for (int z = 0; z < n_zeros; z++) {
@@ -1127,13 +1157,13 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         }
         // Insert the feature (denormalized)
         for (int d = 0; d < ad; d++) {
-            expanded.push_back(acoustic_features[i][d] * ac_std + ac_mean);
+            expanded.push_back(decode_feats[i][d] * ac_std + ac_mean);
         }
         token_masks.push_back(1);
     }
     // Trailing zeros from last time value
-    if (!time_before_list.empty()) {
-        int trail = time_before_list.back();
+    if (!all_times.empty()) {
+        int trail = all_times.back();
         for (int z = 0; z < trail; z++) {
             for (int d = 0; d < ad; d++) expanded.push_back(0.0f);
             token_masks.push_back(0);
