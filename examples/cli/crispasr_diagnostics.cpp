@@ -212,6 +212,51 @@ void crispasr_print_runtime_env(FILE* out) {
     cat_small_file(out, "/etc/ld.so.conf.d/000_cuda_compat.conf");
     cat_small_file(out, "/etc/ld.so.conf.d/cuda-compat.conf");
 
+    // Detect mixed CUDA major-version configs in ld.so.conf.d (#152).
+    // E.g. both cuda-12.conf and cuda-13.conf — the higher-numbered file
+    // can shadow libraries from the one the binary was compiled against,
+    // causing silent heap corruption and crashes.
+    {
+        DIR* d = ::opendir("/etc/ld.so.conf.d");
+        if (d) {
+            int cuda_majors_seen = 0;  // bitmask-ish: track distinct major versions
+            int first_major = 0, second_major = 0;
+            struct dirent* e;
+            while ((e = ::readdir(d)) != nullptr) {
+                if (!std::strstr(e->d_name, "cuda"))
+                    continue;
+                // Extract major version from names like "988_cuda-12.conf", "cuda-13.conf"
+                const char* p = e->d_name;
+                while (*p) {
+                    if (p[0] == 'c' && p[1] == 'u' && p[2] == 'd' && p[3] == 'a' && p[4] == '-') {
+                        int maj = std::atoi(p + 5);
+                        if (maj >= 10 && maj <= 99) {
+                            if (first_major == 0) {
+                                first_major = maj;
+                                cuda_majors_seen = 1;
+                            } else if (maj != first_major) {
+                                second_major = maj;
+                                cuda_majors_seen = 2;
+                            }
+                        }
+                        break;
+                    }
+                    ++p;
+                }
+            }
+            ::closedir(d);
+            if (cuda_majors_seen >= 2) {
+                std::fprintf(out,
+                    "\n  *** WARNING: mixed CUDA versions detected (CUDA %d and CUDA %d) ***\n"
+                    "  Multiple CUDA major-version ld.so.conf.d entries can cause library\n"
+                    "  mismatches, heap corruption, and crashes (see issue #152).\n"
+                    "  Fix: remove the stale cuda-*.conf entry, run `sudo ldconfig`, and rebuild.\n"
+                    "  Alternatively, rebuild with -DGGML_STATIC=ON to statically link CUDA.\n\n",
+                    first_major, second_major);
+            }
+        }
+    }
+
     std::fprintf(out, "\n=== /usr/local/cuda/compat (forward-compat libcuda — opt-in only) ===\n");
     list_dir_files(out, "/usr/local/cuda/compat", nullptr);
 

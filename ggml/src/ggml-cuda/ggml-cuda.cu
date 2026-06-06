@@ -198,6 +198,41 @@ static int ggml_cuda_parse_id(char devName[]) {
 static ggml_cuda_device_info ggml_cuda_init() {
     ggml_cuda_device_info info = {};
 
+    // Runtime-vs-compile-time CUDA version check (#152).  A major-version
+    // mismatch (e.g. binary built with CUDA 12 headers but running against
+    // a CUDA 13 runtime, or vice-versa) causes silent heap corruption that
+    // manifests as random crashes far from the real cause.  Catch it early.
+#if defined(CUDART_VERSION) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    {
+        int runtime_version = 0;
+        cudaError_t ver_err = cudaRuntimeGetVersion(&runtime_version);
+        if (ver_err == cudaSuccess) {
+            const int compile_major = CUDART_VERSION / 1000;
+            const int runtime_major = runtime_version / 1000;
+            if (compile_major != runtime_major) {
+                GGML_LOG_ERROR(
+                    "%s: CUDA version mismatch — compiled against CUDA %d (CUDART %d) "
+                    "but runtime reports CUDA %d (cudart %d). "
+                    "This will cause crashes. Rebuild with matching CUDA headers/libs, "
+                    "or set LD_LIBRARY_PATH to point at the CUDA %d runtime. "
+                    "See https://github.com/CrispStrobe/CrispASR/issues/152\n",
+                    __func__, compile_major, CUDART_VERSION,
+                    runtime_major, runtime_version, compile_major);
+                return info;  // don't touch the GPU — the heap is already at risk
+            }
+            const int compile_minor = (CUDART_VERSION % 1000) / 10;
+            const int runtime_minor = (runtime_version % 1000) / 10;
+            if (compile_minor != runtime_minor) {
+                GGML_LOG_WARN(
+                    "%s: CUDA minor version mismatch — compiled %d.%d, runtime %d.%d. "
+                    "This usually works but may cause subtle issues.\n",
+                    __func__, compile_major, compile_minor,
+                    runtime_major, runtime_minor);
+            }
+        }
+    }
+#endif
+
     cudaError_t err = cudaGetDeviceCount(&info.device_count);
     if (err != cudaSuccess) {
         GGML_LOG_ERROR("%s: failed to initialize " GGML_CUDA_NAME ": %s\n", __func__, cudaGetErrorString(err));
