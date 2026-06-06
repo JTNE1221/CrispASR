@@ -195,9 +195,32 @@ static void load_metadata(tada_context* c, gguf_context* g) {
 
 static void load_vocab(tada_context* c, gguf_context* g) {
     c->vocab.id_to_token = core_gguf::kv_str_array(g, "tokenizer.ggml.tokens");
-    for (size_t i = 0; i < c->vocab.id_to_token.size(); i++) {
-        c->vocab.token_to_id[c->vocab.id_to_token[i]] = (int32_t)i;
+
+    // Detect and fix off-by-one in token list. Some GGUF converters prepend a
+    // dummy entry at index 0, shifting all IDs by +1 relative to the model's
+    // embedding table. Detect this by checking if <|begin_of_text|> is at
+    // index 128001 (shifted) rather than 128000 (correct).
+    // Detect off-by-one: the GGUF converter may prepend a garbage entry to
+    // the token array. gguf_get_arr_str strips it (returns 128256 items),
+    // but that shifts all IDs by -1 relative to the embedding table.
+    // Fix: if token[0]='!' but model expects token 0 = <unk> or padding,
+    // add +1 to all IDs so they match the embedding table rows.
+    int vocab_id_offset = 0;
+    if (c->vocab.id_to_token.size() == c->hp.vocab_size &&
+        c->vocab.id_to_token.size() > 128000 &&
+        c->vocab.id_to_token[0] == "!" &&
+        c->vocab.id_to_token[128000] == "<|begin_of_text|>") {
+        // Tokens are shifted -1 from the embedding table. The GGUF raw array
+        // had a dummy [0], gguf_get_arr_str stripped it, so our [0]='!' should
+        // be embedding row 1. Add +1 offset to all IDs.
+        vocab_id_offset = 1;
+        fprintf(stderr, "tada: vocab off-by-one detected (converter dummy entry), adding +1 to IDs\n");
     }
+
+    for (size_t i = 0; i < c->vocab.id_to_token.size(); i++) {
+        c->vocab.token_to_id[c->vocab.id_to_token[i]] = (int32_t)(i + vocab_id_offset);
+    }
+
     // BPE merges
     auto merges = core_gguf::kv_str_array(g, "tokenizer.ggml.merges");
     for (int i = 0; i < (int)merges.size(); i++) {
@@ -1098,9 +1121,13 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         for (size_t i = 0; i < prefix_ids.size(); i++)
             fprintf(stderr, "%d%s", prefix_ids[i], i+1<prefix_ids.size()?",":"");
         fprintf(stderr, "]\n");
-        fprintf(stderr, "tada: full_ids[0..9]=[");
-        for (int i = 0; i < std::min(10, (int)full_ids.size()); i++)
-            fprintf(stderr, "%d%s", full_ids[i], i+1<std::min(10,(int)full_ids.size())?",":"");
+        fprintf(stderr, "tada: full_ids(%d)=[", (int)full_ids.size());
+        for (int i = 0; i < (int)full_ids.size(); i++)
+            fprintf(stderr, "%d%s", full_ids[i], i+1<(int)full_ids.size()?",":"");
+        fprintf(stderr, "]\n");
+        fprintf(stderr, "tada: text_ids(%d)=[", (int)text_ids.size());
+        for (int i = 0; i < (int)text_ids.size(); i++)
+            fprintf(stderr, "%d%s", text_ids[i], i+1<(int)text_ids.size()?",":"");
         fprintf(stderr, "]\n");
     }
 
