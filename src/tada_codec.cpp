@@ -399,6 +399,11 @@ static ggml_cgraph* build_decode_graph(tada_codec_context* c, int n_frames) {
     ggml_set_name(attn_mask, "attn_mask");
     ggml_set_input(attn_mask);
 
+    // Create position tensor for RoPE ONCE (shared across all layers)
+    ggml_tensor* codec_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_frames);
+    ggml_set_name(codec_pos, "codec_pos");
+    ggml_set_input(codec_pos);
+
     for (int il = 0; il < c->n_attn_layers; il++) {
         const auto& l = c->attn_layers[il];
 
@@ -415,21 +420,18 @@ static ggml_cgraph* build_decode_graph(tada_codec_context* c, int n_frames) {
         k = ggml_cont(ctx0, k);
         v = ggml_cont(ctx0, v);
 
-        // Reshape for multi-head: (d, T) → (hd, nh, T) → permute to (hd, T, nh)
+        // Reshape for multi-head: (d, T) → (hd, nh, T)
         q = ggml_reshape_3d(ctx0, q, hd, nh, n_frames);
         k = ggml_reshape_3d(ctx0, k, hd, nh, n_frames);
         v = ggml_reshape_3d(ctx0, v, hd, nh, n_frames);
 
-        // RoPE on (hd, nh, T) layout — ggml_rope_ext needs ne[2]=T=pos->ne[0]
-        ggml_tensor* pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_frames);
-        ggml_set_name(pos, "codec_pos");
-        ggml_set_input(pos);
-        q = ggml_rope_ext(ctx0, q, pos, nullptr,
+        // RoPE — attn_factor=1.0 is critical (0.0 would zero the output)
+        q = ggml_rope_ext(ctx0, q, codec_pos, nullptr,
                           hd, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f,
-                          1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-        k = ggml_rope_ext(ctx0, k, pos, nullptr,
+                          1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        k = ggml_rope_ext(ctx0, k, codec_pos, nullptr,
                           hd, GGML_ROPE_TYPE_NORMAL, 0, 10000.0f,
-                          1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                          1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
         // Permute to (hd, T, nh) for attention
         q = ggml_permute(ctx0, q, 0, 2, 1, 3);
@@ -522,6 +524,53 @@ static ggml_cgraph* build_decode_graph(tada_codec_context* c, int n_frames) {
     cur = ggml_tanh(ctx0, cur);
 
     // cur is (1, T_audio) — flatten to 1D
+    int64_t T_audio = cur->ne[1];
+    cur = ggml_reshape_1d(ctx0, cur, T_audio);
+    ggml_set_name(cur, "pcm");
+    ggml_build_forward_expand(gf, cur);
+
+    ggml_free(ctx0);
+    return gf;
+}
+
+// ──────────── DAC-only graph (bypass attention) ────────────────────
+
+static ggml_cgraph* build_dac_only_graph(tada_codec_context* c, int n_frames) {
+    const int d = c->hidden_dim; // 1024
+
+    ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
+
+    // Input: (hidden_dim, n_frames) = (1024, T) — directly from attention output
+    ggml_tensor* cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, n_frames);
+    ggml_set_name(cur, "hidden_input"); ggml_set_input(cur);
+
+    // DAC decoder (same as in build_decode_graph, starting from in_conv)
+    cur = wn_conv1d(ctx0, cur, c->in_conv, 1);
+    ggml_tensor* dump_dac_in = ggml_cont(ctx0, cur);
+    ggml_set_name(dump_dac_in, "dump_dac_in");
+    ggml_build_forward_expand(gf, dump_dac_in);
+
+    {
+        auto& blk = c->blocks[0];
+        cur = snake1d(ctx0, cur, blk.snake_alpha, blk.inv_snake_alpha);
+        ggml_tensor* d_s = ggml_cont(ctx0, cur); ggml_set_name(d_s, "dump_b0_snake"); ggml_build_forward_expand(gf, d_s);
+        cur = wn_convt1d(ctx0, cur, blk.up_conv, c->strides[0]);
+        ggml_tensor* d_c = ggml_cont(ctx0, cur); ggml_set_name(d_c, "dump_b0_convt"); ggml_build_forward_expand(gf, d_c);
+        static const int dils[3] = {1, 3, 9};
+        for (int r = 0; r < 3; r++) cur = res_unit(ctx0, cur, blk.res[r], dils[r]);
+    }
+    for (int b = 1; b < 4; b++) {
+        cur = dec_block(ctx0, cur, c->blocks[b], c->strides[b]);
+        char dname[32]; snprintf(dname, sizeof(dname), "dump_blk%d", b);
+        ggml_tensor* dblk = ggml_cont(ctx0, cur);
+        ggml_set_name(dblk, dname); ggml_build_forward_expand(gf, dblk);
+    }
+
+    cur = snake1d(ctx0, cur, c->out_snake_alpha, c->out_inv_snake_alpha);
+    cur = wn_conv1d(ctx0, cur, c->out_conv, 1);
+    cur = ggml_tanh(ctx0, cur);
     int64_t T_audio = cur->ne[1];
     cur = ggml_reshape_1d(ctx0, cur, T_audio);
     ggml_set_name(cur, "pcm");
@@ -695,6 +744,67 @@ float* tada_codec_decode(struct tada_codec_context* ctx,
         fprintf(stderr, "  DUMP pcm: n=%d range=[%.6f, %.6f] rms=%.6f\n",
                 n_samples, mn, mx, rms);
     }
+
+    ggml_backend_sched_free(sched);
+    *out_n_samples = n_samples;
+    return pcm;
+}
+
+float* tada_codec_decode_dac(struct tada_codec_context* ctx,
+                             const float* hidden, int n_frames,
+                             int* out_n_samples) {
+    if (!ctx || !hidden || n_frames <= 0) return nullptr;
+    const int d = ctx->hidden_dim;
+
+    ggml_cgraph* gf = build_dac_only_graph(ctx, n_frames);
+    ggml_backend_t backends[] = {ctx->backend};
+    ggml_backend_sched_t sched = ggml_backend_sched_new(backends, nullptr, 1, 32768, false, false);
+    ggml_backend_sched_reset(sched);
+    if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+        fprintf(stderr, "tada-codec: failed to alloc DAC graph\n");
+        ggml_backend_sched_free(sched);
+        return nullptr;
+    }
+
+    // Set input: hidden (hidden_dim, n_frames) — column-major, same as ggml internal
+    ggml_tensor* inp = ggml_graph_get_tensor(gf, "hidden_input");
+    ggml_backend_tensor_set(inp, hidden, 0, (size_t)d * n_frames * sizeof(float));
+
+    if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "tada-codec: DAC graph compute failed\n");
+        ggml_backend_sched_free(sched);
+        return nullptr;
+    }
+
+    // Dump intermediates
+    auto dump = [&](const char* name) {
+        ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+        if (!t) return;
+        int n = (int)ggml_nelements(t);
+        std::vector<float> buf(n);
+        ggml_backend_tensor_get(t, buf.data(), 0, (size_t)n * sizeof(float));
+        float rms = 0;
+        for (int i = 0; i < n; i++) rms += buf[i] * buf[i];
+        rms = std::sqrt(rms / n);
+        fprintf(stderr, "  DAC %s: n=%d rms=%.6f first5=[%.6f,%.6f,%.6f,%.6f,%.6f]\n",
+                name, n, rms, buf[0], buf[1], buf[2], buf[3], buf[4]);
+    };
+    dump("dump_dac_in");
+    dump("dump_b0_snake");
+    dump("dump_b0_convt");
+    dump("dump_blk1");
+    dump("dump_blk2");
+    dump("dump_blk3");
+
+    ggml_tensor* pcm_t = ggml_graph_get_tensor(gf, "pcm");
+    int n_samples = (int)ggml_nelements(pcm_t);
+    float* pcm = (float*)malloc((size_t)n_samples * sizeof(float));
+    ggml_backend_tensor_get(pcm_t, pcm, 0, (size_t)n_samples * sizeof(float));
+
+    float rms = 0;
+    for (int i = 0; i < n_samples; i++) rms += pcm[i] * pcm[i];
+    rms = std::sqrt(rms / n_samples);
+    fprintf(stderr, "  DAC pcm: n=%d rms=%.6f\n", n_samples, rms);
 
     ggml_backend_sched_free(sched);
     *out_n_samples = n_samples;
