@@ -63,11 +63,25 @@ TEST_CASE("explicit --vad/--vad-model bypasses the fallback", "[unit][long-audio
     REQUIRE_FALSE(should_auto_chunk_long(0, /*wants_vad=*/true, kUnboundedBackendCaps, 300 * kSR, kSR, kThreshold));
 }
 
-TEST_CASE("explicit --chunk-seconds bypasses the fallback", "[unit][long-audio][issue-89]") {
+TEST_CASE("explicit --chunk-seconds N>0 bypasses the fallback", "[unit][long-audio][issue-89]") {
     // If the user already set a non-zero chunk size, respect it. The
     // overlap-save context in crispasr_run.cpp will cover the boundaries.
     REQUIRE_FALSE(should_auto_chunk_long(30, false, kUnboundedBackendCaps, 300 * kSR, kSR, kThreshold));
     REQUIRE_FALSE(should_auto_chunk_long(120, false, kUnboundedBackendCaps, 300 * kSR, kSR, kThreshold));
+}
+
+TEST_CASE("explicit --chunk-seconds 0 intent: function still fires, call-site guards it",
+          "[unit][long-audio][issue-89]") {
+    // `--chunk-seconds 0` means "no dispatcher slicing; let the library
+    // stream internally." should_auto_chunk_long(0, …) cannot distinguish
+    // this from the implicit effective_chunk_seconds=0 that CAP_UNBOUNDED_INPUT
+    // backends get by default, so it returns true (would trigger fallback).
+    // The bypass is enforced one level up in crispasr_run.cpp via the
+    // `!params.chunk_seconds_explicit` guard added in the #150 follow-up.
+    // This test pins the function's own return value so the intent is clear.
+    constexpr int n_samples = 300 * kSR;
+    REQUIRE(should_auto_chunk_long(0, false, kUnboundedBackendCaps, n_samples, kSR, kThreshold));
+    // ^ returns true here; crispasr_run.cpp does NOT call this when chunk_seconds_explicit=true
 }
 
 TEST_CASE("non-CAP_UNBOUNDED_INPUT backends never trigger", "[unit][long-audio][issue-89]") {

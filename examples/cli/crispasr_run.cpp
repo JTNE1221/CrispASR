@@ -414,9 +414,16 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     // avoid excessive chunk boundaries.  The overlap-save gate in
     // `use_chunk_context` (issue #114) still applies, so chunk boundaries
     // get the ± chunk_overlap_seconds context they need.
+    //
+    // `--chunk-seconds 0` explicitly requests full-audio / library-internal
+    // streaming (no dispatcher slicing). Honouring that intent requires
+    // suppressing the auto-fallback: should_auto_chunk_long(0, …) would
+    // otherwise fire because effective_chunk_seconds == 0 satisfies its
+    // "not explicitly chunked" path. Guard with chunk_seconds_explicit.
     constexpr int kLongAudioFallbackChunkSeconds = 30;
     const bool wants_vad = params.vad || !params.vad_model.empty();
     const bool long_audio_no_vad =
+        !params.chunk_seconds_explicit &&
         crispasr_long_audio::should_auto_chunk_long(effective_chunk_seconds, wants_vad, backend.capabilities(),
                                                     (int)samples.size(), SR, kLongAudioFallbackChunkSeconds);
     if (long_audio_no_vad) {
@@ -425,21 +432,20 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
             fprintf(stderr,
                     "crispasr: %s backend on %.1fs audio without --vad or --chunk-seconds — "
                     "auto-chunking at %d s to keep encoder in its safe window "
-                    "(pass --vad for finer slicing, or --chunk-seconds N to set explicitly)\n",
+                    "(pass --vad for finer slicing, or --chunk-seconds 0 for library-internal streaming)\n",
                     backend.name(), (double)samples.size() / SR, kLongAudioFallbackChunkSeconds);
         }
     } else if (!params.no_prints) {
-        if (effective_chunk_seconds == 0 && (int)samples.size() > params.chunk_seconds * SR &&
-            (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
+        if (effective_chunk_seconds == 0 && (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
             fprintf(stderr,
-                    "crispasr: %s backend — full-audio encoding "
-                    "(use --chunk-seconds N if OOM)\n",
+                    "crispasr: %s backend — full-audio / library-internal streaming "
+                    "(use --chunk-seconds N if OOM, --vad for long files)\n",
                     backend.name());
-        } else if (params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT) &&
-                   (int)samples.size() > params.chunk_seconds * SR) {
+        } else if (params.chunk_seconds_explicit && params.chunk_seconds > 0 &&
+                   (backend.capabilities() & CAP_UNBOUNDED_INPUT) && (int)samples.size() > params.chunk_seconds * SR) {
             fprintf(stderr,
                     "crispasr: %s backend — chunking at %ds may reduce quality; "
-                    "remove --chunk-seconds for best results\n",
+                    "consider --chunk-seconds 0 or --vad for better results\n",
                     backend.name(), params.chunk_seconds);
         }
     }
@@ -1191,18 +1197,23 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 if (sep != std::string::npos) {
                     const std::string sibling = params.model.substr(0, sep + 1) + entry.companion_filename;
                     FILE* f = fopen(sibling.c_str(), "rb");
-                    if (f) { fclose(f); companion_found = true; }
+                    if (f) {
+                        fclose(f);
+                        companion_found = true;
+                    }
                 }
             }
             if (!companion_found) {
-                const std::string cached = crispasr_cache::probe_cached_file(entry.companion_filename, params.cache_dir);
-                if (!cached.empty()) companion_found = true;
+                const std::string cached =
+                    crispasr_cache::probe_cached_file(entry.companion_filename, params.cache_dir);
+                if (!cached.empty())
+                    companion_found = true;
             }
 
             if (!companion_found) {
-                const std::string resolved_companion =
-                    crispasr_resolve_model_cli(entry.companion_filename, backend_name, params.no_prints, params.cache_dir,
-                                               params.auto_download, params.tts_codec_quant.empty() ? params.model_quant : params.tts_codec_quant);
+                const std::string resolved_companion = crispasr_resolve_model_cli(
+                    entry.companion_filename, backend_name, params.no_prints, params.cache_dir, params.auto_download,
+                    params.tts_codec_quant.empty() ? params.model_quant : params.tts_codec_quant);
                 if (params.verbose) {
                     fprintf(stderr, "crispasr[verbose]: resolved companion = '%s'\n", resolved_companion.c_str());
                 }
@@ -1368,19 +1379,17 @@ int crispasr_run_backend(const whisper_params& params_in) {
 
         // Voice-cloning consent gate: if the voice is a .wav reference
         // (i.e. voice cloning), require --i-have-rights attestation.
-        const bool is_voice_clone = !params.tts_voice.empty() &&
-                                    params.tts_voice.size() >= 4 &&
+        const bool is_voice_clone = !params.tts_voice.empty() && params.tts_voice.size() >= 4 &&
                                     (params.tts_voice.compare(params.tts_voice.size() - 4, 4, ".wav") == 0 ||
                                      params.tts_voice.compare(params.tts_voice.size() - 4, 4, ".WAV") == 0);
         if (is_voice_clone && !params.tts_voice_clone_consent) {
-            fprintf(stderr,
-                    "crispasr: error: voice cloning requires the --i-have-rights flag.\n"
-                    "\n"
-                    "  By passing --i-have-rights you attest:\n"
-                    "  \"I have the consent of the speaker whose voice this clones,\n"
-                    "   or it is my own voice.\"\n"
-                    "\n"
-                    "  Usage: crispasr --tts \"text\" --voice speaker.wav --i-have-rights\n");
+            fprintf(stderr, "crispasr: error: voice cloning requires the --i-have-rights flag.\n"
+                            "\n"
+                            "  By passing --i-have-rights you attest:\n"
+                            "  \"I have the consent of the speaker whose voice this clones,\n"
+                            "   or it is my own voice.\"\n"
+                            "\n"
+                            "  Usage: crispasr --tts \"text\" --voice speaker.wav --i-have-rights\n");
             return 17;
         }
         if (is_voice_clone) {
@@ -1389,8 +1398,8 @@ int crispasr_run_backend(const whisper_params& params_in) {
             auto t = std::chrono::system_clock::to_time_t(now);
             char ts[64];
             std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S%z", std::localtime(&t));
-            fprintf(stderr, "[CONSENT] ts=%s voice=%s attestation=\"%s\"\n",
-                    ts, params.tts_voice.c_str(), params.tts_consent_attestation.c_str());
+            fprintf(stderr, "[CONSENT] ts=%s voice=%s attestation=\"%s\"\n", ts, params.tts_voice.c_str(),
+                    params.tts_consent_attestation.c_str());
         }
 
         auto audio = backend->synthesize(params.tts_text, params);
