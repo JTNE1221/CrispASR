@@ -390,6 +390,8 @@ static ggml_tensor* build_causal_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_
 // Input/output in [C, T] format.
 // Uses transpose + ggml_conv_1d_dw + transpose to stay GPU-compatible.
 static ggml_tensor* build_causal_dw_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b) {
+    if (!w)
+        return x; // weight missing — model may not contain this encoder; return input unchanged
     int K = (int)w->ne[0];
     int pad_left = K - 1;
 
@@ -897,6 +899,33 @@ static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const floa
         auto it = m.tensors.find(name);
         return it != m.tensors.end() ? it->second : nullptr;
     };
+
+    // Verify the model has ASR capability: acoustic and semantic tokenizer
+    // encoders must be present (at_enc.*, st_enc.*).  vibevoice-realtime and
+    // other TTS-only variants omit these — they contain at_dec.* (decoder)
+    // and tts_lm.* but no encoder.  Without this check the tensor lookups all
+    // return null, build_causal_dw_conv1d dereferences a null weight pointer,
+    // and the process segfaults.
+    {
+        bool has_at_enc = false, has_st_enc = false;
+        for (const auto& kv : m.tensors) {
+            if (!has_at_enc && kv.first.rfind("at_enc.", 0) == 0)
+                has_at_enc = true;
+            if (!has_st_enc && kv.first.rfind("st_enc.", 0) == 0)
+                has_st_enc = true;
+            if (has_at_enc && has_st_enc)
+                break;
+        }
+        if (!has_at_enc || !has_st_enc) {
+            fprintf(stderr,
+                    "vibevoice: error: this model does not support ASR (missing %s%s%s encoder tensors).\n"
+                    "  vibevoice-realtime and similar TTS-only models lack the tokenizer encoders.\n"
+                    "  Use a full VibeVoice ASR GGUF (contains at_enc.* and st_enc.* tensors).\n",
+                    has_at_enc ? "" : "at_enc", (!has_at_enc && !has_st_enc) ? " and " : "",
+                    has_st_enc ? "" : "st_enc");
+            return nullptr;
+        }
+    }
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "vibevoice: %d samples (%.2fs at 24kHz)\n", n_samples, n_samples / 24000.0f);
