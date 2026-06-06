@@ -1044,18 +1044,35 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         return nullptr;
     }
 
-    // Build full input: BOS + prefix + text + EOS*shift
-    int32_t bos = 128000;  // Llama-3 BOS
-    int32_t eot = 128009;  // <|eot_id|>
-    auto it = ctx->vocab.token_to_id.find("<|begin_of_text|>");
-    if (it != ctx->vocab.token_to_id.end()) bos = it->second;
-    it = ctx->vocab.token_to_id.find("<|eot_id|>");
-    if (it != ctx->vocab.token_to_id.end()) eot = it->second;
+    // Build full input: BOS + prefix + prompt_text + synth_text + EOT*shift
+    // Must use raw token IDs for special tokens (BPE tokenizer doesn't handle <|...|>).
+    // Matches Python generate(): prefix = system_header + assistant_header
+    auto lookup = [&](const char* name, int32_t fallback) -> int32_t {
+        auto it = ctx->vocab.token_to_id.find(name);
+        return (it != ctx->vocab.token_to_id.end()) ? it->second : fallback;
+    };
+    int32_t bos          = lookup("<|begin_of_text|>",    128000);
+    int32_t eot          = lookup("<|eot_id|>",           128009);
+    int32_t start_header = lookup("<|start_header_id|>",  128006);
+    int32_t end_header   = lookup("<|end_header_id|>",    128007);
 
-    // Build: [BOS] + system_prefix + prompt_text + synth_text + [EOS]*shift
-    // The prompt text is the transcript of the reference audio.
-    std::string prefix = "<|start_header_id|>assistant<|end_header_id|>";
-    std::vector<int32_t> prefix_ids = tokenize(ctx, prefix);
+    // Build prefix: <|start_header_id|>system<|end_header_id|><|eot_id|>
+    //               <|start_header_id|>assistant<|end_header_id|>
+    // This matches Python's generate() with default system_prompt=None.
+    std::vector<int32_t> system_text_ids = tokenize(ctx, std::string("system"));
+    std::vector<int32_t> assistant_text_ids = tokenize(ctx, std::string("assistant"));
+
+    std::vector<int32_t> prefix_ids;
+    prefix_ids.push_back(start_header);
+    prefix_ids.insert(prefix_ids.end(), system_text_ids.begin(), system_text_ids.end());
+    prefix_ids.push_back(end_header);
+    // empty system prompt (system_prompt or '' in Python) — no text tokens here
+    prefix_ids.push_back(eot);
+    prefix_ids.push_back(start_header);
+    prefix_ids.insert(prefix_ids.end(), assistant_text_ids.begin(), assistant_text_ids.end());
+    prefix_ids.push_back(end_header);
+
+    int prefix_len = (int)prefix_ids.size(); // does NOT include BOS
 
     // Prompt text tokens (transcript of reference audio for voice conditioning)
     std::vector<int32_t> prompt_text_ids;
@@ -1064,6 +1081,7 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         prompt_text_ids = tokenize(ctx, std::string(prompt_text_env));
     }
 
+    // Full sequence: BOS + prefix + prompt_text + synth_text + EOT*shift
     std::vector<int32_t> full_ids;
     full_ids.push_back(bos);
     full_ids.insert(full_ids.end(), prefix_ids.begin(), prefix_ids.end());
@@ -1074,8 +1092,16 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     int num_prompt = (int)full_ids.size();
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "tada: %d prompt tokens, max %d generation tokens\n",
-                num_prompt, max_tokens);
+        fprintf(stderr, "tada: %d prompt tokens (prefix_len=%d), max %d generation tokens\n",
+                num_prompt, prefix_len, max_tokens);
+        fprintf(stderr, "tada: prefix_ids=[");
+        for (size_t i = 0; i < prefix_ids.size(); i++)
+            fprintf(stderr, "%d%s", prefix_ids[i], i+1<prefix_ids.size()?",":"");
+        fprintf(stderr, "]\n");
+        fprintf(stderr, "tada: full_ids[0..9]=[");
+        for (int i = 0; i < std::min(10, (int)full_ids.size()); i++)
+            fprintf(stderr, "%d%s", full_ids[i], i+1<std::min(10,(int)full_ids.size())?",":"");
+        fprintf(stderr, "]\n");
     }
 
     // ── Zero KV caches ──
@@ -1219,21 +1245,37 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         // Update state for next step
         if (step >= shift) {
             int feat_idx = step - shift;
-            bool use_prompt = (ctx->n_prompt > 0 && feat_idx < ctx->n_prompt);
+            // Python pads prompt features with prefix_len zeros to align prompt audio
+            // with prompt TEXT tokens. prefix_len tokens have zero acoustic features.
+            // Prompt audio occupies indices [prefix_len, prefix_len + n_prompt) in the
+            // virtual padded array.
+            int prompt_feat_idx = feat_idx - prefix_len; // index into actual prompt data
+            bool in_prefix = (feat_idx < prefix_len);
+            bool in_prompt = (!in_prefix && ctx->n_prompt > 0
+                              && prompt_feat_idx >= 0 && prompt_feat_idx < ctx->n_prompt);
 
-            if (use_prompt) {
-                // Use pre-computed prompt features
-                std::vector<float> feat(ctx->prompt_values.begin() + feat_idx * ad,
-                                         ctx->prompt_values.begin() + (feat_idx + 1) * ad);
+            if (in_prefix) {
+                // Prefix positions: zero acoustic (matches Python's left-padding)
+                std::vector<float> feat(ad, 0.0f);
                 acoustic_features.push_back(feat);
-                int tb = (feat_idx + 1 < (int)ctx->prompt_time_before.size())
-                         ? ctx->prompt_time_before[feat_idx + 1] : pred_t_before;
+                time_before_list.push_back(pred_t_before);
+                cur_acoustic = feat;
+                cur_mask = 0;
+                cur_t_before = pred_t_before;
+                cur_t_after = pred_t_after;
+            } else if (in_prompt) {
+                // Use pre-computed prompt features
+                std::vector<float> feat(ctx->prompt_values.begin() + prompt_feat_idx * ad,
+                                         ctx->prompt_values.begin() + (prompt_feat_idx + 1) * ad);
+                acoustic_features.push_back(feat);
+                int tb = (prompt_feat_idx + 1 < (int)ctx->prompt_time_before.size())
+                         ? ctx->prompt_time_before[prompt_feat_idx + 1] : pred_t_before;
                 time_before_list.push_back(tb);
                 cur_acoustic = feat;
                 cur_mask = 1;
                 cur_t_before = tb;
-                cur_t_after = (feat_idx + 1 < (int)ctx->prompt_time_after.size())
-                              ? ctx->prompt_time_after[feat_idx + 1] : pred_t_after;
+                cur_t_after = (prompt_feat_idx + 1 < (int)ctx->prompt_time_after.size())
+                              ? ctx->prompt_time_after[prompt_feat_idx + 1] : pred_t_after;
             } else {
                 // Use FM-predicted features
                 std::vector<float> feat(speech.begin(), speech.begin() + ad);
@@ -1280,12 +1322,14 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     float ac_std = hp.acoustic_std;
     float ac_mean = hp.acoustic_mean;
 
-    // Skip prompt features + transition steps (Python: num_prompt_tokens + num_transition_steps - 1)
-    // Only decode the GENERATED features, not the prompt conditioning.
+    // Skip prompt + prefix + transition frames to match Python's:
+    //   num_prompt_tokens = prefix_len + (n_prompt - transition)   [after pad + trim]
+    //   skip = num_prompt_tokens + transition - 1
+    //        = prefix_len + n_prompt - 1
     int skip_frames = 0;
     if (ctx->n_prompt > 0) {
-        int num_transition_steps = 5; // default in model.generate()
-        skip_frames = ctx->n_prompt + num_transition_steps - 1;
+        int num_transition_steps = 5;
+        skip_frames = prefix_len + ctx->n_prompt - 1;
         if (skip_frames >= (int)acoustic_features.size()) {
             skip_frames = std::max(0, (int)acoustic_features.size() - 1);
         }
