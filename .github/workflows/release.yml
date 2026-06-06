@@ -238,10 +238,15 @@ jobs:
       - name: Install deps + Vulkan SDK
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libopenblas-dev libvulkan-dev
-          sudo apt-get install -y glslc || \
-          sudo apt-get install -y glslang-tools || \
-          sudo apt-get install -y shaderc
+          sudo apt-get install -y cmake g++ libopenblas-dev libvulkan-dev glslang-tools
+          # glslang-tools provides glslangValidator; if glslc is also needed,
+          # install the shaderc package or the full Vulkan SDK.
+          if ! command -v glslc &>/dev/null; then
+            sudo apt-get install -y shaderc || \
+            sudo apt-get install -y glslc || true
+          fi
+          # Verify at least one shader compiler is available
+          command -v glslc || command -v glslangValidator
 
       - name: Build
         run: |

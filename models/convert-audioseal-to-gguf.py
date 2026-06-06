@@ -158,11 +158,12 @@ def main():
         arr = all_tensors[name]
         print(f"  {name:55s}  {str(list(arr.shape)):20s}  {arr.dtype}")
 
-    # Write tensors
+    # Write tensors. Default to F32 for maximum parity; pass --f16 for
+    # smaller files (at the cost of watermark-only cosine).
+    use_f16 = "--f16" in sys.argv
     n_written = 0
     for name, arr in sorted(all_tensors.items()):
-        # Use F16 for large weight tensors, F32 for biases/small
-        if arr.size > 256 and "bias" not in name:
+        if use_f16 and arr.size > 256 and "bias" not in name:
             writer.add_tensor(name, arr.astype(np.float16),
                               raw_dtype=GGMLQuantizationType.F16)
         else:
