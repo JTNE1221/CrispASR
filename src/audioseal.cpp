@@ -128,46 +128,42 @@ static ggml_tensor* conv1d(ggml_context* ctx, ggml_tensor* x,
 // AudioSeal's StreamableLSTM adds a skip connection: output = lstm(x) + x
 // ---------------------------------------------------------------------------
 
-// Single LSTM layer forward pass. x: (T, D), returns (T, D).
-// All tensors in (T, C) layout (ggml native, time-major).
+// Single LSTM layer forward pass. x: (D, T), returns (D, T).
+// Input must be in (D, T) layout for mul_mat to work (D is the
+// reduction dimension matching weight_ih's ne[0]=D).
+//
+// weight_ih ne = [512, 2048] → mul_mat(weight_ih, x) where x has ne[0]=512
+// gives result with ne[0]=2048 (=4*D), ne[1]=T
 static ggml_tensor* lstm_layer_forward(ggml_context* ctx,
                                        ggml_tensor* x,
                                        const audioseal_lstm_layer& layer,
                                        int D) {
-    const int T = (int)x->ne[0] / D; // x is (T, D) so ne[0]=T, ne[1]=D... wait
-
-    // Actually in ggml, ne[0] is the "columns" (innermost dimension).
-    // For (T, D) layout: ne[0] = T, ne[1] = D.
-    // weight_ih: (4*D, D) in PyTorch → ne[0] = D, ne[1] = 4*D in ggml.
-    //
-    // mul_mat(weight_ih, x): weight_ih is (D, 4*D), x is (T, D)
-    // → output is (T, 4*D)
-
-    // Precompute input projections for all time steps at once:
-    // ih_all = x @ weight_ih^T + bias_ih   →  (T, 4*D)
+    // x: ne[0]=D, ne[1]=T. weight_ih: ne[0]=D, ne[1]=4*D.
+    // mul_mat(weight_ih, x) → ne[0]=4*D, ne[1]=T
     ggml_tensor* ih_all = ggml_mul_mat(ctx, layer.weight_ih, x);
+    // ih_all: ne[0]=4*D, ne[1]=T. Bias: ne[0]=4*D → reshape to (4*D, 1)
+    fprintf(stderr, "    LSTM ih_all ne=[%lld,%lld], D=%d\n",
+            (long long)ih_all->ne[0], (long long)ih_all->ne[1], D);
     if (layer.bias_ih) {
+        fprintf(stderr, "    bias_ih ne=[%lld], nelements=%lld, target=(%d,1)\n",
+                (long long)layer.bias_ih->ne[0], (long long)ggml_nelements(layer.bias_ih), 4*D);
         ih_all = ggml_add(ctx, ih_all,
-                          ggml_reshape_2d(ctx, layer.bias_ih, 1, 4 * D));
+                          ggml_reshape_2d(ctx, layer.bias_ih, 4 * D, 1));
     }
 
     // Single-pass approximation: h_{t-1} = 0 for all t.
-    // gates = ih_all + bias_hh (no recurrent contribution).
-    // For more accuracy we'd need ggml scan/recurrence primitives.
-    // The StreamableLSTM skip connection mitigates the error.
     ggml_tensor* gates = ih_all;
     if (layer.bias_hh) {
         gates = ggml_add(ctx, gates,
-                         ggml_reshape_2d(ctx, layer.bias_hh, 1, 4 * D));
+                         ggml_reshape_2d(ctx, layer.bias_hh, 4 * D, 1));
     }
 
-    // gates shape: (T, 4*D). Split into 4 × (T, D) along dim 1.
-    // In ggml ne[0]=T, ne[1]=4*D; nb[0]=sizeof(float), nb[1]=T*sizeof(float)
-    const size_t row_bytes = (size_t)gates->ne[0] * sizeof(float); // T * sizeof(float)
-    ggml_tensor* i_gate = ggml_view_2d(ctx, gates, gates->ne[0], D, gates->nb[1], 0);
-    ggml_tensor* f_gate = ggml_view_2d(ctx, gates, gates->ne[0], D, gates->nb[1], (size_t)D * row_bytes);
-    ggml_tensor* g_gate = ggml_view_2d(ctx, gates, gates->ne[0], D, gates->nb[1], (size_t)2 * D * row_bytes);
-    ggml_tensor* o_gate = ggml_view_2d(ctx, gates, gates->ne[0], D, gates->nb[1], (size_t)3 * D * row_bytes);
+    // gates: ne[0]=4*D, ne[1]=T. Split into 4 × (D, T) along dim 0.
+    // View with offset along ne[0] (the innermost/fastest dimension).
+    ggml_tensor* i_gate = ggml_view_2d(ctx, gates, D, gates->ne[1], gates->nb[1], 0);
+    ggml_tensor* f_gate = ggml_view_2d(ctx, gates, D, gates->ne[1], gates->nb[1], (size_t)D * sizeof(float));
+    ggml_tensor* g_gate = ggml_view_2d(ctx, gates, D, gates->ne[1], gates->nb[1], (size_t)2 * D * sizeof(float));
+    ggml_tensor* o_gate = ggml_view_2d(ctx, gates, D, gates->ne[1], gates->nb[1], (size_t)3 * D * sizeof(float));
 
     i_gate = ggml_sigmoid(ctx, ggml_cont(ctx, i_gate));
     f_gate = ggml_sigmoid(ctx, ggml_cont(ctx, f_gate));
@@ -412,35 +408,61 @@ static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x,
                                     const audioseal_conv& enc_out,
                                     const uint32_t ratios[4]) {
     // Input conv
-    if (enc_in.w)
+    fprintf(stderr, "  enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    if (enc_in.w) {
+        fprintf(stderr, "  enc_in.w ne=[%lld,%lld,%lld]\n",
+                (long long)enc_in.w->ne[0], (long long)enc_in.w->ne[1], (long long)enc_in.w->ne[2]);
         x = conv1d(ctx, x, enc_in.w, enc_in.b, 1, 3, 1);
+        fprintf(stderr, "  after enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    }
 
     // 4 blocks: resblock → ELU → downsample
     for (int i = 0; i < 4; i++) {
+        fprintf(stderr, "  resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         x = build_resblock(ctx, x, res[i]);
+        fprintf(stderr, "  after resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         x = elu(ctx, x);
         if (down[i].w) {
             int ratio = (int)ratios[i];
             int pad = ratio / 2;
+            fprintf(stderr, "  down %d: ratio=%d pad=%d w ne=[%lld,%lld,%lld]\n",
+                    i, ratio, pad, (long long)down[i].w->ne[0], (long long)down[i].w->ne[1], (long long)down[i].w->ne[2]);
             x = conv1d(ctx, x, down[i].w, down[i].b, ratio, pad, 1);
+            fprintf(stderr, "  after down %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         }
     }
 
     // StreamableLSTM: 2-layer LSTM with skip connection (output = lstm(x) + x)
+    // LSTM operates on (D, T) for mul_mat compatibility; transpose before/after.
     {
         ggml_tensor* lstm_in = x;
-        int hidden = (int)x->ne[1]; // x is (T, D), ne[1] = D
+        int hidden = (int)x->ne[1]; // x is (T, D) in ggml, ne[0]=T, ne[1]=D
+        fprintf(stderr, "  LSTM: x ne=[%lld,%lld] hidden=%d\n", (long long)x->ne[0], (long long)x->ne[1], hidden);
+        // Transpose to (D, T) for LSTM
+        x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (D, T)
+        fprintf(stderr, "  LSTM after transpose: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
         for (int i = 0; i < 2; i++) {
             if (lstm[i].weight_ih)
                 x = lstm_layer_forward(ctx, x, lstm[i], hidden);
         }
+        // Transpose back to (T, D)
+        fprintf(stderr, "  LSTM output (before transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        x = ggml_cont(ctx, ggml_transpose(ctx, x));
+        fprintf(stderr, "  LSTM output (after transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        fprintf(stderr, "  lstm_in: ne=[%lld,%lld]\n", (long long)lstm_in->ne[0], (long long)lstm_in->ne[1]);
         x = ggml_add(ctx, x, lstm_in); // skip connection
+        fprintf(stderr, "  after skip add: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
     }
 
     // ELU + output conv
     x = elu(ctx, x);
-    if (enc_out.w)
+    fprintf(stderr, "  enc_out conv: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    if (enc_out.w) {
+        fprintf(stderr, "  enc_out.w ne=[%lld,%lld,%lld]\n",
+                (long long)enc_out.w->ne[0], (long long)enc_out.w->ne[1], (long long)enc_out.w->ne[2]);
         x = conv1d(ctx, x, enc_out.w, enc_out.b, 1, 3, 1);
+        fprintf(stderr, "  after enc_out: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    }
 
     return x;
 }
@@ -460,11 +482,13 @@ static ggml_tensor* forward_decoder(ggml_context* ctx, ggml_tensor* x,
     // StreamableLSTM: 2-layer LSTM with skip connection
     {
         ggml_tensor* lstm_in = x;
-        int hidden = (int)x->ne[1]; // x is (T, D)
+        int hidden = (int)x->ne[1];
+        x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T,D) → (D,T)
         for (int i = 0; i < 2; i++) {
             if (lstm[i].weight_ih)
                 x = lstm_layer_forward(ctx, x, lstm[i], hidden);
         }
+        x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (D,T) → (T,D)
         x = ggml_add(ctx, x, lstm_in);
     }
 
@@ -618,15 +642,18 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
         ggml_set_name(indices, "msg_indices");
         ggml_set_input(indices);
 
-        // Look up embeddings and sum
-        ggml_tensor* emb = ggml_get_rows(ctx0, ctx->gen_msg_w, indices); // (128, 16)
-        // Sum across the 16 embeddings → (128,)
-        ggml_tensor* msg_proj = ggml_sum_rows(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, emb))); // (128, 1)
-        msg_proj = ggml_cont(ctx0, ggml_transpose(ctx0, msg_proj)); // (1, 128)... needs reshape
+        // Look up embeddings and sum.
+        // gen_msg_w ne=[128, 32]. get_rows selects 16 rows → (128, 16).
+        ggml_tensor* emb = ggml_get_rows(ctx0, ctx->gen_msg_w, indices); // ne=[128, 16]
+        // Sum across the 16 embeddings: transpose to (16, 128), sum_rows → (1, 128)
+        ggml_tensor* embt = ggml_cont(ctx0, ggml_transpose(ctx0, emb)); // (16, 128)
+        ggml_tensor* msg_proj = ggml_sum_rows(ctx0, embt); // ne[0]=1, ne[1]=128
 
-        // Reshape to (D, 1) and broadcast-add to latent (D, T_latent)
-        int D = (int)latent->ne[0];
-        msg_proj = ggml_reshape_2d(ctx0, msg_proj, D, 1);
+        // latent is (T, 128). msg_proj should be (1, 128). Broadcast-add over time.
+        fprintf(stderr, "  msg_proj ne=[%lld,%lld,%lld,%lld] ndims=%d\n",
+                (long long)msg_proj->ne[0], (long long)msg_proj->ne[1],
+                (long long)msg_proj->ne[2], (long long)msg_proj->ne[3], ggml_n_dims(msg_proj));
+        fprintf(stderr, "  latent ne=[%lld,%lld]\n", (long long)latent->ne[0], (long long)latent->ne[1]);
         latent = ggml_add(ctx0, latent, msg_proj);
     }
 
