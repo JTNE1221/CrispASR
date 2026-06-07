@@ -4,6 +4,10 @@
 #include "espeak_dlopen.h"
 #include "core/g2p_en.h"
 #include "core/g2p_de.h"
+// Auto-download support — only available when linked with crispasr-lib
+#ifdef CRISPASR_HAS_CACHE
+#include "crispasr_cache.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -24,37 +28,32 @@ static void ensure_cmudict_loaded() {
     if (g_g2p_ctx.dict.loaded || g_g2p_cmudict_tried) return;
     g_g2p_cmudict_tried = true;
 
-    // Check standard locations
-    const char* paths[] = {
-        nullptr, // filled from env below
-        "cmudict.dict",
-        "models/cmudict.dict",
-        "/usr/share/cmudict/cmudict.dict",
-        "/usr/local/share/cmudict/cmudict.dict",
-        nullptr
-    };
-    // Check CRISPASR_CMUDICT_PATH env var first
+    // Check env var first
     const char* env = std::getenv("CRISPASR_CMUDICT_PATH");
-    if (env && *env) paths[0] = env;
-
-    for (int i = 0; paths[i]; i++) {
-        int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, paths[i]);
-        if (n > 0) {
-            fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, paths[i]);
-            return;
-        }
+    if (env && *env) {
+        int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, env);
+        if (n > 0) { fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, env); return; }
     }
 
-    // Try ~/.cache/crispasr/cmudict.dict
+    // Try local cache dir
     const char* home = std::getenv("HOME");
     if (!home) home = std::getenv("USERPROFILE");
     if (home) {
         std::string cache_path = std::string(home) + "/.cache/crispasr/cmudict.dict";
         int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, cache_path);
-        if (n > 0) {
-            fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, cache_path.c_str());
-        }
+        if (n > 0) { fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, cache_path.c_str()); return; }
     }
+#ifdef CRISPASR_HAS_CACHE
+    // Auto-download (BSD license, public domain data)
+    static const char* CMUDICT_URL =
+        "https://raw.githubusercontent.com/cmusphinx/cmudict/refs/heads/master/cmudict.dict";
+    std::string path = crispasr_cache::ensure_cached_file(
+        "cmudict.dict", CMUDICT_URL, /*quiet=*/true, "crispasr", "");
+    if (!path.empty()) {
+        int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, path);
+        if (n > 0) { fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, path.c_str()); return; }
+    }
+#endif
 }
 
 bool phonemize_builtin_en(const std::string& lang, const std::string& text, std::string& out) {
@@ -83,13 +82,25 @@ static void ensure_de_dict_loaded() {
         int n = g2p_de::load_ipa_dict_file(g_g2p_de_ctx.dict, env);
         if (n > 0) { fprintf(stderr, "g2p: loaded German IPA dict (%d entries) from %s\n", n, env); return; }
     }
+    // Try local cache
     const char* home = std::getenv("HOME");
     if (!home) home = std::getenv("USERPROFILE");
     if (home) {
         std::string p = std::string(home) + "/.cache/crispasr/ipa_dict_de.txt";
         int n = g2p_de::load_ipa_dict_file(g_g2p_de_ctx.dict, p);
-        if (n > 0) fprintf(stderr, "g2p: loaded German IPA dict (%d entries) from %s\n", n, p.c_str());
+        if (n > 0) { fprintf(stderr, "g2p: loaded German IPA dict (%d entries) from %s\n", n, p.c_str()); return; }
     }
+#ifdef CRISPASR_HAS_CACHE
+    // Auto-download (CC-BY-SA, requires attribution — separate data file)
+    static const char* DE_DICT_URL =
+        "https://raw.githubusercontent.com/open-dict-data/ipa-dict/refs/heads/master/data/de.txt";
+    std::string path = crispasr_cache::ensure_cached_file(
+        "ipa_dict_de.txt", DE_DICT_URL, /*quiet=*/true, "crispasr", "");
+    if (!path.empty()) {
+        int n = g2p_de::load_ipa_dict_file(g_g2p_de_ctx.dict, path);
+        if (n > 0) { fprintf(stderr, "g2p: loaded German IPA dict (%d entries) from %s\n", n, path.c_str()); return; }
+    }
+#endif
 }
 
 bool phonemize_builtin_de(const std::string& lang, const std::string& text, std::string& out) {

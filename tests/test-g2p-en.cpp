@@ -260,6 +260,33 @@ TEST_CASE("CMUdict IPA output quality", "[g2p][cmudict][quality]") {
     }
 }
 
+// ── Phoneme inventory filtering ──────────────────────────────────────
+
+TEST_CASE("filter_to_inventory strips unmapped chars", "[phonemizer][inventory]") {
+    // Simulated piper phoneme map (subset)
+    std::set<std::string> valid = {
+        "t", "s", "ʃ", "d", "ʒ", "a", "e", "i", "o", "u",
+        "ɪ", "ɛ", "ɔ", "ʊ", "ə", "ˈ", "ˌ", "ː", "ŋ"
+    };
+
+    SECTION("passes valid IPA through") {
+        std::string filtered = crispasr::filter_to_inventory("tʃaɪ", valid);
+        CHECK(filtered == "tʃaɪ");
+    }
+
+    SECTION("strips unknown combining marks") {
+        // U+0361 combining tie should be stripped if not in valid set
+        std::string with_tie = "t\xCD\xA1s";  // t͡s
+        std::string filtered = crispasr::filter_to_inventory(with_tie, valid);
+        CHECK(filtered == "ts");
+    }
+
+    SECTION("preserves spaces") {
+        std::string filtered = crispasr::filter_to_inventory("a e", valid);
+        CHECK(filtered == "a e");
+    }
+}
+
 // ── Phonemizer interface ─────────────────────────────────────────────
 
 TEST_CASE("phonemizer builtin_en works without espeak", "[phonemizer]") {

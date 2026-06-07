@@ -49,7 +49,7 @@ TEST_CASE("German LTS: vowel digraphs", "[g2p_de][lts]") {
 TEST_CASE("German LTS: consonant specifics", "[g2p_de][lts]") {
     SECTION("z → t͡s") {
         std::string ipa = g2p_de::lts_word_to_ipa("zeit");
-        CHECK(ipa.find("t\xCD\xA1""s") != std::string::npos); // t͡s
+        CHECK(ipa.find("ts") != std::string::npos); // t͡s
     }
     SECTION("w → v") {
         std::string ipa = g2p_de::lts_word_to_ipa("welt");

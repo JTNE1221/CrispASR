@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <set>
 #include <string>
 #include <vector>
 #include <functional>
@@ -55,6 +56,35 @@ inline bool phonemize(const std::string& lang, const std::string& text, std::str
     if (phonemize_espeak_dlopen(lang, text, out)) return true;
     if (phonemize_espeak_popen(lang, text, out)) return true;
     return false;
+}
+
+// Filter IPA output to only contain characters present in a model's
+// phoneme inventory. Silently drops unmapped chars (combining marks,
+// tie bars, etc.) that would cause garbled output.
+//
+// `valid_chars` should contain every single Unicode codepoint (as a
+// UTF-8 string per char) that the model's phoneme_id_map accepts.
+// Pass the keys of piper's phoneme_id_map JSON.
+inline std::string filter_to_inventory(const std::string& ipa,
+                                        const std::set<std::string>& valid_chars) {
+    std::string out;
+    size_t i = 0;
+    while (i < ipa.size()) {
+        // Decode one UTF-8 codepoint
+        unsigned char c = (unsigned char)ipa[i];
+        int cp_len = 1;
+        if (c >= 0xF0) cp_len = 4;
+        else if (c >= 0xE0) cp_len = 3;
+        else if (c >= 0xC0) cp_len = 2;
+        if (i + cp_len > ipa.size()) break;
+        std::string ch = ipa.substr(i, cp_len);
+        if (valid_chars.count(ch) || ch == " ") {
+            out += ch;
+        }
+        // else: silently drop unmapped char
+        i += cp_len;
+    }
+    return out;
 }
 
 } // namespace crispasr

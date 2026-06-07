@@ -102,9 +102,9 @@ inline std::string lts_word_to_ipa(const std::string& word) {
         }
         if (c == 'c' && c1 == 'k') { ipa += "k"; i += 2; continue; }
         if (c == 'p' && c1 == 'h') { ipa += "f"; i += 2; continue; }
-        if (c == 'p' && c1 == 'f') { ipa += "p\xCD\xA1""f"; i += 2; continue; }  // pf → p͡f
+        if (c == 'p' && c1 == 'f') { ipa += "pf"; i += 2; continue; }  // pf → p͡f
         if (c == 't' && c1 == 'h') { ipa += "t"; i += 2; continue; }              // th → t
-        if (c == 't' && c1 == 'z') { ipa += "t\xCD\xA1""s"; i += 2; continue; }   // tz → t͡s
+        if (c == 't' && c1 == 'z') { ipa += "ts"; i += 2; continue; }   // tz → t͡s
         if (c == 'd' && c1 == 't') { ipa += "t"; i += 2; continue; }
         if (c == 'n' && c1 == 'g') { ipa += "\xC5\x8B"; i += 2; continue; }       // ng → ŋ
         if (c == 'n' && c1 == 'k') { ipa += "\xC5\x8B""k"; i += 2; continue; }    // nk → ŋk
@@ -199,7 +199,7 @@ inline std::string lts_word_to_ipa(const std::string& word) {
         if (c == 'w') { ipa += "v"; i++; continue; }  // German w → v
         if (c == 'x') { ipa += "ks"; i++; continue; }
         if (c == 'y') { ipa += "y"; i++; continue; }
-        if (c == 'z') { ipa += "t\xCD\xA1""s"; i++; continue; } // z → t͡s
+        if (c == 'z') { ipa += "ts"; i++; continue; } // z → t͡s
 
         i++; // skip unknown
     }
