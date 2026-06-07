@@ -1168,6 +1168,27 @@ target_include_directories(test-piper-tts PRIVATE
 )
 target_link_libraries(test-piper-tts PRIVATE piper-tts)
 
+# ─── test-g2p-en — Catch2 tests for English G2P (ARPAbet, LTS, phonemizer) ──
+add_executable(test-g2p-en test-g2p-en.cpp
+    ${PROJECT_SOURCE_DIR}/src/phonemizer.cpp)
+target_include_directories(test-g2p-en PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/ggml/include
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(test-g2p-en PRIVATE
+    Catch2::Catch2WithMain
+)
+# Need dl for dlopen on Linux
+if(NOT WIN32 AND NOT APPLE)
+    target_link_libraries(test-g2p-en PRIVATE dl)
+endif()
+catch_discover_tests(test-g2p-en
+    EXTRA_ARGS --colour-mode ansi
+    PROPERTIES LABELS "unit;g2p;phonemizer"
+    PROPERTIES TIMEOUT 30
+)
+
 # ─── test-espeak-phonemize — Catch2 tests for espeak-ng phonemization ───────
 # Tests espeak availability, piper text/IPA synthesis, input validation.
 # Requires PIPER_TEST_MODEL env var or -DPIPER_TEST_MODEL=... for live tests.

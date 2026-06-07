@@ -2,6 +2,7 @@
 
 #include "phonemizer.h"
 #include "espeak_dlopen.h"
+#include "core/g2p_en.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,31 @@
 #include <string>
 
 namespace crispasr {
+
+// ── Built-in English G2P (LTS rules + optional CMUdict/neural) ───────
+
+static g2p_en::context g_g2p_ctx;
+static bool g_g2p_loaded = false;
+
+bool phonemize_builtin_en(const std::string& lang, const std::string& text, std::string& out) {
+    // Only handles English
+    if (!lang.empty() && lang.find("en") == std::string::npos && lang != "auto")
+        return false;
+    // LTS rules always work (no data needed); CMUdict/neural if loaded
+    out = g2p_en::text_to_ipa(g_g2p_ctx, text);
+    return !out.empty();
+}
+
+void phonemizer_load_cmudict(const std::map<std::string, std::vector<std::string>>& entries) {
+    g_g2p_ctx.dict.entries = entries;
+    g_g2p_ctx.dict.loaded = true;
+    g_g2p_loaded = true;
+}
+
+void phonemizer_load_neural_g2p(const g2p_en::neural_model& model) {
+    g_g2p_ctx.neural = model;
+    g_g2p_loaded = true;
+}
 
 // ── espeak-ng via dlopen ─────────────────────────────────────────────
 
@@ -61,7 +87,6 @@ bool phonemize_espeak_popen(const std::string& lang, const std::string& text, st
 #define PHON_PCLOSE pclose
     const char* redir = " 2>/dev/null";
 #endif
-    // Shell-quote the text (basic — wraps in single quotes, escapes embedded quotes)
     std::string cmd = "espeak-ng -q --ipa=3 -v ";
     cmd += lang;
     cmd += " '";
@@ -85,21 +110,6 @@ bool phonemize_espeak_popen(const std::string& lang, const std::string& text, st
     return !out.empty();
 #undef PHON_POPEN
 #undef PHON_PCLOSE
-}
-
-// ── Stubs for future backends ────────────────────────────────────────
-
-bool phonemize_cmudict(const std::string& /*lang*/, const std::string& /*text*/, std::string& /*out*/) {
-    // TODO: implement CMU Pronouncing Dictionary lookup.
-    // Load ~134K word→ARPAbet entries, convert ARPAbet→IPA via static table.
-    // English-only; return false for non-English langs.
-    return false;
-}
-
-bool phonemize_neural_g2p(const std::string& /*lang*/, const std::string& /*text*/, std::string& /*out*/) {
-    // TODO: implement GGML-based neural grapheme-to-phoneme model.
-    // Multilingual; ~5-20 MB model. DeepPhonemizer or similar.
-    return false;
 }
 
 } // namespace crispasr
