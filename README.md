@@ -604,7 +604,9 @@ CrispASR has three feature areas that warrant their own docs pages:
   (flow-matching + HiFT vocoder, German via Kartoffelbox), IndexTTS,
   VoxCPM2, and CosyVoice3 (9 langs + 18 zh dialects; baked-voice bank +
   arbitrary-WAV cloning). Voice packs, language routing, and qwen3-tts
-  environment switches.
+  environment switches. All TTS output is watermarked; post-embed
+  verification warns if confidence is low. Use
+  `--detect-watermark file.wav` to check any WAV for AI watermarks.
 - **[Server mode (HTTP API)](docs/server.md)** — persistent model,
   OpenAI-compatible `/v1/audio/transcriptions` (ASR) and
   `/v1/audio/speech` + `/v1/voices` (TTS, automatic on any loaded

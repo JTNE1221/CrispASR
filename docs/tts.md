@@ -778,6 +778,34 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 
 All consent attestations are logged with ISO 8601 timestamps.
 
+### Post-embed watermark verification (automatic)
+
+After writing a watermarked WAV in TTS mode, CrispASR automatically
+reads back the in-memory PCM and runs watermark detection on it. If
+the detected confidence is below 0.6, a warning is emitted to stderr.
+This catches cases where the watermark was degraded during synthesis
+or encoding — no extra flags needed.
+
+### `--detect-watermark PATH` — standalone watermark detection
+
+Reads a WAV file, runs watermark detection (spread-spectrum by default,
+or AudioSeal if `--watermark-model` is given), prints the confidence
+score and a human-readable verdict, then exits.
+
+| Confidence | Verdict |
+|---|---|
+| > 0.65 | `AI-GENERATED WATERMARK DETECTED` |
+| 0.4 – 0.65 | `UNCERTAIN` |
+| < 0.4 | `No watermark detected` |
+
+```bash
+# Detect watermark using the built-in spread-spectrum detector
+crispasr --detect-watermark output.wav
+
+# Detect with AudioSeal neural watermark model
+crispasr --detect-watermark output.wav --watermark-model audioseal.gguf
+```
+
 ### Spoken disclaimer (voice clones only)
 
 Voice-cloned output is automatically prefixed with "This audio was

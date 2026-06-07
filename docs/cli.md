@@ -998,6 +998,7 @@ the neural watermark, C2PA signing, and voice-cloning consent:
 | Flag | Description |
 |------|-------------|
 | `--watermark-model PATH` | Load AudioSeal GGUF for neural watermarking (upgrades built-in spread-spectrum) |
+| `--detect-watermark PATH` | Read a WAV file, run watermark detection, print confidence + verdict (`>0.65` = AI-GENERATED, `0.4–0.65` = UNCERTAIN, `<0.4` = none), then exit |
 | `--i-have-rights` | Required for voice cloning (`--voice <file.wav>`); attests speaker consent |
 | `--c2pa-cert PATH` | X.509 certificate for C2PA Content Credentials signing |
 | `--c2pa-key PATH` | Private key for C2PA signing (generate both with `scripts/generate-c2pa-cert.sh`) |
