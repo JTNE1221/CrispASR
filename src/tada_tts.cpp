@@ -196,29 +196,11 @@ static void load_metadata(tada_context* c, gguf_context* g) {
 static void load_vocab(tada_context* c, gguf_context* g) {
     c->vocab.id_to_token = core_gguf::kv_str_array(g, "tokenizer.ggml.tokens");
 
-    // Detect and fix off-by-one in token list. Some GGUF converters prepend a
-    // dummy entry at index 0, shifting all IDs by +1 relative to the model's
-    // embedding table. Detect this by checking if <|begin_of_text|> is at
-    // index 128001 (shifted) rather than 128000 (correct).
-    // Detect off-by-one: the GGUF converter may prepend a garbage entry to
-    // the token array. gguf_get_arr_str strips it (returns 128256 items),
-    // but that shifts all IDs by -1 relative to the embedding table.
-    // Fix: if token[0]='!' but model expects token 0 = <unk> or padding,
-    // add +1 to all IDs so they match the embedding table rows.
-    int vocab_id_offset = 0;
-    if (c->vocab.id_to_token.size() == c->hp.vocab_size &&
-        c->vocab.id_to_token.size() > 128000 &&
-        c->vocab.id_to_token[0] == "!" &&
-        c->vocab.id_to_token[128000] == "<|begin_of_text|>") {
-        // Tokens are shifted -1 from the embedding table. The GGUF raw array
-        // had a dummy [0], gguf_get_arr_str stripped it, so our [0]='!' should
-        // be embedding row 1. Add +1 offset to all IDs.
-        vocab_id_offset = 1;
-        fprintf(stderr, "tada: vocab off-by-one detected (converter dummy entry), adding +1 to IDs\n");
-    }
-
+    // Llama-3 tiktoken vocab: 128000 BPE tokens (0='!', 1='"', ...) plus
+    // 256 special tokens (128000='<|begin_of_text|>', ...).  Token array
+    // indices map 1:1 to embedding weight rows — no offset needed.
     for (size_t i = 0; i < c->vocab.id_to_token.size(); i++) {
-        c->vocab.token_to_id[c->vocab.id_to_token[i]] = (int32_t)(i + vocab_id_offset);
+        c->vocab.token_to_id[c->vocab.id_to_token[i]] = (int32_t)i;
     }
 
     // BPE merges
