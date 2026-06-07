@@ -52,6 +52,11 @@ public:
             piper_tts_set_language(ctx_, p.language.c_str());
         }
 
+        // G2P dictionary source: "olaph" (MIT), "open-dict" (CC-BY-SA), or file path
+        if (!p.g2p_dict.empty()) {
+            piper_tts_set_g2p_dict(p.g2p_dict.c_str());
+        }
+
         return true;
     }
 

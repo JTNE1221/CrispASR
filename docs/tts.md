@@ -7,8 +7,8 @@ trade-off:
 | Backend | Why pick it | Voice cloning | First-run download |
 |---|---|---|---|
 | **`melotts`** | Multilingual VITS2 (MeloTTS). 4 English speakers (US/BR/India/AU). 44.1 kHz output, ~102 MB GGUF. Neural G2P + CMU dict. BERT companion (Q4_K 52 MB) auto-downloads with `-m auto`; also via `--codec-model` or `MELOTTS_BERT` env. | No (per-speaker ID) | ~154 MB via `-m auto` |
-| **`piper`** | Tiniest footprint (30 MB). rhasspy/piper VITS; 250+ community voices across 30+ languages via espeak-ng phonemizer. 22 kHz output. | No (per-voice GGUF) | Manual `wget` |
-| **`kokoro`** | Smallest + fastest. 82 M-param StyleTTS2-derived model. Multilingual via espeak-ng + native German backbone. | No (preset voice packs) | Manual `wget` (no `-m auto`) |
+| **`piper`** | Tiniest footprint (30 MB). rhasspy/piper VITS; 250+ community voices across 30+ languages. Built-in G2P (CMUdict + LTS rules) for English — no espeak-ng needed. Optional espeak-ng for other langs (loaded via dlopen). 22 kHz output. Use `--g2p-dict` to select dictionary source. | No (per-voice GGUF) | Manual `wget` |
+| **`kokoro`** | Smallest + fastest. 82 M-param StyleTTS2-derived model. Multilingual via built-in G2P or espeak-ng (dlopen/popen fallback). | No (preset voice packs) | Manual `wget` (no `-m auto`) |
 | **`qwen3-tts`** | Highest fidelity / strongest cloning. Speech-LLM (talker + code predictor + 12 Hz codec). | Yes (WAV + ref-text or baked voice GGUF) | ~1.3 GB via `-m auto` |
 | **`vibevoice-tts`** | Lowest-latency streaming TTS, designed for realtime. | Preset voice packs | ~636 MB via `-m auto` |
 | **`vibevoice-1.5b`** | Base VibeVoice TTS model with WAV cloning. | Yes (`VIBEVOICE_VOICE_AUDIO=<wav>` or `--voice <wav>`) | ~1.6 GB via `-m auto` |
@@ -76,6 +76,47 @@ any `crispasr --server` instance whose loaded backend declares
 `speed`, and `instructions` pass through to the backend's
 `whisper_params`. Long-form input is auto-chunked on sentence
 boundaries.
+
+## G2P Phonemization (`--g2p-dict`)
+
+TTS backends that use IPA phonemes (piper, kokoro) need a
+grapheme-to-phoneme (G2P) engine to convert text to IPA. CrispASR
+ships built-in G2P for 4 languages — **no espeak-ng required**:
+
+| Language | Built-in rules | Dictionary (auto-download) |
+|----------|---------------|----------------------------|
+| English | CMUdict (134K words, BSD) + LTS rules | 3.5 MB from cstr/g2p-dicts |
+| German | Auslautverhärtung, open-syllable lengthening, compound splitting | 40 MB OLaPh (MIT) |
+| French | Nasal vowels, silent finals, s-voicing | 6 MB OLaPh (MIT) |
+| Spanish | Seseo, b/d/g lenition, yeísmo | 16 MB OLaPh (MIT) |
+
+The `--g2p-dict` flag selects the dictionary source:
+
+```bash
+# Default: OLaPh MIT dicts (auto-downloaded from HuggingFace)
+crispasr --backend piper -m auto --tts "Hello world"
+
+# Use open-dict-data (CC-BY-SA, Wiktionary-sourced) instead
+crispasr --backend piper -m auto --g2p-dict open-dict --tts "Hello world"
+
+# Use your own dictionary file
+crispasr --backend piper -m auto --g2p-dict /path/to/my/dict.txt --tts "Hello world"
+```
+
+The phonemization cascade tries in order:
+1. Built-in G2P (LTS rules + dictionary) — always available
+2. espeak-ng via dlopen (loaded at runtime if installed)
+3. espeak-ng via popen (subprocess fallback)
+
+Dictionaries are auto-downloaded to `~/.cache/crispasr/` on first use.
+Override with env vars: `CRISPASR_CMUDICT_PATH`, `CRISPASR_DE_DICT_PATH`,
+`CRISPASR_FR_DICT_PATH`, `CRISPASR_ES_DICT_PATH`, or
+`CRISPASR_G2P_DICT_SOURCE` (`olaph` or `open-dict`).
+
+Dictionary sources:
+- **OLaPh** (MIT, default): [iisys-hof/olaph](https://github.com/iisys-hof/olaph), hosted at [cstr/g2p-dicts](https://huggingface.co/datasets/cstr/g2p-dicts)
+- **open-dict-data** (CC-BY-SA): [open-dict-data/ipa-dict](https://github.com/open-dict-data/ipa-dict), Wiktionary-sourced
+- **CMUdict** (BSD): [cmusphinx/cmudict](https://github.com/cmusphinx/cmudict), English ARPAbet
 
 ## Kokoro — multilingual, smallest
 

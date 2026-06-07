@@ -324,6 +324,13 @@ struct whisper_params {
     int tts_speaker_id = -1;        // piper multi-speaker model
     int tts_max_speech_tokens = -1; // chatterbox max AR tokens
 
+    // G2P phonemizer dictionary source:
+    //   ""           → auto (OLaPh MIT preferred, then open-dict-data CC-BY-SA)
+    //   "olaph"      → OLaPh MIT dicts from cstr/g2p-dicts HuggingFace
+    //   "open-dict"  → open-dict-data CC-BY-SA from Wiktionary
+    //   path         → custom dict file path
+    std::string g2p_dict;
+
     // Server mode: when non-empty, every server response gets the
     // Access-Control-Allow-* headers set so browser clients can call us
     // cross-origin. Default empty = no CORS headers (server stays

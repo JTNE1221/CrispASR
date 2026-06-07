@@ -291,9 +291,16 @@ static bool phonemize_espeak_popen(const std::string& voice, const std::string& 
 static std::mutex g_g2p_mu;
 static g2p_en::context g_g2p_ctx;
 static bool g_g2p_tried = false;
+static std::string g_g2p_dict_source; // "olaph", "open-dict", or file path
 
 static void g2p_ensure_cmudict() {
     if (g_g2p_ctx.dict.loaded) return;
+
+    // If source is a file path (not "olaph"/"open-dict"/empty), load directly
+    if (!g_g2p_dict_source.empty() && g_g2p_dict_source != "olaph" && g_g2p_dict_source != "open-dict") {
+        if (g2p_en::load_cmudict_file(g_g2p_ctx.dict, g_g2p_dict_source) > 0) return;
+    }
+
     // 1. Env var
     const char* env = getenv("CRISPASR_CMUDICT_PATH");
     if (env && *env && g2p_en::load_cmudict_file(g_g2p_ctx.dict, env) > 0) return;
@@ -2292,6 +2299,17 @@ bool piper_tts_has_espeak(void) {
     // This function now reports whether ANY phonemization path works,
     // not just espeak-ng specifically.
     return true;
+}
+
+void piper_tts_set_g2p_dict(const char* source) {
+    std::lock_guard<std::mutex> g(g_g2p_mu);
+    g_g2p_dict_source = source ? source : "";
+    // If source changed, force reload on next use
+    if (!g_g2p_dict_source.empty()) {
+        g_g2p_tried = false;
+        g_g2p_ctx.dict.entries.clear();
+        g_g2p_ctx.dict.loaded = false;
+    }
 }
 
 void piper_tts_set_dump_dir(struct piper_tts_context* ctx, const char* dir) {

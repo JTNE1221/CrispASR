@@ -564,6 +564,8 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.chat_n_ctx = std::stoi(ARGV_NEXT);
     } else if (arg == "--chat-gpu-layers") {
         params.chat_n_gpu_layers = std::stoi(ARGV_NEXT);
+    } else if (arg == "--g2p-dict") {
+        params.g2p_dict = ARGV_NEXT;
     } else if (arg == "--tts-trim-silence") {
         params.tts_trim_silence = true;
     } else if (arg == "--text") {
@@ -1052,6 +1054,9 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             "             --tts-max-input-chars N  [%-7d] server: cap on /v1/audio/speech `input` "
             "length (0 = no cap)\n",
             params.tts_max_input_chars);
+    fprintf(stderr,
+            "             --g2p-dict SOURCE        [%-7s] G2P dict: 'olaph' (MIT), 'open-dict' (CC-BY-SA), or path to file\n",
+            params.g2p_dict.empty() ? "olaph" : params.g2p_dict.c_str());
     fprintf(stderr, "             --watermark-model PATH           AudioSeal GGUF for neural watermarking "
                     "(upgrades built-in spread-spectrum)\n");
     fprintf(stderr, "             --detect-watermark PATH          read WAV file and detect AI watermark "

@@ -6,11 +6,9 @@
 #include "core/g2p_de.h"
 #include "core/g2p_fr.h"
 #include "core/g2p_es.h"
-// Auto-download support. crispasr_cache.h is available when compiled as
-// part of crispasr-lib (the full binary). When compiled standalone (unit
-// tests), the header isn't available — auto-download is skipped and dicts
-// load from local cache or env vars only.
-#if __has_include("crispasr_cache.h")
+// Auto-download support — only when compiled as part of crispasr-lib.
+// Unit tests compile phonemizer.cpp standalone without the cache library.
+#ifdef CRISPASR_BUILD
 #include "crispasr_cache.h"
 #define CRISPASR_HAS_CACHE 1
 #endif
@@ -68,8 +66,16 @@ static const g2p_dict_urls G2P_URLS_PT = {
 #include <mutex>
 #include <string>
 
+// Global dict source override (set by CLI --g2p-dict or env var)
+static std::string g_dict_source_override;
+
+void phonemizer_set_dict_source(const std::string& source) {
+    g_dict_source_override = source;
+}
+
 // Check if user prefers open-dict-data over OLaPh
 static bool prefer_opendict() {
+    if (!g_dict_source_override.empty()) return g_dict_source_override == "open-dict";
     const char* src = std::getenv("CRISPASR_G2P_DICT_SOURCE");
     return src && std::string(src) == "open-dict";
 }

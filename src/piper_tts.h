@@ -65,8 +65,12 @@ int piper_tts_sample_rate(const struct piper_tts_context* ctx);
 int piper_tts_num_speakers(const struct piper_tts_context* ctx);
 const char* piper_tts_espeak_voice(const struct piper_tts_context* ctx);
 
-// Returns true if espeak-ng phonemization is available (linked or in $PATH).
+// Returns true if phonemization is available (built-in G2P, espeak-ng, or popen).
 bool piper_tts_has_espeak(void);
+
+// Set G2P dictionary source: "olaph" (MIT), "open-dict" (CC-BY-SA),
+// or a file path to a custom dictionary. Empty string = auto (default).
+void piper_tts_set_g2p_dict(const char* source);
 
 // Diff harness: dump all intermediates to this directory (empty = no dump).
 void piper_tts_set_dump_dir(struct piper_tts_context* ctx, const char* dir);
