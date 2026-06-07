@@ -331,7 +331,7 @@ inline std::string lts_word_to_ipa(const std::string& word) {
             ipa += "s";
             i++;
             continue;
-        }    // seseo
+        } // seseo
         i++; // skip unknown
     }
     return ipa;
