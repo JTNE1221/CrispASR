@@ -362,25 +362,70 @@ def kaggle_token_from_dataset(filename: str = "hf_token.txt") -> str | None:
     """Read an HF token from a private Kaggle Dataset mounted via
     kernel-metadata.json `dataset_sources` (e.g. chr1str/crispasr-hf-token
     → /kaggle/input/crispasr-hf-token/hf_token.txt). Bypasses the flaky
-    Secrets API; datasets are filesystem-mounted before the script runs."""
-    candidates = [Path("/kaggle/input/crispasr-hf-token") / filename]
-    root = Path("/kaggle/input")
-    if root.exists():
+    Secrets API; datasets are filesystem-mounted before the script runs.
+
+    Kaggle mounts datasets at several locations depending on the
+    environment version:
+      /kaggle/input/<slug>/           — classic path
+      /kaggle/input/datasets/<owner>/<slug>/  — newer environments
+    We scan both roots."""
+    candidates: list[Path] = [
+        Path("/kaggle/input/crispasr-hf-token") / filename,
+    ]
+    # Scan all known mount roots
+    roots = [
+        Path("/kaggle/input"),
+        Path("/kaggle/input/datasets"),
+        Path("/kaggle/input/datasets/chr1str"),
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
         for sub in root.iterdir():
             if "hf-token" in sub.name or "hf_token" in sub.name:
                 p = sub / filename
                 if p not in candidates:
                     candidates.append(p)
+            # Also check for the token file directly in the subdir
+            p = sub / filename
+            if p not in candidates and sub.is_dir():
+                candidates.append(p)
+    # Also try the flat file variants
+    candidates.append(Path("/kaggle/input/crispasr-hf-token") / "token")
+    candidates.append(Path("/kaggle/input/crispasr-hf-token") / "access_token")
+
+    # Debug: list what we're scanning
     for p in candidates:
         try:
-            if p.exists():
+            exists = p.exists()
+            if exists:
                 tok = p.read_text().strip()
-                if tok:
+                if tok and len(tok) > 8:
                     print(f"HF auth: token from {p} (dataset fallback).",
                           flush=True)
                     return tok
-        except Exception:
-            pass
+                else:
+                    print(f"HF auth: {p} exists but empty/short", flush=True)
+            # Don't log every non-existent path — too noisy
+        except Exception as e:
+            print(f"HF auth: {p} error: {e}", flush=True)
+
+    # Last resort: dump what's actually under /kaggle/input for debugging
+    root = Path("/kaggle/input")
+    if root.exists():
+        dirs = sorted(root.iterdir())
+        print(f"HF auth: /kaggle/input contains {len(dirs)} entries: "
+              f"{[d.name for d in dirs[:10]]}", flush=True)
+        # Also check one level deeper
+        for d in dirs:
+            if d.is_dir():
+                try:
+                    children = sorted(d.iterdir())
+                    if children:
+                        print(f"HF auth:   {d.name}/ -> "
+                              f"{[c.name for c in children[:5]]}", flush=True)
+                except PermissionError:
+                    pass
     return None
 
 
