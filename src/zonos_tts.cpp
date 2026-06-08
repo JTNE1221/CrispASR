@@ -75,7 +75,7 @@ struct zonos_hp {
     // Conditioner config
     uint32_t n_conditioners = 7;
     uint32_t phoneme_vocab_size = 189; // 4 special + 185 symbols
-    uint32_t n_languages = 100;
+    uint32_t n_languages = 128;        // IntegerConditioner: max_val-min_val+1 = 126-(-1)+1 = 128
 
     // Derived
     uint32_t emb_vocab_size = 1026;  // codebook_size + 2 (eos + mask)
@@ -247,7 +247,7 @@ static bool load_hparams(struct gguf_context* gguf_ctx, zonos_hp& hp) {
     hp.sample_rate = get_u32("zonos.sample_rate", 44100);
     hp.n_conditioners = get_u32("zonos.n_conditioners", 7);
     hp.phoneme_vocab_size = get_u32("zonos.phoneme_vocab_size", 189);
-    hp.n_languages = get_u32("zonos.n_languages", 100);
+    hp.n_languages = get_u32("zonos.n_languages", 128);
 
     hp.emb_vocab_size = hp.codebook_size + 2;  // eos + mask
     hp.head_vocab_size = hp.codebook_size + 1; // eos
@@ -987,8 +987,10 @@ static float* build_prefix_cpu(zonos_tts_context* ctx, const std::vector<int32_t
         auto tmp = tensor_to_float(cw.lang_uncond);
         std::memcpy(lang_out.data(), tmp.data(), (size_t)d * sizeof(float));
     } else {
-        int lid = cs.language_id;
-        if (lid < 0 || lid >= (int)hp.n_languages)
+        // IntegerConditioner has min_val=-1, max_val=126 → embedding index = language_id - min_val = language_id + 1
+        // Embedding table has 128 entries (max_val - min_val + 1 = 126 - (-1) + 1 = 128)
+        int lid = cs.language_id + 1;
+        if (lid < 0 || lid > 127)
             lid = 0;
         tensor_get_row_f32(cw.lang_emb_w, lid, lang_out.data(), d);
     }
@@ -1115,8 +1117,8 @@ static ggml_cgraph* build_graph_backbone(zonos_tts_context* ctx, int n_past, int
         /*qk_norm_eps*/ 0.0f,
         /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
     };
-    // Zonos config: rotary_emb_interleaved=true → consecutive pair RoPE (NORMAL)
-    kvp.rope_type = GGML_ROPE_TYPE_NORMAL;
+    // Zonos config: rotary_emb_interleaved=true → consecutive-pair RoPE (GPT-NeoX style)
+    kvp.rope_type = GGML_ROPE_TYPE_NEOX;
 
     // Helper to upcast F16 tensors to F32 for elementwise ops
     auto cast_f32 = [&](ggml_tensor* t) -> ggml_tensor* {
