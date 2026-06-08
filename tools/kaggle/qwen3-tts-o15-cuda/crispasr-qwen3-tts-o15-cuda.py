@@ -173,6 +173,7 @@ def run_tts(label, o15_value, extra_env=None, timeout=300):
         "--codec-model", str(tts_codec),
         "--voice", str(voice_ref),
         "--ref-text", ref_text,
+        "--i-have-rights",
         "--tts", TTS_TEXT,
         "--tts-output", str(out_wav),
         "--seed", "42",
