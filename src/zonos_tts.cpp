@@ -28,6 +28,7 @@
 
 #include "zonos_tts.h"
 #include "core/attention.h"
+#include "core/dac_decoder.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 
@@ -188,8 +189,12 @@ struct zonos_tts_context {
     ggml_tensor* kv_v_uncond = nullptr;
     int kv_max_ctx = 0;
 
-    // DAC codec path (loaded lazily)
+    // DAC codec (loaded lazily on first synthesize call)
     std::string dac_codec_path;
+    bool dac_loaded = false;
+    core_dac::DacWeights dac_w;
+    ggml_context* dac_ctx_w = nullptr;
+    ggml_backend_buffer_t dac_buf_w = nullptr;
 
     // Sampler RNG
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
@@ -1644,6 +1649,172 @@ int32_t* zonos_tts_synthesize_codes(struct zonos_tts_context* ctx, const char* t
     return result;
 }
 
+// -----------------------------------------------------------------------
+// DAC codec loading + decode
+// -----------------------------------------------------------------------
+
+static bool load_dac_codec(zonos_tts_context* ctx) {
+    if (ctx->dac_loaded)
+        return true;
+    if (ctx->dac_codec_path.empty()) {
+        fprintf(stderr, "zonos_tts: no DAC codec path set\n");
+        return false;
+    }
+    const char* path = ctx->dac_codec_path.c_str();
+
+    // Load weights
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, ctx->backend, "zonos_dac", wl)) {
+        fprintf(stderr, "zonos_tts: failed to load DAC codec from '%s'\n", path);
+        return false;
+    }
+    ctx->dac_ctx_w = wl.ctx;
+    ctx->dac_buf_w = wl.buf;
+
+    auto get = [&](const char* name) -> ggml_tensor* {
+        auto it = wl.tensors.find(name);
+        return (it != wl.tensors.end()) ? it->second : nullptr;
+    };
+
+    auto& dw = ctx->dac_w;
+    const int n_cb = dw.config.n_codebooks; // 9
+
+    // Quantizer codebooks + out_proj
+    dw.quantizers.resize(n_cb);
+    for (int k = 0; k < n_cb; k++) {
+        char name[128];
+        snprintf(name, sizeof(name), "dac.quant.%d", k);
+        dw.quantizers[k].codebook = get(name);
+        snprintf(name, sizeof(name), "dac.quant_proj.%d.weight", k);
+        dw.quantizers[k].out_proj_w = get(name);
+        snprintf(name, sizeof(name), "dac.quant_proj.%d.bias", k);
+        dw.quantizers[k].out_proj_b = get(name);
+    }
+
+    // Decoder input conv
+    dw.in_conv_w = get("dac.dec.in_conv.weight");
+    dw.in_conv_b = get("dac.dec.in_conv.bias");
+
+    // Decoder blocks
+    for (int b = 0; b < 4; b++) {
+        auto& blk = dw.blocks[b];
+        char name[128];
+
+        // Snake alpha
+        snprintf(name, sizeof(name), "dac.dec.blk.%d.0.alpha", b);
+        blk.snake_alpha = get(name);
+
+        // ConvTranspose1d
+        snprintf(name, sizeof(name), "dac.dec.blk.%d.1.weight", b);
+        blk.up_w = get(name);
+        snprintf(name, sizeof(name), "dac.dec.blk.%d.1.bias", b);
+        blk.up_b = get(name);
+
+        // 3 ResidualUnits (indices 2, 3, 4)
+        for (int r = 0; r < 3; r++) {
+            auto& ru = blk.res[r];
+            int ri = r + 2; // block-internal index
+
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.0.alpha", b, ri);
+            ru.alpha0 = get(name);
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.1.weight", b, ri);
+            ru.conv0_w = get(name);
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.1.bias", b, ri);
+            ru.conv0_b = get(name);
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.2.alpha", b, ri);
+            ru.alpha1 = get(name);
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.3.weight", b, ri);
+            ru.conv1_w = get(name);
+            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.3.bias", b, ri);
+            ru.conv1_b = get(name);
+        }
+    }
+
+    // Output Snake + Conv
+    dw.out_snake_alpha = get("dac.dec.out_snake.alpha");
+    dw.out_conv_w = get("dac.dec.out_conv.weight");
+    dw.out_conv_b = get("dac.dec.out_conv.bias");
+
+    // Validate critical tensors
+    if (!dw.quantizers[0].codebook || !dw.in_conv_w || !dw.out_conv_w) {
+        fprintf(stderr, "zonos_tts: DAC codec missing critical tensors\n");
+        return false;
+    }
+
+    ctx->dac_loaded = true;
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "zonos_tts: DAC codec loaded (%zu tensors)\n", wl.tensors.size());
+    }
+    return true;
+}
+
+// Run DAC decoder: codes (n_codebooks x T_codes) -> PCM (T_codes * 512)
+static float* dac_decode(zonos_tts_context* ctx, const int32_t* codes, int n_codes, int n_codebooks,
+                         int* out_n_samples) {
+    const auto& dw = ctx->dac_w;
+    const int n_cb = n_codebooks;
+    const int T = n_codes;
+
+    // Build graph
+    const size_t n_tensors = 2000;
+    const size_t mem_size = ggml_tensor_overhead() * n_tensors + ggml_graph_overhead();
+    struct ggml_init_params gp = {mem_size, nullptr, true};
+    ggml_context* ctx0 = ggml_init(gp);
+    if (!ctx0)
+        return nullptr;
+
+    // Create code input tensors
+    ggml_tensor* codes_in[9] = {};
+    for (int k = 0; k < n_cb && k < 9; k++) {
+        char name[32];
+        snprintf(name, sizeof(name), "dac_codes_%d", k);
+        codes_in[k] = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+        ggml_set_name(codes_in[k], name);
+        ggml_set_input(codes_in[k]);
+    }
+
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
+    ggml_tensor* pcm_out = core_dac::build_decode_graph(ctx0, dw, codes_in, T, gf);
+
+    // Allocate + set inputs
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "zonos_tts: DAC decode alloc failed\n");
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    // Set code inputs (codes layout: codes[k * n_codes + t])
+    for (int k = 0; k < n_cb && k < 9; k++) {
+        ggml_backend_tensor_set(codes_in[k], &codes[k * n_codes], 0, T * sizeof(int32_t));
+    }
+
+    // Compute
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "zonos_tts: DAC decode compute failed\n");
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    // Read PCM output
+    int n_pcm = (int)pcm_out->ne[0];
+    float* pcm = (float*)malloc((size_t)n_pcm * sizeof(float));
+    if (!pcm) {
+        ggml_free(ctx0);
+        return nullptr;
+    }
+    ggml_backend_tensor_get(pcm_out, pcm, 0, (size_t)n_pcm * sizeof(float));
+
+    ggml_free(ctx0);
+    *out_n_samples = n_pcm;
+
+    if (ctx->params.verbosity >= 1) {
+        float duration = (float)n_pcm / 44100.0f;
+        fprintf(stderr, "zonos_tts: DAC decoded %d codes -> %d samples (%.2f s)\n", n_codes, n_pcm, duration);
+    }
+    return pcm;
+}
+
 float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int* out_n_samples) {
     if (!ctx || !text || !out_n_samples)
         return nullptr;
@@ -1673,36 +1844,28 @@ float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int
         }
     }
 
-    // DAC decode requires the codec path to be set
-    if (ctx->dac_codec_path.empty()) {
+    // Load DAC codec lazily on first call
+    if (!ctx->dac_codec_path.empty() && !ctx->dac_loaded) {
+        if (!load_dac_codec(ctx)) {
+            fprintf(stderr, "zonos_tts: DAC codec load failed; codes dumped but no audio output\n");
+            free(codes);
+            return nullptr;
+        }
+    }
+    if (!ctx->dac_loaded) {
         fprintf(stderr, "zonos_tts: no DAC codec path set -- codes dumped, use external DAC decoder.\n");
         free(codes);
         return nullptr;
     }
 
-    // TODO: DAC decoder integration (separate GGUF).
-    // For now, output a placeholder sine wave at the expected duration so the
-    // pipeline can be tested end-to-end without the DAC decoder GGUF.
-    const int sample_rate = (int)ctx->hp.sample_rate; // 44100
-    const float duration = (float)n_codes / 86.0f;    // ~86 tokens/s
-    const int n_samples = (int)(duration * (float)sample_rate);
-
-    if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "zonos_tts: DAC decode placeholder: %d samples (%.2f s)\n", n_samples, duration);
-    }
-
-    float* pcm = (float*)malloc((size_t)n_samples * sizeof(float));
+    // DAC decode: codes -> 44.1 kHz PCM
+    int n_samples = 0;
+    float* pcm = dac_decode(ctx, codes, n_codes, n_codebooks, &n_samples);
+    free(codes);
     if (!pcm) {
-        free(codes);
         return nullptr;
     }
 
-    // Generate a simple 440 Hz sine as placeholder
-    for (int i = 0; i < n_samples; i++) {
-        pcm[i] = 0.3f * std::sin(2.0f * 3.14159265358979f * 440.0f * (float)i / (float)sample_rate);
-    }
-
-    free(codes);
     *out_n_samples = n_samples;
     return pcm;
 }
@@ -1723,6 +1886,10 @@ void zonos_tts_free(struct zonos_tts_context* ctx) {
         return;
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->dac_buf_w)
+        ggml_backend_buffer_free(ctx->dac_buf_w);
+    if (ctx->dac_ctx_w)
+        ggml_free(ctx->dac_ctx_w);
     if (ctx->kv_buf)
         ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->kv_ctx)
