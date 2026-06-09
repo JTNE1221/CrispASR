@@ -435,6 +435,58 @@ code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     "http://127.0.0.1:$PORT/v1/audio/speech")
 assert "unknown CustomVoice → 500" "500" "$code"
 
+# ─────────────────── voice-clone consent gate ──────────────────────────
+echo
+echo "=== voice-clone consent & spoken_disclaimer ==="
+
+# Voice ending in .wav without consent_attestation → 400
+out=$(curl -s -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"input":"clone test","voice":"clone.wav"}' \
+    "http://127.0.0.1:$PORT/v1/audio/speech")
+assert_contains "clone without consent → 400 consent_required" "consent_required" "$out"
+
+# With consent_attestation → should be accepted (may fail synthesis on
+# CustomVoice which doesn't support .wav cloning, but the consent gate
+# should pass — we check for non-400).
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"input":"clone test","voice":"clone.wav","consent_attestation":"I have consent"}' \
+    "http://127.0.0.1:$PORT/v1/audio/speech")
+if [ "$code" != "400" ]; then
+    echo "  ✓ clone with consent passes gate (HTTP $code)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ clone with consent still rejected as 400"
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES\n    - clone consent gate"
+fi
+
+# spoken_disclaimer=false should be accepted (JSON boolean field).
+# The server should log spoken_disclaimer=no in the CONSENT line.
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"input":"disclaimer opt-out","voice":"clone.wav","consent_attestation":"I have consent","spoken_disclaimer":false}' \
+    "http://127.0.0.1:$PORT/v1/audio/speech")
+if [ "$code" != "400" ]; then
+    echo "  ✓ spoken_disclaimer=false accepted (HTTP $code)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ spoken_disclaimer=false rejected as 400"
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES\n    - spoken_disclaimer opt-out"
+fi
+
+# Verify the audit log records spoken_disclaimer=no
+if grep -q 'spoken_disclaimer=no' "$SERVER_LOG"; then
+    echo "  ✓ audit log records spoken_disclaimer=no"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ audit log missing spoken_disclaimer=no"
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES\n    - audit log spoken_disclaimer"
+fi
+
 # ─────────────────────────── 401 path ────────────────────────────────────
 # Re-running the server with --api-key is heavy; skip unless explicitly
 # enabled via TEST_AUTH=1. Even so, leave a hook here for completeness.

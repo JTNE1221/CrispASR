@@ -5508,7 +5508,9 @@ CA_EXPORT int crispasr_session_is_voice_design(crispasr_session* s) {
     return 0;
 }
 
-CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* text, int* out_n_samples) {
+// Raw synthesis — no watermark. Used internally; the public API wraps this
+// and applies the watermark automatically.
+static float* crispasr_session_synthesize_raw_impl(crispasr_session* s, const char* text, int* out_n_samples) {
     if (out_n_samples)
         *out_n_samples = 0;
     if (!s || !text)
@@ -5797,6 +5799,25 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
     }
 #endif
     return nullptr;
+}
+
+// Synthesize without watermark — for callers that need DSP (speed change,
+// mixing, concatenation) before embedding the watermark themselves via
+// crispasr_watermark_embed(). Most callers should use
+// crispasr_session_synthesize() instead, which auto-watermarks.
+CA_EXPORT float* crispasr_session_synthesize_raw(crispasr_session* s, const char* text, int* out_n_samples) {
+    return crispasr_session_synthesize_raw_impl(s, text, out_n_samples);
+}
+
+// Synthesize + auto-watermark. The default API — all TTS output is
+// watermarked for EU AI Act provenance compliance. Use synthesize_raw()
+// only when you need to post-process PCM before watermarking.
+CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* text, int* out_n_samples) {
+    float* pcm = crispasr_session_synthesize_raw_impl(s, text, out_n_samples);
+    if (pcm && out_n_samples && *out_n_samples > 0) {
+        crispasr_watermark_embed(pcm, *out_n_samples, 0.005f);
+    }
+    return pcm;
 }
 
 CA_EXPORT void crispasr_pcm_free(float* pcm) {

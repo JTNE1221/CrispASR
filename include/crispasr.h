@@ -783,7 +783,10 @@ CRISPASR_API int crispasr_lcs_dedup_prefix_count(const int32_t* prev_tail_tokens
 
 // ─── AI-generated audio watermark ─────────────────────────────────────
 //
-// All TTS output is automatically watermarked. Two modes:
+// crispasr_session_synthesize() auto-embeds the watermark. Use
+// crispasr_session_synthesize_raw() + crispasr_watermark_embed() only
+// when you need DSP (speed change, mixing) between synthesis and
+// watermarking. Two watermark modes:
 //
 // 1. **Built-in spread-spectrum** (default): frequency-domain pattern,
 //    survives re-encoding and moderate compression.
