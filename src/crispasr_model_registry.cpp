@@ -748,13 +748,15 @@ constexpr Entry k_registry[] = {
      "~2 MB", nullptr, nullptr},
     // Zonos v0.1 — Zyphra 500M-param transformer TTS with emotion/pitch/rate
     // control, speaker cloning, 44.1 kHz via DAC codec. Apache 2.0.
-    // Needs the DAC 44.1 kHz decoder (shared with Dia backend).
-    {"zonos", "zonos-v0.1-transformer-q4_k.gguf",
-     "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-q4_k.gguf",
-     "~872 MB",
-     "dac-44khz.gguf",
-     "https://huggingface.co/cstr/dia-1.6b-GGUF/resolve/main/dac-44khz.gguf",
-     "~80 MB"},
+    // Q4_K is below quality floor (EOS logit inflated by quant noise → synthesis
+    // terminates at step 0). Default to F16 until Q8_0 is released.
+    // Companion: DAC 44.1 kHz F16 decoder from its own GGUF repo (MIT).
+    {"zonos", "zonos-v0.1-transformer-f16.gguf",
+     "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-f16.gguf",
+     "~3.0 GB",
+     "dac-44khz-f16.gguf",
+     "https://huggingface.co/cstr/dac-44khz-GGUF/resolve/main/dac-44khz-f16.gguf",
+     "~104 MB"},
 };
 
 // Multi-companion extras. When a backend needs >1 auxiliary file the

@@ -89,6 +89,22 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     }
     const bool is_firered = (arch.find("firered") != std::string::npos);
     const bool is_ecapa = (arch.find("ecapa") != std::string::npos);
+    // DAC-44kHz: pure convolutional audio codec (Descript Audio Codec).
+    // ALL weight tensors store the kernel_size as ne[0] (ggml conv layout:
+    // [K, IC, OC] where K ≤ 16) and the codebook embeddings have ne[0]=8.
+    // Neither satisfies the minimum block-size requirement (Q8_0: 32,
+    // Q4_K: 256). This model cannot be compressed via block quantization.
+    const bool is_dac = (arch.find("dac") != std::string::npos);
+    if (is_dac) {
+        fprintf(stderr,
+                "%s: WARNING — architecture '%s' is a convolutional audio codec.\n"
+                "  All weight tensors use kernel-size as ne[0] (≤16 elements), which\n"
+                "  is below the minimum block size for any GGUF quant type (Q8_0: 32,\n"
+                "  Q4_K: 256). Zero tensors will be quantized; the output file will be\n"
+                "  the same size as the input. This model cannot be meaningfully\n"
+                "  compressed via GGUF block quantization.\n",
+                __func__, arch.c_str());
+    }
     const bool is_chatterbox =
         (arch.find("chatterbox") != std::string::npos || arch.find("kartoffelbox") != std::string::npos);
     // CosyVoice3: the three sub-models live in separate GGUFs but share the
@@ -368,6 +384,7 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
 
     std::vector<float> f32_data;
     std::vector<uint8_t> q_data;
+    int n_quantized = 0;
 
     for (int i = 0; i < n_tensors; i++) {
         const char* name = gguf_get_tensor_name(ctx_in, i);
@@ -392,6 +409,7 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
 #endif
 
         if (quantize) {
+            n_quantized++;
             printf("quantizing to %s... ", ggml_type_name(qtype_used));
 
             const int64_t nelements = ggml_nelements(t);
@@ -459,6 +477,17 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
                 fputc(0, fout);
             printf("done\n");
         }
+    }
+
+    if (n_quantized == 0) {
+        fprintf(stderr,
+                "%s: WARNING — 0 of %d tensors were quantized. The output file is the\n"
+                "  same size as the input. Check that the architecture supports block\n"
+                "  quantization (ne[0] must be ≥32 for Q8_0, ≥256 for Q4_K) and that\n"
+                "  weight tensors are 2-D (or a supported conv architecture).\n",
+                __func__, n_tensors);
+    } else {
+        printf("%s: quantized %d / %d tensors\n", __func__, n_quantized, n_tensors);
     }
 
     // Rewrite metadata header. Since tensor types were set correctly in

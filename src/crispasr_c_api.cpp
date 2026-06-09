@@ -2003,6 +2003,21 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
             delete s;
             return nullptr;
         }
+        // Auto-discover the DAC codec GGUF as a sibling of the transformer file.
+        {
+            std::string mp = model_path ? model_path : "";
+            auto sep = mp.find_last_of("/\\");
+            std::string dir = (sep == std::string::npos) ? std::string(".") : mp.substr(0, sep);
+            for (const char* name : {"dac-44khz-f16.gguf", "dac-44khz.gguf", "dac_44khz.gguf"}) {
+                std::string cp = dir + "/" + name;
+                FILE* f = fopen(cp.c_str(), "rb");
+                if (f) {
+                    fclose(f);
+                    zonos_tts_set_codec_path(s->zonos_ctx, cp.c_str());
+                    break;
+                }
+            }
+        }
         return s;
     }
 #endif
@@ -2259,7 +2274,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
             std::string mp = model_path ? model_path : "";
             auto sep = mp.find_last_of("/\\");
             std::string dir = (sep == std::string::npos) ? std::string(".") : mp.substr(0, sep);
-            for (const char* name : {"dac-44khz.gguf", "dac_44khz.gguf", "dia-dac-44khz.gguf"}) {
+            for (const char* name : {"dac-44khz-f16.gguf", "dac-44khz.gguf", "dac_44khz.gguf", "dia-dac-44khz.gguf"}) {
                 std::string cp = dir + "/" + name;
                 FILE* f = fopen(cp.c_str(), "rb");
                 if (f) {
