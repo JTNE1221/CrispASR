@@ -2368,9 +2368,28 @@ float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int
         return nullptr;
     *out_n_samples = 0;
 
-    // Generate codes
+    // Generate codes. Retry up to 3× if EOS is sampled at step 0 — this
+    // manifests as zero output frames and is the known failure mode for
+    // Q4_K quantization (EOS logit inflated by ~0.9 units at the first
+    // AR step). Each retry bumps rng_state with a prime offset so it
+    // draws a different token from the same distribution. The original
+    // RNG state is restored after the loop.
     int n_codes = 0, n_codebooks = 0;
+    const uint64_t orig_rng = ctx->rng_state;
     int32_t* codes = zonos_tts_synthesize_codes(ctx, text, &n_codes, &n_codebooks);
+    for (int retry = 1; retry <= 3 && (!codes || n_codes <= 0); retry++) {
+        if (codes) {
+            free(codes);
+            codes = nullptr;
+        }
+        n_codes = 0;
+        n_codebooks = 0;
+        ctx->rng_state = orig_rng + (uint64_t)retry * 7919ULL;
+        if (ctx->params.verbosity >= 1)
+            fprintf(stderr, "zonos_tts: step-0 EOS retry %d (rng bump)\n", retry);
+        codes = zonos_tts_synthesize_codes(ctx, text, &n_codes, &n_codebooks);
+    }
+    ctx->rng_state = orig_rng;
     if (!codes || n_codes <= 0) {
         return nullptr;
     }

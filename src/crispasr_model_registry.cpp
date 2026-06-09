@@ -748,12 +748,13 @@ constexpr Entry k_registry[] = {
      "~2 MB", nullptr, nullptr},
     // Zonos v0.1 — Zyphra 500M-param transformer TTS with emotion/pitch/rate
     // control, speaker cloning, 44.1 kHz via DAC codec. Apache 2.0.
-    // Q4_K is below quality floor (EOS logit inflated by quant noise → synthesis
-    // terminates at step 0). Default to F16 until Q8_0 is released.
+    // Selective Q4_K: heads.*/embeddings.*/prefix_conditioner.* kept at F16
+    // to prevent EOS-logit inflation; backbone projections quantized.
+    // Runtime includes a 3-retry guard for residual step-0 EOS failures.
     // Companion: DAC 44.1 kHz F16 decoder from its own GGUF repo (MIT).
-    {"zonos", "zonos-v0.1-transformer-f16.gguf",
-     "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-f16.gguf",
-     "~3.0 GB",
+    {"zonos", "zonos-v0.1-transformer-q8_0.gguf",
+     "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-q8_0.gguf",
+     "~1.6 GB",
      "dac-44khz-f16.gguf",
      "https://huggingface.co/cstr/dac-44khz-GGUF/resolve/main/dac-44khz-f16.gguf",
      "~104 MB"},

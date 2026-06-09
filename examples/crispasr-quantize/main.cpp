@@ -233,6 +233,17 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     // Keep embeddings, norms, and DAC codec at original precision.
     const bool is_dia = (arch.find("dia") != std::string::npos);
 
+    // Zonos TTS: 26-layer GQA transformer + 9-codebook DAC heads.
+    // Uniformly quantizing all tensors inflates the EOS logit at prefill
+    // by ~0.9 units (−1.125 → −0.21 in Q4_K), pushing P(EOS) from ~38 %
+    // to ~60 %+ and causing every seed to emit EOS at step 0. The error
+    // accumulates from two sources: backbone hidden-state drift AND
+    // per-codebook head weight noise. Keeping the output heads + input
+    // embeddings + prefix-conditioner at F16 adds only ~82 MB overhead
+    // (36 + 36 + 10) but eliminates the EOS boundary instability.
+    // Only the 210 backbone projection tensors are quantized.
+    const bool is_zonos = (arch.find("zonos") != std::string::npos);
+
     // Bark TTS: 3 GPT-2 sub-models + EnCodec decoder.
     // Embeddings (token_embd, pos_embd), output heads, and the entire
     // EnCodec decoder are read via CPU tensor_get_row_f32 / tensor_get_all_f32
@@ -295,6 +306,8 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
                sname.find("talker.codec_bridge") == 0)) &&
             !(is_parler && sname.find("dac.") == 0) &&
             !(is_dia && (sname.find("embedding") != std::string::npos || sname.find("audio_encoder") == 0)) &&
+            !(is_zonos && (sname.find("heads.") == 0 || sname.find("embeddings.") == 0 ||
+                           sname.find("prefix_conditioner.") == 0)) &&
             !(is_bark &&
               (sname.find("token_embd") != std::string::npos || sname.find("pos_embd") != std::string::npos ||
                (sname.find("output") != std::string::npos && sname.find("attn_output") == std::string::npos) ||
