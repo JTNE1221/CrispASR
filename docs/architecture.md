@@ -389,11 +389,16 @@ positions). Each step samples one token per codebook via min-p=0.1 +
 temperature=1.0 + repetition penalty (factor=3.0, window=2). EOS is
 only predicted on codebook 0; other codebooks have EOS masked to −∞.
 
-**Quantisation floor**: Q4_K inflates the EOS logit at prefill by ~0.9
-units (from −1.125 to −0.21), making P(EOS) jump from ~38 % to ~60 %
-and causing synthesis to terminate with 0 audio frames on every seed.
-Use **Q8_0** (1.6 GB, default via `-m auto`) or F16 (3.0 GB). Q4_K is
-below quality floor.
+**Quantisation**: selective quantization is required. Uniform Q4_K
+inflates the EOS logit at AR step 0 by ~0.9 units (−1.125 → +0.21),
+making P(EOS) > 60 % and causing synthesis to fail on every seed.
+The `crispasr-quantize` tool keeps `heads.*`, `embeddings.*`, and
+`prefix_conditioner.*` at F16 while quantizing the 210 backbone
+projections — reducing the model to 931 MB (vs 872 MB for full-Q4_K).
+A 3-retry guard in the runtime handles residual step-0 failures
+(~25 % of seeds, 100 % resolved within 2 retries). Default via
+`-m auto` is **Q8_0** (1.6 GB); Q4_K (931 MB) is safe with the
+above caveats; F16 (3.0 GB) is the reference.
 
 **DAC codec**: the companion `dac-44khz-f16.gguf` (104 MB) is a purely
 convolutional architecture — all weight tensors have kernel-size ≤ 16 as
