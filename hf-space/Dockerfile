@@ -21,8 +21,9 @@ RUN git clone --depth 1 "${CRISPASR_REPO}" /src/CrispASR && \
   git -C /src/CrispASR fetch --depth 1 origin "${CRISPASR_REF}" && \
   git -C /src/CrispASR checkout --detach FETCH_HEAD
 WORKDIR /src/CrispASR
-ARG CRISPASR_BUILD_JOBS
-RUN jobs="${CRISPASR_BUILD_JOBS:-$(nproc)}" && \
+# Limit parallelism to 2 — HF free-tier build machines OOM at $(nproc).
+ARG CRISPASR_BUILD_JOBS=2
+RUN jobs="${CRISPASR_BUILD_JOBS}" && \
   cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF && \
   cmake --build build -j"${jobs}" --target crispasr-cli crispasr-lid
 
