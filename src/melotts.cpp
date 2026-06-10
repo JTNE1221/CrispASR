@@ -851,6 +851,7 @@ struct melotts_weights {
     ggml_tensor *dec_cond_w, *dec_cond_b;
     struct ups_stage {
         ggml_tensor *w, *b;
+        ggml_tensor* w_perm = nullptr;
     };
     std::vector<ups_stage> dec_ups;
     std::vector<melotts_resblock> dec_resblocks;
@@ -873,6 +874,9 @@ struct melotts_context {
 
     ggml_context* w_ctx = nullptr;
     ggml_backend_buffer_t w_buf = nullptr;
+
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 
     float noise_scale, length_scale, noise_w, sdp_ratio;
     int speaker_id;
@@ -1994,7 +1998,11 @@ static bool hifigan_decode(melotts_context* ctx, const std::vector<float>& z, co
         int kernel = (int)hp.upsample_kernels[us];
         int crop_each = (kernel - stride) / 2;
 
-        x = core_convt::convt1d_crop(gc, x, w.dec_ups[us].w, w.dec_ups[us].b, stride, crop_each, crop_each);
+        if (w.dec_ups[us].w_perm) {
+            x = core_convt::convt1d_decomp(gc, x, w.dec_ups[us].w_perm, w.dec_ups[us].b, stride, kernel, crop_each, crop_each);
+        } else {
+            x = core_convt::convt1d_crop(gc, x, w.dec_ups[us].w, w.dec_ups[us].b, stride, crop_each, crop_each);
+        }
 
         // MRF: average of resblocks
         ggml_tensor* sum_rb = nullptr;
@@ -2589,6 +2597,19 @@ struct melotts_context* melotts_init_from_file(const char* path_model, struct me
         return nullptr;
     }
 
+    // Permute ConvTranspose1d weights for decomposed path
+    {
+        const int n = (int)ctx->hp.n_upsample_stages;
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        for (int i = 0; i < n; i++) {
+            srcs[i] = ctx->w.dec_ups[i].w;
+            dsts[i] = &ctx->w.dec_ups[i].w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
+    }
+
     // Create scheduler
     {
         ggml_backend_t backends[2];
@@ -2641,6 +2662,10 @@ void melotts_free(struct melotts_context* ctx) {
         bert_encoder_free(ctx->bert_ctx);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->w_buf)
         ggml_backend_buffer_free(ctx->w_buf);
     if (ctx->w_ctx)

@@ -152,6 +152,7 @@ struct ov2_hifigan {
     struct upsample_stage {
         ggml_tensor* w;
         ggml_tensor* b;
+        ggml_tensor* w_perm = nullptr;
     };
     std::vector<upsample_stage> ups;
     struct resblock {
@@ -193,6 +194,9 @@ struct openvoice2_context {
     // Owned by core_gguf::WeightLoad
     ggml_context* w_ctx = nullptr;
     ggml_backend_buffer_t w_buf = nullptr;
+
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 
     int verbosity;
     float tau;
@@ -431,6 +435,19 @@ extern "C" struct openvoice2_context* openvoice2_init_from_file(const char* path
         std::string p = "dec.ups." + std::to_string(i);
         dec.ups[i].w = require_tensor(tensors, p + ".weight");
         dec.ups[i].b = require_tensor(tensors, p + ".bias");
+    }
+
+    // Permute ConvTranspose1d weights for decomposed path
+    {
+        const int n = hp.n_upsample_stages;
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        for (int i = 0; i < n; i++) {
+            srcs[i] = dec.ups[i].w;
+            dsts[i] = &dec.ups[i].w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
     }
 
     dec.resblocks.resize(hp.n_resblocks);
@@ -1019,7 +1036,11 @@ static bool hifigan_decode_cpu(openvoice2_context* ctx, const std::vector<float>
         int kernel = hp.upsample_kernel_sizes[us];
         int crop_each = (kernel - stride) / 2;
 
-        x = core_convt::convt1d_crop(gc, x, dec.ups[us].w, dec.ups[us].b, stride, crop_each, crop_each);
+        if (dec.ups[us].w_perm) {
+            x = core_convt::convt1d_decomp(gc, x, dec.ups[us].w_perm, dec.ups[us].b, stride, kernel, crop_each, crop_each);
+        } else {
+            x = core_convt::convt1d_crop(gc, x, dec.ups[us].w, dec.ups[us].b, stride, crop_each, crop_each);
+        }
 
         // MRF: average of resblocks
         ggml_tensor* sum_rb = nullptr;
@@ -1268,6 +1289,10 @@ extern "C" void openvoice2_free(struct openvoice2_context* ctx) {
         return;
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->w_buf)
         ggml_backend_buffer_free(ctx->w_buf);
     if (ctx->w_ctx)

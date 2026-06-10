@@ -142,6 +142,8 @@ struct dia_model {
     // DAC codec weight context (separate GGUF)
     ggml_context* ctx_dac = nullptr;
     ggml_backend_buffer_t buf_dac = nullptr;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 };
 
 // -----------------------------------------------------------------------
@@ -967,6 +969,16 @@ int dia_tts_set_codec_path(struct dia_tts_context* ctx, const char* path) {
     m.buf_dac = wl.buf;
     m.has_dac = true;
 
+    // Permute ConvTranspose1d weights for decomposed path
+    {
+        const int n = 4; // DAC has 4 decoder blocks
+        ggml_tensor* srcs[4] = {m.dac.blocks[0].up_w, m.dac.blocks[1].up_w, m.dac.blocks[2].up_w, m.dac.blocks[3].up_w};
+        ggml_tensor** dsts[4] = {&m.dac.blocks[0].up_w_perm, &m.dac.blocks[1].up_w_perm,
+                                 &m.dac.blocks[2].up_w_perm, &m.dac.blocks[3].up_w_perm};
+        core_convt::permute_convt1d_weights_batch(srcs, dsts, n,
+                                                  backend, &m.ctx_perm, &m.buf_perm);
+    }
+
     if (verbosity >= 1) {
         fprintf(stderr, "dia_tts: DAC codec loaded from '%s'\n", path);
     }
@@ -1005,8 +1017,13 @@ static ggml_tensor* dac_residual_unit(ggml_context* ctx, ggml_tensor* x, const c
 static ggml_tensor* dac_decoder_block(ggml_context* ctx, ggml_tensor* x, const core_dac::DacDecoderBlock& blk,
                                       int stride) {
     x = core_act::snake_alpha(ctx, x, blk.snake_alpha);
-    x = core_convt::convt1d_crop(ctx, x, blk.up_w, blk.up_b, stride,
-                                 /*crop_left*/ stride / 2, /*crop_right*/ stride / 2);
+    if (blk.up_w_perm) {
+        const int K = (int)blk.up_w->ne[0];
+        x = core_convt::convt1d_decomp(ctx, x, blk.up_w_perm, blk.up_b, stride, K, stride / 2, stride / 2);
+    } else {
+        x = core_convt::convt1d_crop(ctx, x, blk.up_w, blk.up_b, stride,
+                                     /*crop_left*/ stride / 2, /*crop_right*/ stride / 2);
+    }
     static const int dilations[3] = {1, 3, 9};
     for (int r = 0; r < 3; r++) {
         x = dac_residual_unit(ctx, x, blk.res[r], dilations[r]);
@@ -2065,6 +2082,12 @@ void dia_tts_free(struct dia_tts_context* ctx) {
     }
     if (ctx->model.ctx_w) {
         ggml_free(ctx->model.ctx_w);
+    }
+    if (ctx->model.buf_perm) {
+        ggml_backend_buffer_free(ctx->model.buf_perm);
+    }
+    if (ctx->model.ctx_perm) {
+        ggml_free(ctx->model.ctx_perm);
     }
     if (ctx->model.buf_dac) {
         ggml_backend_buffer_free(ctx->model.buf_dac);

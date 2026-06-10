@@ -90,10 +90,11 @@ struct snac_res_unit {
 };
 
 struct snac_block {
-    ggml_tensor* alpha = nullptr;   // (input_dim,) F32
-    ggml_tensor* up_w = nullptr;    // (K=2s, output_dim, input_dim) F16
-    ggml_tensor* up_b = nullptr;    // (output_dim,) F32
-    ggml_tensor* noise_w = nullptr; // (1, output_dim, output_dim) F16 — bound but unused
+    ggml_tensor* alpha = nullptr;      // (input_dim,) F32
+    ggml_tensor* up_w = nullptr;       // (K=2s, output_dim, input_dim) F16
+    ggml_tensor* up_w_perm = nullptr;  // pre-permuted [IC, K*OC] for decomposed path
+    ggml_tensor* up_b = nullptr;       // (output_dim,) F32
+    ggml_tensor* noise_w = nullptr;    // (1, output_dim, output_dim) F16 — bound but unused
     std::array<snac_res_unit, 3> res;
 };
 
@@ -138,7 +139,16 @@ struct snac_decoder_ctx {
     // hold a graph for T_super up to ~16 (orpheus streaming windows are 4).
     std::vector<uint8_t> compute_meta;
 
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
+
     ~snac_decoder_ctx() {
+        if (buf_perm) {
+            ggml_backend_buffer_free(buf_perm);
+        }
+        if (ctx_perm) {
+            ggml_free(ctx_perm);
+        }
         if (ctx_w) {
             ggml_free(ctx_w);
         }
@@ -339,8 +349,12 @@ static ggml_tensor* conv1d_k(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, 
 // PyTorch ConvTranspose1d wrapper (groups=1) with symmetric cropping —
 // thin wrapper around core_convt::convt1d_crop. For SNAC strides
 // [8,8,4,2]: k = 2s, p = s/2, op = 0 → T_out = T_in · s.
-static inline ggml_tensor* convt1d_pad(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride,
-                                       int pad) {
+static inline ggml_tensor* convt1d_pad(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* w_perm,
+                                       ggml_tensor* b, int stride, int pad) {
+    if (w_perm) {
+        const int K = (int)w->ne[0];
+        return core_convt::convt1d_decomp(ctx, x, w_perm, b, stride, K, pad, pad);
+    }
     return core_convt::convt1d_crop(ctx, x, w, b, stride, /*crop_left=*/pad, /*crop_right=*/pad);
 }
 
@@ -393,7 +407,7 @@ static ggml_tensor* residual_unit(ggml_context* ctx, ggml_tensor* x, const snac_
 static ggml_tensor* decoder_block(ggml_context* ctx, ggml_tensor* x, const snac_block& blk, int stride,
                                   const std::vector<uint32_t>& dilations) {
     x = snake1d(ctx, x, blk.alpha);
-    x = convt1d_pad(ctx, x, blk.up_w, blk.up_b, stride, /*pad*/ stride / 2);
+    x = convt1d_pad(ctx, x, blk.up_w, blk.up_w_perm, blk.up_b, stride, /*pad*/ stride / 2);
     // NoiseBlock: training-only; at inference we treat it as identity.
     // (Python reference monkey-patches to match. blk.noise_w stays bound
     // for round-trip safety but is not on the graph.)
@@ -641,6 +655,19 @@ extern "C" struct snac_decoder_ctx* snac_decoder_init_from_file(const char* path
         fprintf(stderr, "orpheus_snac: tensor binding failed\n");
         delete c;
         return nullptr;
+    }
+
+    // Permute ConvTranspose1d weights for decomposed path
+    {
+        const int n = (int)c->hp.decoder_strides.size();
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        for (int i = 0; i < n && i < 4; i++) {
+            srcs[i] = c->blocks[i].up_w;
+            dsts[i] = &c->blocks[i].up_w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  c->backend, &c->ctx_perm, &c->buf_perm);
     }
 
     if (params.verbosity >= 1) {

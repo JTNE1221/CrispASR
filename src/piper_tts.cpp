@@ -526,6 +526,7 @@ struct piper_weights {
     struct ups_stage {
         ggml_tensor* w;
         ggml_tensor* b;
+        ggml_tensor* w_perm = nullptr;
     };
     std::vector<ups_stage> dec_ups;
     std::vector<piper_resblock> dec_resblocks;
@@ -549,6 +550,8 @@ struct piper_tts_context {
     // Weight storage
     ggml_context* w_ctx = nullptr;
     ggml_backend_buffer_t w_buf = nullptr;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 
     // Runtime params (mutable)
     float noise_scale;
@@ -1778,7 +1781,11 @@ static bool hifigan_decode(piper_tts_context* pctx,
         int kernel = (int)hp.upsample_kernels[us];
         int crop_each = (kernel - stride) / 2;
 
-        x = core_convt::convt1d_crop(gc, x, w.dec_ups[us].w, w.dec_ups[us].b, stride, crop_each, crop_each);
+        if (w.dec_ups[us].w_perm) {
+            x = core_convt::convt1d_decomp(gc, x, w.dec_ups[us].w_perm, w.dec_ups[us].b, stride, kernel, crop_each, crop_each);
+        } else {
+            x = core_convt::convt1d_crop(gc, x, w.dec_ups[us].w, w.dec_ups[us].b, stride, crop_each, crop_each);
+        }
 
         // MRF (Multi-Receptive-Field Fusion): average of resblocks
         ggml_tensor* sum_rb = nullptr;
@@ -2143,6 +2150,19 @@ struct piper_tts_context* piper_tts_init_from_file(const char* path_model, struc
         return nullptr;
     }
 
+    // Permute ConvTranspose1d weights for decomposed path
+    {
+        const int n = (int)ctx->hp.n_upsample_stages;
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        for (int i = 0; i < n; i++) {
+            srcs[i] = ctx->w.dec_ups[i].w;
+            dsts[i] = &ctx->w.dec_ups[i].w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
+    }
+
     // Create backend scheduler
     {
         ggml_backend_t backends[2];
@@ -2176,6 +2196,10 @@ void piper_tts_free(struct piper_tts_context* ctx) {
         return;
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->w_buf)
         ggml_backend_buffer_free(ctx->w_buf);
     if (ctx->w_ctx)
