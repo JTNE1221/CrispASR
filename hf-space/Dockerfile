@@ -24,7 +24,7 @@ RUN mkdir -p /space/samples && \
   curl -sL "${CRISPASR_REPO}/raw/main/samples/jfk.wav" -o /space/samples/jfk.wav 2>/dev/null || true
 
 COPY requirements.txt /space/requirements.txt
-RUN pip3 install --no-cache-dir -r /space/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /space/requirements.txt
 
 COPY app.py start.sh /space/
 RUN chmod +x /space/start.sh && \
