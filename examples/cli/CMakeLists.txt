@@ -193,6 +193,7 @@ target_link_libraries(crispasr-diff PRIVATE
     cosyvoice3_tts
     csm-tts
     parler-tts
+    mini-omni2
     crispasr-diff-lib
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}

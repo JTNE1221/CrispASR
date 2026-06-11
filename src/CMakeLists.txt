@@ -742,6 +742,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# mini-omni2 — gpt-omni/mini-omni2 (Whisper-small + Qwen2-0.5B)
+# ---------------------------------------------------------------------------
+add_library(mini-omni2 STATIC mini_omni2.h mini_omni2.cpp)
+set_target_properties(mini-omni2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mini-omni2 PUBLIC .)
+target_compile_features   (mini-omni2 PUBLIC cxx_std_17)
+target_link_libraries     (mini-omni2 PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(mini-omni2 PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # kyutai-stt — Kyutai STT (stt-1b-en_fr, stt-2.6b-en)
 # ---------------------------------------------------------------------------
 add_library(kyutai-stt STATIC kyutai_stt.h kyutai_stt.cpp)
@@ -1543,6 +1555,9 @@ if (TARGET ctc-align)
 endif()
 if (TARGET glm-asr)
     target_link_libraries(crispasr-lib PUBLIC glm-asr)
+endif()
+if (TARGET mini-omni2)
+    target_link_libraries(crispasr-lib PUBLIC mini-omni2)
 endif()
 if (TARGET kyutai-stt)
     target_link_libraries(crispasr-lib PUBLIC kyutai-stt)
