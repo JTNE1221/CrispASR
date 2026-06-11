@@ -176,8 +176,9 @@ struct lfm2_audio_context {
     bool use_gpu = false;
     ggml_backend_t backend = nullptr;
 
-    // Compute buffer
-    std::vector<uint8_t> compute_meta;
+    // Compute buffers: large for prefill, small for decode steps
+    std::vector<uint8_t> compute_meta; // 2 GB for prefill (T >> 1)
+    std::vector<uint8_t> decode_meta;  // 64 MB for decode (T=1)
 
     // Staged callback (set by run_lfm_staged)
     lfm2_audio_stage_cb lfm_stage_cb = nullptr;
@@ -537,7 +538,8 @@ lfm2_audio_context* lfm2_audio_init_from_file(const char* path_model, lfm2_audio
     ctx->verbosity = params.verbosity;
     ctx->use_gpu = params.use_gpu;
     ctx->backend = ggml_backend_cpu_init();
-    ctx->compute_meta.resize(2ULL * 1024 * 1024 * 1024); // 2 GB scratch
+    ctx->compute_meta.resize(2ULL * 1024 * 1024 * 1024); // 2 GB scratch for prefill
+    ctx->decode_meta.resize(64ULL * 1024 * 1024);        // 64 MB scratch for T=1 decode
 
     ctx->model_path = path_model;
     if (!lfm2_audio_load(ctx->model, path_model, ctx->backend, params.verbosity)) {
@@ -985,7 +987,9 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         const int n_past = ctx->kv_n_past;
         const float norm_eps = 1e-5f;
 
-        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
+        // Use small buffer for single-token decode, large for prefill
+        auto& meta = (T_in == 1) ? ctx->decode_meta : ctx->compute_meta;
+        ggml_init_params ip = {meta.size(), meta.data(), false};
         ggml_context* ctx0 = ggml_init(ip);
         if (!ctx0)
             return {};
@@ -1709,7 +1713,7 @@ static std::vector<int32_t> lfm2_depthformer_sample_frame(lfm2_audio_context* ct
         // Run 6-layer transformer on this single token
         // (no KV cache across codebooks — each frame is independent,
         //  but within a frame the 8 codebook steps share a cache)
-        const size_t step_mem = 64 * 1024 * 1024;
+        const size_t step_mem = 8 * 1024 * 1024;
         std::vector<uint8_t> step_buf(step_mem);
         ggml_init_params sip = {step_mem, step_buf.data(), false};
         ggml_context* sc = ggml_init(sip);
@@ -2408,7 +2412,7 @@ float* lfm2_audio_synthesize(lfm2_audio_context* ctx, const char* text, const ch
 
     // Single-token backbone step with KV+conv cache (same as ASR decode)
     auto step1 = [&](const float* emb) -> std::pair<std::vector<float>, std::vector<float>> {
-        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
+        ggml_init_params ip = {ctx->decode_meta.size(), ctx->decode_meta.data(), false};
         ggml_context* c = ggml_init(ip);
         if (!c)
             return {};
@@ -2779,7 +2783,7 @@ float* lfm2_audio_speech_to_speech(lfm2_audio_context* ctx, const float* in_samp
 
         // Reuse the same backbone step1 lambda from synthesize — duplicate the pattern
         auto step1 = [&](const float* emb) -> std::pair<std::vector<float>, std::vector<float>> {
-            ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
+            ggml_init_params ip = {ctx->decode_meta.size(), ctx->decode_meta.data(), false};
             ggml_context* c = ggml_init(ip);
             if (!c)
                 return {};
