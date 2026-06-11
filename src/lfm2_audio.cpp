@@ -987,35 +987,31 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         const int n_past = ctx->kv_n_past;
         const float norm_eps = 1e-5f;
 
-        // Use small buffer for single-token decode, large for prefill
-        auto& meta = (T_in == 1) ? ctx->decode_meta : ctx->compute_meta;
-        ggml_init_params ip = {meta.size(), meta.data(), false};
+        // Use gallocr: build graph with no_alloc, then allocate exactly what's needed.
+        // This avoids the 2 GB fixed buffer and reduces memory pressure dramatically.
+        const size_t n_tensors_est = 2048;
+        ggml_init_params ip = {n_tensors_est * ggml_tensor_overhead() + ggml_graph_overhead_custom(65536, false),
+                               nullptr, true};
         ggml_context* ctx0 = ggml_init(ip);
         if (!ctx0)
             return {};
 
         ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_in);
-        memcpy(x->data, embeddings, sizeof(float) * T_in * hidden);
+        ggml_set_name(x, "inp_emb");
+        ggml_set_input(x);
 
-        // Positions: [n_past, n_past+1, ..., n_past+T_in-1]
+        // Positions
         ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_in);
-        {
-            int32_t* pos = (int32_t*)positions->data;
-            for (int i = 0; i < T_in; i++)
-                pos[i] = n_past + i;
-        }
+        ggml_set_name(positions, "inp_pos");
+        ggml_set_input(positions);
 
         // Causal mask for prefill (T_in > 1); nullptr for single-token decode
         ggml_tensor* causal_mask = nullptr;
         if (T_in > 1) {
             const int Lk = n_past + T_in;
             causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T_in);
-            ggml_fp16_t* m = (ggml_fp16_t*)causal_mask->data;
-            const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
-            const ggml_fp16_t neginf = ggml_fp32_to_fp16(-INFINITY);
-            for (int q = 0; q < T_in; q++)
-                for (int k = 0; k < Lk; k++)
-                    m[q * Lk + k] = (k <= n_past + q) ? zero : neginf;
+            ggml_set_name(causal_mask, "inp_mask");
+            ggml_set_input(causal_mask);
         }
 
         ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
@@ -1105,7 +1101,12 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
 
                     // 2. Assemble full Bx sequence: [cached | new] = (hidden, K)
                     ggml_tensor* cached = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, K - 1);
-                    memcpy(cached->data, ctx->conv_states[conv_idx].data(), sizeof(float) * hidden * (K - 1));
+                    {
+                        char cn[32];
+                        snprintf(cn, sizeof(cn), "conv_cache_%d", conv_idx);
+                        ggml_set_name(cached, cn);
+                        ggml_set_input(cached);
+                    }
                     ggml_tensor* Bx_col = ggml_reshape_2d(ctx0, Bx_new, hidden, 1);
                     ggml_tensor* Bx_full = ggml_concat(ctx0, cached, Bx_col, 1); // (hidden, K)
 
@@ -1161,11 +1162,53 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         ggml_set_name(out, "logits");
 
         ggml_build_forward_expand(gf, out);
-        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
+
+        // Allocate graph via gallocr — only allocates what's needed
+        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+        if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+            ggml_gallocr_free(galloc);
+            ggml_free(ctx0);
+            return {};
+        }
+
+        // Set inputs via backend API (since no_alloc=true, ->data is on the backend)
+        ggml_backend_tensor_set(x, embeddings, 0, sizeof(float) * T_in * hidden);
+        {
+            std::vector<int32_t> pos_data(T_in);
+            for (int i = 0; i < T_in; i++)
+                pos_data[i] = n_past + i;
+            ggml_backend_tensor_set(positions, pos_data.data(), 0, T_in * sizeof(int32_t));
+        }
+        if (causal_mask) {
+            const int Lk = n_past + T_in;
+            std::vector<ggml_fp16_t> mask_data(Lk * T_in);
+            ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), neginf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < T_in; q++)
+                for (int k = 0; k < Lk; k++)
+                    mask_data[q * Lk + k] = (k <= n_past + q) ? zero : neginf;
+            ggml_backend_tensor_set(causal_mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        }
+        // Set conv state inputs
+        if (T_in == 1) {
+            const int K = (int)model.hparams.lfm_conv_kernel;
+            int ci = 0;
+            for (uint32_t il = 0; il < model.hparams.lfm_n_layers; il++) {
+                if (model.lfm_layers[il].is_attention)
+                    continue;
+                char cn[32];
+                snprintf(cn, sizeof(cn), "conv_cache_%d", ci);
+                ggml_tensor* ct = ggml_graph_get_tensor(gf, cn);
+                if (ct)
+                    ggml_backend_tensor_set(ct, ctx->conv_states[ci].data(), 0, sizeof(float) * hidden * (K - 1));
+                ci++;
+            }
+        }
+
+        ggml_backend_graph_compute(ctx->backend, gf);
 
         int vocab_size = (int)out->ne[0];
         std::vector<float> result(vocab_size);
-        memcpy(result.data(), out->data, sizeof(float) * vocab_size);
+        ggml_backend_tensor_get(out, result.data(), 0, sizeof(float) * vocab_size);
 
         // Update conv state caches from graph snapshots
         {
@@ -1180,17 +1223,16 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
                 if (snap) {
                     auto& state = ctx->conv_states[ci];
                     if (T_in > 1) {
-                        // Prefill: snap has tail_len columns (up to K-1=2)
                         int snap_cols = (int)snap->ne[1];
                         std::fill(state.begin(), state.end(), 0.0f);
                         int offset = (K - 1) - snap_cols;
                         if (offset < 0)
                             offset = 0;
-                        memcpy(state.data() + offset * hidden, snap->data, sizeof(float) * snap_cols * hidden);
+                        ggml_backend_tensor_get(snap, state.data() + offset * hidden, 0,
+                                                sizeof(float) * snap_cols * hidden);
                     } else {
-                        // Decode: snap is a single Bx vector (hidden,). Shift left, append.
                         memmove(state.data(), state.data() + hidden, sizeof(float) * hidden * ((K - 1) - 1));
-                        memcpy(state.data() + hidden * ((K - 1) - 1), snap->data, sizeof(float) * hidden);
+                        ggml_backend_tensor_get(snap, state.data() + hidden * ((K - 1) - 1), 0, sizeof(float) * hidden);
                     }
                 }
                 ci++;
@@ -1198,6 +1240,7 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         }
 
         ctx->kv_n_past += T_in;
+        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return result;
     };
