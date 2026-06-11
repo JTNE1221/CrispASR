@@ -47,6 +47,14 @@ char* lfm2_audio_transcribe(struct lfm2_audio_context* ctx, const float* samples
 float* lfm2_audio_synthesize(struct lfm2_audio_context* ctx, const char* text, const char* language,
                              int* out_n_samples);
 
+// Speech-to-speech: audio in → interleaved text+audio out → PCM at 24 kHz.
+// Combines ASR (conformer encoder on input) with TTS (depthformer + detokenizer).
+// out_text: if non-NULL, receives malloc'd transcript text. Caller frees.
+// out_n_samples: receives output PCM sample count.
+// Returns output PCM at 24 kHz mono. Caller frees with free().
+float* lfm2_audio_speech_to_speech(struct lfm2_audio_context* ctx, const float* in_samples, int n_in_samples,
+                                   const char* language, char** out_text, int* out_n_samples);
+
 // Hyper-parameters
 int lfm2_audio_n_mels(struct lfm2_audio_context* ctx);
 int lfm2_audio_sample_rate(struct lfm2_audio_context* ctx);

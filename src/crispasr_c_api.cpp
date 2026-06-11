@@ -5707,6 +5707,11 @@ static float* crispasr_session_synthesize_raw_impl(crispasr_session* s, const ch
         return tada_synthesize(s->tada_ctx, text, out_n_samples);
     }
 #endif
+#ifdef CA_HAVE_LFM2_AUDIO
+    if (s->lfm2_audio_ctx) {
+        return lfm2_audio_synthesize(s->lfm2_audio_ctx, text, nullptr, out_n_samples);
+    }
+#endif
 #ifdef CA_HAVE_CSM
     if (s->csm_tts_ctx) {
         // CSM emits 24 kHz mono float — same convention as the other TTS
