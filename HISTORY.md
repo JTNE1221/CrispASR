@@ -40,23 +40,34 @@ driver 596.36, Windows 11).
   prerequisite Windows build break was also fixed (`cc9115ad`): `lfm2_audio.cpp`
   used POSIX `setenv`/`unsetenv` (MSVC C3861) — guarded with `_putenv_s`.
 
-## 2026-06-12 #89 — parakeet-ja long-audio: CUDA data point
+## 2026-06-12 #89 — parakeet-ja long-audio: reproduced on CUDA with real speech
 
-The issue #89 reporter (AMD Vulkan, RX 7900 GRE) still loses everything past
-~20 s on `parakeet-tdt-0.6b-ja`, even after the streamed-pipeline + 30 s
-auto-chunk fixes. Tested on the RTX A1000 (CUDA) with synthetic JA (qwen3-tts,
-夏目漱石 text, 29.3 s, doubled to 58.6 s):
+The issue #89 reporter (AMD Vulkan, RX 7900 GRE) loses everything past ~20 s on
+`parakeet-tdt-0.6b-ja`, even after the streamed-pipeline + 30 s auto-chunk
+fixes. Tested on the RTX A1000 (CUDA).
 
-- **Single-pass** (`--chunk-seconds 0`) on 58.6 s covers the *full* timestamp
-  range (→ 58.4 s) — **not** the reporter's collapse-at-20 s — but
-  under-transcribes (186 chars).
-- **Default 30 s auto-chunk** recovers +25 % text (232 chars), 2 slices, full
-  coverage.
+**First, a false negative worth recording:** synthetic JA (qwen3-tts, 夏目漱石
+text, 58.6 s) did *not* collapse — single-pass covered the full range. That was
+misleading: the bug is **input-specific** (the maintainer had already noted two
+perceptually-identical files behaving differently). Clean TTS audio doesn't
+trigger the z-norm/PE drift; real speech does.
 
-So CUDA is markedly less affected than Vulkan/AMD (a backend numerical-stability
-difference), and the auto-chunk fallback still measurably helps. Caveat: this is
-clean synthetic TTS audio; the bug is input-specific (real YouTube speech), so
-this isn't conclusive — but it's the CUDA data point the issue lacked.
+**With real JA** (`reazon_baseball_14s` from the regression-fixtures HF repo,
+concatenated ×3 → 42.2 s; ideal output repeats the keyword 岡本 three times):
+
+| Mode | 岡本 recovered | last timestamp |
+|---|---|---|
+| single-pass (`--chunk-seconds 0`) | **1 / 3** | 12.4 s (collapses) |
+| auto-chunk 30 s (current default) | 1 / 3 | 40 s but sparse |
+| `--chunk-seconds 15` | 1 / 3 | — |
+| `--chunk-seconds 10` | 2 / 3 | — |
+| **`--vad`** | **3 / 3** | full |
+
+So the drop **is** real on CUDA (not an AMD-only numerical issue), the safe
+single-pass window is **~12 s**, and the 30 s auto-chunk fallback is too coarse —
+the collapse happens *inside* each 30 s chunk, which is exactly why the reporter
+still lost content. **`--vad` (silence-bounded slices) recovers everything.**
+Actionable: parakeet-ja's auto-chunk should use a ≤~12 s window or prefer VAD.
 
 ## 2026-06-10 #155 — Vulkan col2im_1d kernel: full-GPU qwen3-tts codec on Vulkan
 
