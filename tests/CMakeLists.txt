@@ -435,6 +435,27 @@ catch_discover_tests(test-lfm2-audio
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# ─── test - mini-omni2 — live integration tests for Mini-Omni2 ASR + TTS + S2S
+add_executable(test-mini-omni2
+    test_mini_omni2_live.cpp
+)
+target_include_directories(test-mini-omni2 PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/examples
+)
+target_link_libraries(test-mini-omni2 PRIVATE
+    Catch2::Catch2WithMain
+    mini-omni2
+    orpheus
+)
+catch_discover_tests(test-mini-omni2
+    TEST_SPEC "[mini-omni2]"
+    PROPERTIES
+        LABELS live
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # ─── test - context - bias — Catch2 unit tests for CTC-WS phrase-boost trie (PLAN #98)
 add_executable(test-context-bias
     test_context_bias.cpp
