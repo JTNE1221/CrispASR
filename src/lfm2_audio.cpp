@@ -163,6 +163,8 @@ struct lfm2_audio_model {
 
     // Vocabulary
     std::vector<std::string> vocab;
+    std::unordered_map<std::string, int32_t> token_to_id;
+    std::unordered_map<std::string, int32_t> merge_rank;
 };
 
 // ===========================================================================
@@ -309,6 +311,13 @@ static bool lfm2_audio_load(lfm2_audio_model& model, const char* path, ggml_back
         hp.text_vocab_size = core_gguf::kv_u32(gctx, "lfm2audio.text_vocab_size", hp.text_vocab_size);
 
         model.vocab = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
+        // Build token_to_id map
+        for (int i = 0; i < (int)model.vocab.size(); i++)
+            model.token_to_id[model.vocab[i]] = i;
+        // Load BPE merges
+        auto merges = core_gguf::kv_str_array(gctx, "tokenizer.ggml.merges");
+        for (int i = 0; i < (int)merges.size(); i++)
+            model.merge_rank[merges[i]] = i;
 
         core_gguf::free_metadata(gctx);
 
@@ -2265,48 +2274,38 @@ float* lfm2_audio_synthesize(lfm2_audio_context* ctx, const char* text, const ch
     // per-character lookup.
     std::vector<int32_t> text_tokens;
     {
-        // Try to find each character/subword in the vocab
-        std::string remaining(text);
-        while (!remaining.empty()) {
-            bool found = false;
-            // Try longest match first (up to 8 bytes)
-            for (int len = std::min((int)remaining.size(), 16); len >= 1; len--) {
-                std::string sub = remaining.substr(0, len);
-                // Convert to GPT-2 byte encoding
-                std::string encoded;
-                const auto& be = core_bpe::byte_encoder();
-                for (unsigned char ch : sub) {
-                    int cp = be[ch];
-                    if (cp < 128) {
-                        encoded += (char)cp;
-                    } else {
-                        // Encode as UTF-8
-                        if (cp < 0x800) {
-                            encoded += (char)(0xC0 | (cp >> 6));
-                            encoded += (char)(0x80 | (cp & 0x3F));
-                        } else {
-                            encoded += (char)(0xE0 | (cp >> 12));
-                            encoded += (char)(0x80 | ((cp >> 6) & 0x3F));
-                            encoded += (char)(0x80 | (cp & 0x3F));
-                        }
-                    }
-                }
-                // Search vocab
-                for (int i = 0; i < (int)model.vocab.size(); i++) {
-                    if (model.vocab[i] == encoded) {
-                        text_tokens.push_back(i);
-                        remaining = remaining.substr(len);
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                    break;
+        // GPT-2 BPE tokenization using core_bpe.
+        // Pre-tokenize: split on whitespace boundaries, keeping spaces attached
+        // to the following word (matching GPT-2's Ġ convention).
+        std::string input(text);
+        std::vector<std::string> pre_tokens;
+        size_t i = 0;
+        while (i < input.size()) {
+            // Consume leading spaces — attach to next word
+            std::string tok;
+            while (i < input.size() && input[i] == ' ') {
+                tok += input[i++];
             }
-            if (!found) {
-                // Skip unknown byte
-                remaining = remaining.substr(1);
+            // Consume non-space characters
+            while (i < input.size() && input[i] != ' ') {
+                unsigned char c = (unsigned char)input[i];
+                size_t len = 1;
+                if (c >= 0xC0 && c < 0xE0)
+                    len = 2;
+                else if (c >= 0xE0 && c < 0xF0)
+                    len = 3;
+                else if (c >= 0xF0)
+                    len = 4;
+                for (size_t j = 0; j < len && i < input.size(); j++)
+                    tok += input[i++];
             }
+            if (!tok.empty())
+                pre_tokens.push_back(tok);
+        }
+        // Encode each pre-token via BPE
+        for (const auto& pt : pre_tokens) {
+            std::string encoded = core_bpe::bytes_to_unicode(pt.data(), pt.size());
+            core_bpe::bpe_one(model.token_to_id, model.merge_rank, encoded, text_tokens);
         }
     }
 

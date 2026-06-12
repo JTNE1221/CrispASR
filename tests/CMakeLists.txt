@@ -415,6 +415,26 @@ catch_discover_tests(test-paraformer
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# ─── test - lfm2-audio — live integration tests for LFM2-Audio ASR + TTS
+add_executable(test-lfm2-audio
+    test_lfm2_audio_live.cpp
+)
+target_include_directories(test-lfm2-audio PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/examples
+)
+target_link_libraries(test-lfm2-audio PRIVATE
+    Catch2::Catch2WithMain
+    lfm2_audio
+)
+catch_discover_tests(test-lfm2-audio
+    TEST_SPEC "[lfm2]"
+    PROPERTIES
+        LABELS live
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # ─── test - context - bias — Catch2 unit tests for CTC-WS phrase-boost trie (PLAN #98)
 add_executable(test-context-bias
     test_context_bias.cpp

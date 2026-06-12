@@ -24,7 +24,22 @@ public:
 
     const char* name() const override { return "lfm2-audio"; }
 
-    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_UNBOUNDED_INPUT; }
+    uint32_t capabilities() const override { return CAP_AUTO_DOWNLOAD | CAP_UNBOUNDED_INPUT | CAP_TTS; }
+
+    int tts_sample_rate() const override { return 24000; }
+
+    std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
+        if (!ctx_ || text.empty())
+            return {};
+        int n = 0;
+        const char* lang = params.language.empty() ? nullptr : params.language.c_str();
+        float* pcm = lfm2_audio_synthesize(ctx_, text.c_str(), lang, &n);
+        if (!pcm || n <= 0)
+            return {};
+        std::vector<float> out(pcm, pcm + n);
+        free(pcm);
+        return out;
+    }
 
     bool init(const whisper_params& p) override {
         lfm2_audio_context_params lp = lfm2_audio_context_default_params();
