@@ -692,27 +692,39 @@ static void read_f32_vec(ggml_tensor* t, std::vector<float>& out) {
 
 // CPU matmul: C = A @ B^T where A is [M,K], B is [N,K] → C is [M,N]
 // (B stored as [N,K] row-major, like ggml weight [K,N] with ne[0]=K)
+// Dot product of two length-K float vectors using four independent
+// accumulator chains so the compiler can vectorize the reduction even under
+// strict FP (no -ffast-math / /fp:fast needed). Float accumulation over
+// K~1280 is well within tolerance for ASR logits; the old double-accumulate
+// form forced scalar, non-vectorized code and dominated the decoder.
+static inline float cpu_dot(const float* a, const float* b, int K) {
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int k = 0;
+    for (; k + 4 <= K; k += 4) {
+        s0 += a[k + 0] * b[k + 0];
+        s1 += a[k + 1] * b[k + 1];
+        s2 += a[k + 2] * b[k + 2];
+        s3 += a[k + 3] * b[k + 3];
+    }
+    float s = (s0 + s1) + (s2 + s3);
+    for (; k < K; k++)
+        s += a[k] * b[k];
+    return s;
+}
+
 static void cpu_matmul_bt(const float* A, const float* B, float* C, int M, int K, int N) {
     if (M == 1) {
         // Single-vector × matrix: parallelize over output dimension N.
         // This is the decoder hot path (one token per step).
 #pragma omp parallel for schedule(static)
-        for (int n = 0; n < N; n++) {
-            double s = 0;
-            const float* brow = B + n * K;
-            for (int k = 0; k < K; k++)
-                s += (double)A[k] * (double)brow[k];
-            C[n] = (float)s;
-        }
+        for (int n = 0; n < N; n++)
+            C[n] = cpu_dot(A, B + (size_t)n * K, K);
     } else {
 #pragma omp parallel for schedule(static)
         for (int m = 0; m < M; m++) {
-            for (int n = 0; n < N; n++) {
-                double s = 0;
-                for (int k = 0; k < K; k++)
-                    s += (double)A[m * K + k] * (double)B[n * K + k];
-                C[m * N + n] = (float)s;
-            }
+            const float* arow = A + (size_t)m * K;
+            for (int n = 0; n < N; n++)
+                C[(size_t)m * N + n] = cpu_dot(arow, B + (size_t)n * K, K);
         }
     }
 }

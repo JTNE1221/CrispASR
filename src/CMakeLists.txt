@@ -1360,6 +1360,13 @@ set_target_properties(firered-asr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(firered-asr PUBLIC .)
 target_compile_features   (firered-asr PUBLIC cxx_std_17)
 target_link_libraries     (firered-asr PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+# firered_asr.cpp's CPU decoder/encoder matmuls (cpu_matmul_bt) are
+# `#pragma omp parallel for`, but the target never linked OpenMP — so the
+# pragmas were no-ops and the AED beam decoder ran single-threaded
+# (~1.4 s/token at beam 5). Link OpenMP so the matmuls actually parallelize.
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(firered-asr PUBLIC OpenMP::OpenMP_CXX)
+endif()
 if(NOT MSVC)
     target_compile_options(firered-asr PRIVATE -O3)
 endif()
