@@ -69,7 +69,7 @@ print("[2] installing deps", flush=True)
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "--quiet",
     "safetensors", "gguf", "huggingface_hub", "hf_transfer",
-    "openai-whisper", "torch", "torchaudio",
+    "openai-whisper", "torch", "torchaudio", "lightning",
 ])
 kh.step("deps_installed")
 
@@ -165,7 +165,7 @@ subprocess.check_call([
     "--backend", "mini-omni2",
     "--model-dir", src,
     "--audio", str(AUDIO),
-    "--stages", "mel_spectrogram,whisper_encoder_output,adapter_output",
+    "--stages", "mel_spectrogram,whisper_encoder_output",
     "--output", str(REF),
 ], env=env)
 kh.step("ref_dump_done")
