@@ -2001,14 +2001,28 @@ static bool lfm2_load_detokenizer(lfm2_audio_context* ctx) {
     auto pos = path.rfind(".gguf");
     if (pos == std::string::npos)
         return false;
-    std::string dp = path.substr(0, pos) + "-detokenizer.gguf";
-    FILE* f = fopen(dp.c_str(), "rb");
-    if (!f) {
+    // Try exact match first (e.g. model-q4_k-detokenizer.gguf),
+    // then fall back to f16 variant (e.g. model-f16-detokenizer.gguf),
+    // then base name (e.g. model-detokenizer.gguf).
+    std::string base = path.substr(0, pos);
+    std::string dp;
+    for (const auto& suffix : {base + "-detokenizer.gguf",
+                               // Strip quant suffix and try f16
+                               base.substr(0, base.rfind("-q")) + "-f16-detokenizer.gguf",
+                               base.substr(0, base.rfind("-q")) + "-detokenizer.gguf",
+                               base.substr(0, base.rfind("-f16")) + "-f16-detokenizer.gguf"}) {
+        FILE* f = fopen(suffix.c_str(), "rb");
+        if (f) {
+            fclose(f);
+            dp = suffix;
+            break;
+        }
+    }
+    if (dp.empty()) {
         if (ctx->verbosity >= 1)
-            fprintf(stderr, "lfm2-audio: detokenizer not found at %s\n", dp.c_str());
+            fprintf(stderr, "lfm2-audio: detokenizer not found near %s\n", path.c_str());
         return false;
     }
-    fclose(f);
     if (ctx->verbosity >= 1)
         fprintf(stderr, "lfm2-audio: loading detokenizer from %s\n", dp.c_str());
     gguf_context* gc = core_gguf::open_metadata(dp.c_str());
