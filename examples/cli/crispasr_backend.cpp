@@ -10,6 +10,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_whisper_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_parakeet_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_canary_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_lfm2_audio_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_mini_omni2_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cohere_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_granite_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_granite_nle_backend();
@@ -83,6 +84,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_canary_backend();
     if (name == "lfm2-audio")
         return crispasr_make_lfm2_audio_backend();
+    if (name == "mini-omni2" || name == "mini_omni2" || name == "miniomni2")
+        return crispasr_make_mini_omni2_backend();
     if (name == "cohere")
         return crispasr_make_cohere_backend();
     if (name == "granite" || name == "granite-4.1" || name == "granite-4.1-plus")

@@ -52,6 +52,10 @@
 #include "lfm2_audio.h"
 #define CA_HAVE_LFM2_AUDIO 1
 #endif
+#if __has_include("mini_omni2.h")
+#include "mini_omni2.h"
+#define CA_HAVE_MINI_OMNI2 1
+#endif
 #if __has_include("qwen3_asr.h")
 #include "qwen3_asr.h"
 #define CA_HAVE_QWEN3 1
@@ -1410,6 +1414,9 @@ struct crispasr_session {
 #ifdef CA_HAVE_LFM2_AUDIO
     lfm2_audio_context* lfm2_audio_ctx = nullptr;
 #endif
+#ifdef CA_HAVE_MINI_OMNI2
+    mini_omni2_context* mini_omni2_ctx = nullptr;
+#endif
 #ifdef CA_HAVE_QWEN3
     qwen3_asr_context* qwen3_ctx = nullptr;
 #endif
@@ -1821,6 +1828,20 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.use_gpu = g_open_use_gpu_tls;
         s->lfm2_audio_ctx = lfm2_audio_init_from_file(model_path, p);
         if (!s->lfm2_audio_ctx) {
+            delete s;
+            return nullptr;
+        }
+        return s;
+    }
+#endif
+#ifdef CA_HAVE_MINI_OMNI2
+    if (s->backend == "mini-omni2" || s->backend == "mini_omni2" || s->backend == "miniomni2") {
+        mini_omni2_context_params p = mini_omni2_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
+        s->mini_omni2_ctx = mini_omni2_init_from_file(model_path, p);
+        if (!s->mini_omni2_ctx) {
             delete s;
             return nullptr;
         }
@@ -2805,6 +2826,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #ifdef CA_HAVE_LFM2_AUDIO
     list += ",lfm2-audio";
 #endif
+#ifdef CA_HAVE_MINI_OMNI2
+    list += ",mini-omni2";
+#endif
 #ifdef CA_HAVE_QWEN3
     list += ",qwen3";
 #endif
@@ -3494,6 +3518,23 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         else if (lang_set)
             lfm2_prompt = lang.c_str();
         char* text = lfm2_audio_transcribe(s->lfm2_audio_ctx, pcm, n_samples, lfm2_prompt, 0);
+        if (!text) {
+            delete r;
+            return nullptr;
+        }
+        crispasr_session_seg seg;
+        seg.text = text;
+        seg.t0 = 0;
+        seg.t1 = (int64_t)((double)n_samples * 100.0 / 16000.0);
+        free(text);
+        r->segments.push_back(std::move(seg));
+        return r;
+    }
+#endif
+#ifdef CA_HAVE_MINI_OMNI2
+    if ((s->backend == "mini-omni2" || s->backend == "mini_omni2" || s->backend == "miniomni2") &&
+        s->mini_omni2_ctx) {
+        char* text = mini_omni2_transcribe(s->mini_omni2_ctx, pcm, n_samples);
         if (!text) {
             delete r;
             return nullptr;
@@ -6111,6 +6152,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
 #ifdef CA_HAVE_LFM2_AUDIO
     if (s->lfm2_audio_ctx)
         lfm2_audio_free(s->lfm2_audio_ctx);
+#endif
+#ifdef CA_HAVE_MINI_OMNI2
+    if (s->mini_omni2_ctx)
+        mini_omni2_free(s->mini_omni2_ctx);
 #endif
 #ifdef CA_HAVE_QWEN3
     if (s->qwen3_ctx)
