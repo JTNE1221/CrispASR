@@ -12,6 +12,8 @@
 // published — these are part of CrispASR's published ABI contract shared
 // across all four consumers above.
 
+#include "crispasr_session.h"
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -3305,7 +3307,10 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         crispasr_session* s;
         std::string* saved;
         bool active;
-        ~AskGuard() { if (active) s->ask = std::move(*saved); }
+        ~AskGuard() {
+            if (active)
+                s->ask = std::move(*saved);
+        }
     } ask_guard{s, &saved_ask, !s->hotwords.empty()};
 
     auto* r = new crispasr_session_result();
@@ -6040,25 +6045,28 @@ CA_EXPORT void crispasr_pcm_free(float* pcm) {
 // Speech-to-Speech — audio in → audio out via a single model pass.
 // =========================================================================
 
-CA_EXPORT float* crispasr_session_speech_to_speech(crispasr_session* s,
-                                                    const float* in_samples, int n_in_samples,
-                                                    char** out_text, int* out_n_samples) {
+CA_EXPORT float* crispasr_session_speech_to_speech(crispasr_session* s, const float* in_samples, int n_in_samples,
+                                                   char** out_text, int* out_n_samples) {
     if (!s || !in_samples || n_in_samples <= 0)
         return nullptr;
-    if (out_n_samples) *out_n_samples = 0;
-    if (out_text) *out_text = nullptr;
+    if (out_n_samples)
+        *out_n_samples = 0;
+    if (out_text)
+        *out_text = nullptr;
 
 #ifdef CA_HAVE_LFM2_AUDIO
     if (s->lfm2_audio_ctx) {
         char* text = nullptr;
         int n = 0;
-        float* pcm = lfm2_audio_speech_to_speech(
-            s->lfm2_audio_ctx, in_samples, n_in_samples,
-            s->source_language.empty() ? nullptr : s->source_language.c_str(),
-            &text, &n);
-        if (out_n_samples) *out_n_samples = n;
-        if (out_text) *out_text = text;
-        else free(text);
+        float* pcm =
+            lfm2_audio_speech_to_speech(s->lfm2_audio_ctx, in_samples, n_in_samples,
+                                        s->source_language.empty() ? nullptr : s->source_language.c_str(), &text, &n);
+        if (out_n_samples)
+            *out_n_samples = n;
+        if (out_text)
+            *out_text = text;
+        else
+            free(text);
         return pcm;
     }
 #endif
@@ -6066,12 +6074,13 @@ CA_EXPORT float* crispasr_session_speech_to_speech(crispasr_session* s,
     if (s->mini_omni2_ctx) {
         char* text = nullptr;
         int n = 0;
-        float* pcm = mini_omni2_speech_to_speech(
-            s->mini_omni2_ctx, in_samples, n_in_samples,
-            &text, &n);
-        if (out_n_samples) *out_n_samples = n;
-        if (out_text) *out_text = text;
-        else free(text);
+        float* pcm = mini_omni2_speech_to_speech(s->mini_omni2_ctx, in_samples, n_in_samples, &text, &n);
+        if (out_n_samples)
+            *out_n_samples = n;
+        if (out_text)
+            *out_text = text;
+        else
+            free(text);
         return pcm;
     }
 #endif
@@ -6084,9 +6093,9 @@ CA_EXPORT float* crispasr_session_speech_to_speech(crispasr_session* s,
 // Hotwords / contextual biasing — session-level setter.
 // =========================================================================
 
-CA_EXPORT int crispasr_session_set_hotwords(crispasr_session* s,
-                                             const char* hotwords, float boost) {
-    if (!s) return -1;
+CA_EXPORT int crispasr_session_set_hotwords(crispasr_session* s, const char* hotwords, float boost) {
+    if (!s)
+        return -1;
     s->hotwords = hotwords ? hotwords : "";
     s->hotwords_boost = boost > 0.0f ? boost : 1.5f;
 
@@ -6109,7 +6118,8 @@ CA_EXPORT int crispasr_session_set_hotwords(crispasr_session* s,
             }
             std::vector<const char*> ptrs;
             ptrs.reserve(hw_strings.size());
-            for (auto& w : hw_strings) ptrs.push_back(w.c_str());
+            for (auto& w : hw_strings)
+                ptrs.push_back(w.c_str());
             parakeet_set_hotwords(s->parakeet_ctx, ptrs.data(), (int)ptrs.size(), s->hotwords_boost);
         }
     }
@@ -6477,7 +6487,7 @@ CA_EXPORT const char* crispasr_punc_process(void* ctx, const char* text) {
 }
 
 CA_EXPORT void crispasr_punc_free_text(const char* text) {
-    free((void*)text);
+    free(const_cast<char*>(text));
 }
 
 CA_EXPORT void crispasr_punc_free(void* ctx) {
@@ -6512,7 +6522,7 @@ CA_EXPORT const char* crispasr_truecase_process(void* ctx, const char* text) {
     return truecaser_lstm_process((truecaser_lstm_context*)ctx, text);
 }
 CA_EXPORT void crispasr_truecase_free_text(const char* text) {
-    free((void*)text);
+    free(const_cast<char*>(text));
 }
 CA_EXPORT void crispasr_truecase_free(void* ctx) {
     truecaser_lstm_free((truecaser_lstm_context*)ctx);
@@ -6525,7 +6535,7 @@ CA_EXPORT const char* crispasr_truecase_process(void* ctx, const char* text) {
     return truecaser_process((truecaser_context*)ctx, text);
 }
 CA_EXPORT void crispasr_truecase_free_text(const char* text) {
-    free((void*)text);
+    free(const_cast<char*>(text));
 }
 CA_EXPORT void crispasr_truecase_free(void* ctx) {
     truecaser_free((truecaser_context*)ctx);
@@ -6554,7 +6564,7 @@ CA_EXPORT const char* crispasr_pcs_process(void* ctx, const char* text) {
     return pcs_process((pcs_context*)ctx, text);
 }
 CA_EXPORT void crispasr_pcs_free_text(const char* text) {
-    free((void*)text);
+    free(const_cast<char*>(text));
 }
 CA_EXPORT void crispasr_pcs_free(void* ctx) {
     pcs_free((pcs_context*)ctx);
