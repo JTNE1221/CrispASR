@@ -51,7 +51,7 @@ public:
 
     const char* name() const override { return "mini-omni2"; }
 
-    uint32_t capabilities() const override { return CAP_TTS | CAP_S2S | CAP_AUTO_DOWNLOAD; }
+    uint32_t capabilities() const override { return CAP_TTS | CAP_S2S | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE; }
 
     bool init(const whisper_params& p) override {
         mini_omni2_context_params mp = mini_omni2_context_default_params();
@@ -119,8 +119,7 @@ public:
         return out;
     }
 
-    std::vector<float> speech_to_speech(const float* samples, int n_samples,
-                                        std::string* out_text,
+    std::vector<float> speech_to_speech(const float* samples, int n_samples, std::string* out_text,
                                         const whisper_params& /*params*/) override {
         if (!ctx_)
             return {};
