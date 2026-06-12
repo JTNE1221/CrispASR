@@ -3532,8 +3532,7 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
     }
 #endif
 #ifdef CA_HAVE_MINI_OMNI2
-    if ((s->backend == "mini-omni2" || s->backend == "mini_omni2" || s->backend == "miniomni2") &&
-        s->mini_omni2_ctx) {
+    if ((s->backend == "mini-omni2" || s->backend == "mini_omni2" || s->backend == "miniomni2") && s->mini_omni2_ctx) {
         mini_omni2_set_ask(s->mini_omni2_ctx, s->ask.empty() ? nullptr : s->ask.c_str());
         char* text = mini_omni2_transcribe(s->mini_omni2_ctx, pcm, n_samples);
         if (!text) {
@@ -4431,6 +4430,8 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         if (!text && s->backend == "funasr" && s->funasr_ctx) {
             if (s->beam_size > 1)
                 funasr_set_beam_size(s->funasr_ctx, s->beam_size);
+            if (!s->source_language.empty())
+                funasr_set_language(s->funasr_ctx, s->source_language.c_str());
             text = funasr_transcribe(s->funasr_ctx, pcm, n_samples);
             need_free = true;
         }
