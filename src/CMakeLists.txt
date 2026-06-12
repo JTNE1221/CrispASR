@@ -1054,7 +1054,9 @@ endif()
 # ---------------------------------------------------------------------------
 # kokoro — hexgrad/Kokoro-82M + yl4579/StyleTTS2-LJSpeech (iSTFTNet TTS)
 # ---------------------------------------------------------------------------
-add_library(kokoro STATIC kokoro.h kokoro.cpp phonemizer.h phonemizer.cpp)
+# phonemizer.cpp is in crispasr-lib (line ~143); don't duplicate it here
+# or the all-in-one link (Linux/Android shared .so) gets duplicate symbols.
+add_library(kokoro STATIC kokoro.h kokoro.cpp phonemizer.h)
 set_target_properties(kokoro PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kokoro PUBLIC .)
 target_compile_features   (kokoro PUBLIC cxx_std_17)
