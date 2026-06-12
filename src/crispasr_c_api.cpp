@@ -20,6 +20,7 @@
 #include <cmath>
 #include <algorithm>
 #include <string>
+#include <sstream>
 #include <vector>
 
 #include "crispasr.h"
@@ -1402,6 +1403,14 @@ struct crispasr_session {
     std::vector<const whisper_grammar_element*> grammar_rules_ptrs;
     uint32_t grammar_root_rule_id = 0;
     bool grammar_active = false;
+
+    // Session-level hotwords for contextual biasing (PLAN §5.26.2).
+    // Stored as a comma-separated string; parsed into per-backend form
+    // on the next transcribe call. For parakeet CTC/TDT, the parsed
+    // words are fed to parakeet_set_hotwords(); for LLM backends, they
+    // are injected into the ask prompt.
+    std::string hotwords;
+    float hotwords_boost = 1.5f;
 
     // Exactly one of these pointers is non-null based on `backend`.
     whisper_context* whisper_ctx = nullptr;
@@ -3279,6 +3288,25 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
                                                   const char* language) {
     const std::string lang = (language && *language) ? language : "en";
     const bool lang_set = (language && *language);
+
+    // §5.26.2 — Hotword injection for LLM backends. Temporarily prepend
+    // the hotword phrasing to s->ask so every LLM dispatch path picks it
+    // up through the existing ask-prompt injection. Parakeet CTC/TDT
+    // hotwords are applied directly via parakeet_set_hotwords() in
+    // crispasr_session_set_hotwords() — no ask-prompt injection needed.
+    std::string saved_ask;
+    if (!s->hotwords.empty()) {
+        saved_ask = s->ask;
+        const std::string hw_hint = "The following words may appear in the audio: " + s->hotwords + ". ";
+        s->ask = s->ask.empty() ? hw_hint : hw_hint + s->ask;
+    }
+    // Scope guard: restore original ask on all exit paths.
+    struct AskGuard {
+        crispasr_session* s;
+        std::string* saved;
+        bool active;
+        ~AskGuard() { if (active) s->ask = std::move(*saved); }
+    } ask_guard{s, &saved_ask, !s->hotwords.empty()};
 
     auto* r = new crispasr_session_result();
     r->backend = s->backend;
@@ -6006,6 +6034,91 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
 
 CA_EXPORT void crispasr_pcm_free(float* pcm) {
     free(pcm);
+}
+
+// =========================================================================
+// Speech-to-Speech — audio in → audio out via a single model pass.
+// =========================================================================
+
+CA_EXPORT float* crispasr_session_speech_to_speech(crispasr_session* s,
+                                                    const float* in_samples, int n_in_samples,
+                                                    char** out_text, int* out_n_samples) {
+    if (!s || !in_samples || n_in_samples <= 0)
+        return nullptr;
+    if (out_n_samples) *out_n_samples = 0;
+    if (out_text) *out_text = nullptr;
+
+#ifdef CA_HAVE_LFM2_AUDIO
+    if (s->lfm2_audio_ctx) {
+        char* text = nullptr;
+        int n = 0;
+        float* pcm = lfm2_audio_speech_to_speech(
+            s->lfm2_audio_ctx, in_samples, n_in_samples,
+            s->source_language.empty() ? nullptr : s->source_language.c_str(),
+            &text, &n);
+        if (out_n_samples) *out_n_samples = n;
+        if (out_text) *out_text = text;
+        else free(text);
+        return pcm;
+    }
+#endif
+#ifdef CA_HAVE_MINI_OMNI2
+    if (s->mini_omni2_ctx) {
+        char* text = nullptr;
+        int n = 0;
+        float* pcm = mini_omni2_speech_to_speech(
+            s->mini_omni2_ctx, in_samples, n_in_samples,
+            &text, &n);
+        if (out_n_samples) *out_n_samples = n;
+        if (out_text) *out_text = text;
+        else free(text);
+        return pcm;
+    }
+#endif
+
+    s->last_synth_error = "backend '" + s->backend + "' does not support speech-to-speech";
+    return nullptr;
+}
+
+// =========================================================================
+// Hotwords / contextual biasing — session-level setter.
+// =========================================================================
+
+CA_EXPORT int crispasr_session_set_hotwords(crispasr_session* s,
+                                             const char* hotwords, float boost) {
+    if (!s) return -1;
+    s->hotwords = hotwords ? hotwords : "";
+    s->hotwords_boost = boost > 0.0f ? boost : 1.5f;
+
+    // For parakeet CTC/TDT, apply immediately to the trie.
+#ifdef CA_HAVE_PARAKEET
+    if (s->parakeet_ctx) {
+        if (s->hotwords.empty()) {
+            parakeet_set_hotwords(s->parakeet_ctx, nullptr, 0, 0.0f);
+        } else {
+            // Parse comma-separated hotwords into an array of C strings.
+            std::vector<std::string> hw_strings;
+            std::istringstream iss(s->hotwords);
+            std::string token;
+            while (std::getline(iss, token, ',')) {
+                // Trim whitespace.
+                size_t start = token.find_first_not_of(" \t");
+                size_t end = token.find_last_not_of(" \t");
+                if (start != std::string::npos)
+                    hw_strings.push_back(token.substr(start, end - start + 1));
+            }
+            std::vector<const char*> ptrs;
+            ptrs.reserve(hw_strings.size());
+            for (auto& w : hw_strings) ptrs.push_back(w.c_str());
+            parakeet_set_hotwords(s->parakeet_ctx, ptrs.data(), (int)ptrs.size(), s->hotwords_boost);
+        }
+    }
+#endif
+
+    // For LLM backends, hotwords are injected into the ask prompt at
+    // transcribe time. The stored string is consumed in the transcribe
+    // dispatch path via s->hotwords. No immediate action needed.
+    return 0;
 }
 
 // Returns a human-readable error description when the last synthesize call
