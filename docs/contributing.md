@@ -115,6 +115,52 @@ If your model has a canonical Q4_K HuggingFace release, add it to
 works (one `k_registry[]` row: `{"name", "file.gguf", "https://…", "~size",
 nullptr, nullptr}`).
 
+For TTS backends that need a codec companion (e.g. SNAC, DAC), add the
+companion file + URL in the same registry row:
+```c
+{"yourmodel", "yourmodel.gguf", "https://…/yourmodel.gguf", "~2 GB",
+ "snac-24khz.gguf",                           // companion_file
+ "https://…/snac-24khz.gguf",                 // companion_url
+ "~80 MB"},                                   // companion_size
+```
+
+## 5b. TTS backend wiring — `CAP_TTS` and `--codec-model`
+
+TTS backends need extra wiring beyond ASR:
+
+1. **`CAP_TTS` capability flag**: set in `capabilities()` so the CLI
+   TTS path (`--tts "text"`) routes through your backend's
+   `synthesize()` method. Without this, the CLI says "does not support
+   TTS".
+
+2. **`synthesize()` override**: return a `std::vector<float>` of mono
+   PCM at the backend's native sample rate (24 kHz for SNAC/Mimi-based
+   backends, 44.1 kHz for DAC/Zonos). Default returns empty.
+
+3. **`tts_sample_rate()` override**: return the output sample rate if
+   it's not 24000 (default). The CLI uses this for WAV header + any
+   downstream resampling.
+
+4. **Codec companion loading**: if your backend needs a separate codec
+   GGUF (SNAC, DAC, Mimi), handle `params.tts_codec_model` in `init()`:
+   ```cpp
+   #include "crispasr_model_mgr_cli.h"
+   #include "crispasr_model_registry.h"
+   // ... in init():
+   std::string codec_path = p.tts_codec_model;
+   if (!codec_path.empty() && codec_path != "auto")
+       codec_path = crispasr_resolve_model_cli(codec_path, ...);
+   if (codec_path.empty())
+       codec_path = discover_snac(p.model); // look next to model
+   if (codec_path.empty()) {
+       CrispasrRegistryEntry entry;
+       if (crispasr_registry_lookup(p.backend, entry, ...) && ...)
+           codec_path = crispasr_resolve_model_cli(entry.companion_filename, ...);
+   }
+   ```
+   See `crispasr_backend_orpheus.cpp` or `crispasr_backend_mini_omni2.cpp`
+   for worked examples.
+
 ## 6. Expose through the C ABI, bindings, and docs
 
 §2–§5 make `--backend X` work on the CLI. To reach every other consumer
