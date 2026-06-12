@@ -9667,3 +9667,92 @@ CUDA build works and produces correct output.
 codes→PCM. The detokenizer path searches: exact match → strip quant
 suffix + try F16 → strip quant suffix + try base. This makes quantized
 models find the F16 detokenizer without needing per-quant detokenizer files.
+
+## beam_size default — greedy vs beam-5 (issue #161, 2026-06-12)
+
+### Problem
+
+`whisper_params.beam_size` defaulted to 5 (from `whisper_full_default_params`
+at compile time). This propagated to ALL backends via the shared `whisper_params`
+struct. For whisper itself this was intentional (beam search improves quality),
+but for TDT/RNNT backends like parakeet it caused a 4.5× latency regression
+with zero WER benefit — the beam-5 default silently switched every backend
+from greedy to beam search.
+
+### Fix
+
+Default `beam_size = -1` (greedy). All whisper dispatch sites clamp
+`beam_search.beam_size` to `max(bs, 5)` for grammar-forced beam search.
+Non-whisper backends already check `beam_size > 0` and fall to 1 (greedy)
+or their own default (firered uses 3).
+
+### Takeaway
+
+Shared param structs that set defaults from one backend's perspective
+silently affect all others. Defaults should be "unset" (-1) with per-backend
+policy, not one-size-fits-all.
+
+## ggml_graph_get_tensor hash invalidated by ggml_gallocr (issue #164, 2026-06-12)
+
+### Problem
+
+`ggml_graph_get_tensor(gf, "name")` uses an internal hash table for O(1) lookup.
+`ggml_gallocr_reserve()` and `ggml_gallocr_alloc_graph()` both call
+`ggml_gallocr_alloc_graph_impl()` which resets this hash table (line 790:
+`ggml_hash_set_reset`). After that, name-based tensor lookup silently
+returns nullptr even though the tensor is still in the graph's node list.
+
+### Symptoms
+
+In the voxcpm2 TSLM graph, the "stop_probs" output tensor was found on the
+first call (before reserve), but returned nullptr on all subsequent calls.
+The stop predictor fell back to CPU computation, which diverged due to
+`ggml_flash_attn_ext` vs scalar attention precision differences, and the
+stop never fired.
+
+### Fix
+
+Cache tensor pointers at build time (after `build_tslm_step_graph` but
+BEFORE `ggml_gallocr_reserve`). Store in the bucket struct and reuse on
+subsequent calls without any name-based lookup.
+
+### Takeaway
+
+**Never call `ggml_graph_get_tensor` after `ggml_gallocr_reserve` or
+`ggml_gallocr_alloc_graph` on a cached/reused graph.** The hash is
+destroyed. Look up tensors immediately after graph construction and cache
+the pointers. This affects any code that reuses ggml graphs across calls
+(bucket patterns, step-graph caching, etc).
+
+## flash_attn_ext vs scalar attention — numerical divergence (2026-06-12)
+
+### Problem
+
+`ggml_flash_attn_ext` (tiled softmax, SIMD accumulation) and hand-coded
+scalar `causal_attn_step` (sequential dot product + softmax + weighted sum)
+produce different FP32 results due to reduction order. On Q4_K weights with
+28 transformer layers, the max_diff was ~0.09 at step 0, compounding to
+divergence across 64 AR steps.
+
+### Impact
+
+Any code that mixes graph-path hidden states with legacy CPU-path
+operations (like computing stop_score via `matmul_mv` on graph-produced
+hidden) will see compounding divergence. The stop predictor in voxcpm2
+never fired because the graph's hidden trajectory was numerically
+different enough that the CPU-computed stop score stayed below threshold.
+
+### Fix
+
+Compute the stop predictor entirely inside the graph (stop_proj + SiLU +
+stop_head + softmax as a graph output tensor). This ensures the stop
+decision uses the same numerical path as the hidden state.
+
+### Takeaway
+
+**Don't mix graph-computed intermediates with legacy CPU operations for
+critical decisions.** If a graph produces hidden states, any downstream
+computation (stop prediction, scoring, etc.) should also be in the graph.
+The precision difference between `ggml_mul_mat` (SIMD/BLAS) and scalar
+loops is small per step but compounds exponentially across autoregressive
+decode steps.

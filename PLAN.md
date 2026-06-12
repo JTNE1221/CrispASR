@@ -4277,7 +4277,7 @@ Report #09 separately notes that **funasr and fun-asr-mlt-nano have no entry in 
 
 1. **Add funasr + fun-asr-mlt-nano + sensevoice + paraformer to `tools/test-all-backends.py`.** Each needs a registry entry with the published GGUF location at `cstr/*-GGUF` (sample skeleton in report #09). The default JFK assertion (`werv < threshold`) at `tools/test-all-backends.py:670` catches the `!`-loop cleanly because `wer("…", "!!!!…") ≈ 1.0`.
 2. **Add a degenerate-loop guard in the funasr argmax loop.** Bail after the same `next_id` repeats > 20× in a row. Cheap, model-agnostic stop-loss. Either separately or as part of the broader `core_greedy_decode` work.
-3. **Honour `-l` on the funasr path.** The CLI's `params.language` doesn't reach `funasr.cpp`'s `PROMPT_PREFIX` (it's a `static const char*`, not a function of lang). Per-variant prompt selection + the `cstr/funasr-mlt-nano-GGUF` having an English/neutral prefix.
+3. **Honour `-l` on the funasr path.** — **DONE** `1b491c3d` 2026-06-12. Added `funasr_set_language()` C API + dynamic prompt builder matching upstream `get_prompt(language=...)`. Wired from CLI backend adapter (`params.language`) and session API (`s->source_language`). Kaggle-verified on CUDA: all 4 language configs (default, -l en, -l English, -l zh) produce correct JFK transcripts.
 4. **Diagnose the audio adaptor.** Print `frames_spliced` on init at verbose mode; ideally diff the adaptor output against the upstream FunASR Python reference on JFK. If the adaptor is the bug, the prompt fix above is window-dressing.
 
 Cross-refs: HISTORY 2026-05-20 "funasr: FunAudioLLM/Fun-ASR-{Nano,MLT-Nano}-2512 port lands"; 2026-05-21 "funasr: fix MLT-Nano hallucination (PLAN #99)" — only addressed a different failure mode (Chinese-prefix tail drift on the first ~20 correctly-decoded tokens); the present `!`-from-step-0 case is new.
@@ -5578,3 +5578,57 @@ Architecture: Whisper-small (80 mel, 12L, 768d) + whisperMLP SwiGLU adapter
 - Moved `orpheus_snac.{h,cpp}` → `core/snac.{h,cpp}` as standalone target
 - Shared by orpheus and mini-omni2 (was orpheus-only)
 - `orpheus_snac.h` remains as thin redirect for compat
+
+## §165 — beam_size default greedy + issue #161 (DONE)
+
+**Status:** DONE — `f1b5e546` 2026-06-12, Kaggle-verified on T4 CUDA.
+
+`whisper_params.beam_size` defaulted to 5 (from `whisper_full_default_params`),
+silently switching every backend to beam-5. For TDT/RNNT backends like parakeet
+this caused a ~4.5× latency regression with no WER benefit (issue #161 comment
+by praxeo).
+
+**Fix:** default to -1 (greedy). Beam search only when user passes `-bs N`.
+All whisper dispatch sites clamp `beam_search.beam_size` to `max(bs, 5)` so
+grammar-forced beam search still gets a sane width. Non-whisper backends
+already guard with `beam_size > 0`, so -1 naturally falls through to greedy.
+
+**Kaggle result:** default/greedy ratio 1.04×, beam5/greedy ratio 2.78×.
+All transcripts identical.
+
+## §166 — Vulkan conv_transpose_1d_f16 + voxcpm2 graph bugs (issue #164)
+
+### Part 1 — conv_transpose_1d_f16 shader — DONE `570bb76d`
+
+The f16 variant passed `A_TYPE=float16_t` without enabling the required
+`GL_EXT_shader_explicit_arithmetic_types_float16` extension. Strict glslang
+(Vulkan SDK 1.4.350+) rejected the shader → LNK2019 on ggml-vulkan.dll.
+
+Fix: enable the extension + cast kernel element to float in `fma()`.
+
+### Part 2 — VOXCPM2_USE_GRAPH stop predictor — IN PROGRESS
+
+**Root cause (confirmed across 8 Kaggle iterations):**
+
+1. `ggml_flash_attn_ext` vs legacy scalar attention produce ~0.09 max_diff
+   at step 0 that compounds across 64 AR steps, so the CPU-computed
+   `stop_score` never crosses the threshold.
+
+2. The fix (compute stop_proj + stop_head + softmax inside the TSLM step
+   graph as a `stop_probs` output tensor) was implemented but the tensor
+   lookup via `ggml_graph_get_tensor` silently failed on reused bucket
+   graphs because `ggml_gallocr_reserve` resets the internal hash table.
+
+3. Final fix (`ab39ea61` on branch `worktree-fix-vulkan-and-voxcpm2`):
+   cache "hidden_out" and "stop_probs" tensor pointers in TslmBucket at
+   build time (before `ggml_gallocr_reserve`), reuse on subsequent calls.
+
+**Status:** Fix committed on feature branch. Kaggle quota exhausted before
+verification — needs one more Kaggle run to confirm the stop predictor fires.
+
+### Part 3 — VAE decode crash (SIGABRT) — NOT STARTED
+
+The graph-path VAE crashes with rc=-6 after the AR loop. Separate from the
+stop predictor issue. The reporter also saw this on Vulkan (Intel Arc B580).
+May be related to the conv_transpose_1d_f16 shader fix or a separate tensor
+layout issue in the graph VAE path.
