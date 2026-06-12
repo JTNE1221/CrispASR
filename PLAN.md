@@ -5481,6 +5481,7 @@ all working, fully wired per `docs/contributing.md`, Kaggle GPU-tested.
 | KV + conv state cache | ✓ DONE | 10× ASR decode |
 | Depthformer manual KV cache | ✓ DONE | ~4× per TTS frame |
 | Buffer split (256 MB prefill, 64 MB decode) | ✓ DONE | 1.9× wall time |
+| Prefill gallocr (TTS/S2S) | ✓ DONE (55c90314) | -170 lines, GPU-ready |
 | Depthformer buffer reuse | ✓ DONE | reduced malloc |
 | GPU backend init (`ggml_backend_init_best`) | ✓ DONE | enables CUDA/Metal |
 | Kaggle GPU test | ✓ DONE | kernel COMPLETE on T4 |
