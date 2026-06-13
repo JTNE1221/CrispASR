@@ -5641,34 +5641,35 @@ The f16 variant passed `A_TYPE=float16_t` without enabling the required
 
 Fix: enable the extension + cast kernel element to float in `fma()`.
 
-### Part 2 — VOXCPM2_USE_GRAPH stop predictor — IN PROGRESS
+### Part 2 — VOXCPM2_USE_GRAPH TSLM NaN on CUDA — IN PROGRESS
 
-**Root cause:** For quantised models (Q4_K), CUDA dequantization + matmul
-produces different hidden states than CPU. `ggml_flash_attn_ext` vs legacy
-scalar attention compound across 28 layers, so any stop predictor computed
-from a different numerical path never fires.
+**Root cause (confirmed 2026-06-13, 8+ Kaggle P100 runs):** The TSLM
+step graph produces valid hidden_out on its first AR call (pos 4) but
+**NaN on every subsequent call** (pos 5+). The stop predictor not firing
+was a symptom — the hidden state itself is garbage from step 1 onwards.
 
-**Approach (on main, 4 commits so far):**
+The NaN originates in the bucketed TSLM step graph's KV cache path.
+The first AR step writes K/V at position 4 via `ggml_set_rows` (index-
+scatter). The second step reads positions 0-5 via `ggml_cont` +
+`ggml_flash_attn_ext`. Something about reading the just-written
+position 4 data back through the attention path produces NaN on CUDA.
 
-1. Replace `sync_tslm_kv_cpu_to_backend` with prefill replay through the
-   TSLM step graph — populates backend KV via the same flash_attn path
-   as AR steps. (`7449f793`)
+**Mitigations on main (7 commits):**
+- Prefill replay through graph KV (`7449f793`)
+- In-graph stop predictor (stop_proj → SiLU → stop_head → softmax,
+  no FSQ — ggml_round produces NaN on CUDA) (`a6aef4cf`, `2062180c`)
+- NaN guard on graph_stop_score (`4cd7de23`)
+- Direct ggml_graph_node scan for tensor lookup (`f94e84c2`)
+- Verbosity-gated debug logging (`6bd49dda`)
 
-2. Compute FSQ + stop predictor inside `build_tslm_step_graph`:
-   `hidden → fsq_in_proj → tanh → round(×9)/9 → fsq_out_proj →
-   stop_proj+bias → SiLU → stop_head → softmax`. (`a6aef4cf`)
-
-3. Direct `ggml_graph_node` scan instead of `ggml_graph_get_tensor`
-   for tensor lookup after gallocr. (`f94e84c2`)
-
-4. Unconditional debug logging for first 5 AR steps. (`022cbaa3`)
-
-**Kaggle results (5 runs so far):** Baseline (graph=0) fires correctly
-(stop=0.999 at step 7). Graph=1 still hits max_len ceiling. VAE decode
-works (no crash, clean audio). Stop_probs tensor lookup is the suspect —
-diagnostic kernel queued to confirm whether the tensor exists in the
-graph and what values it produces. chr1s4 GPU quota exhausted; waiting
-for session release.
+**Next steps:**
+1. Test with `ggml_cpy` (static-offset KV write) instead of
+   `ggml_set_rows` (index-scatter) — this is what the dynamic (non-
+   bucketed) graph path uses. If the dynamic path doesn't NaN, the
+   bucket reuse + set_rows combination is the culprit.
+2. Test with explicit F32 cache (`CRISPASR_KV_QUANT=f32`).
+3. If set_rows is confirmed broken, force the dynamic graph path as
+   a workaround (disables bucket caching, costs ~10% more per step).
 
 ### Part 3 — VAE decode crash on Vulkan — DONE
 
