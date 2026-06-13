@@ -420,6 +420,11 @@ struct voxcpm2_context {
         ggml_context* arena_ctx = nullptr;
         ggml_cgraph* gf = nullptr;
         ggml_gallocr_t galloc = nullptr;
+        // Cached output tensor pointers — ggml_graph_get_tensor's hash
+        // is invalidated by ggml_gallocr_reserve, so we look up once
+        // after build and reuse on subsequent calls.
+        ggml_tensor* cached_hidden_out = nullptr;
+        ggml_tensor* cached_stop_probs = nullptr;
     };
     std::array<TslmBucket, 5> tslm_buckets;
 
@@ -1251,6 +1256,22 @@ static ggml_cgraph* build_tslm_step_graph(voxcpm2_context* ctx, int n_past, int 
     ggml_set_output(cur);
     ggml_build_forward_expand(gf, cur);
 
+    // Stop predictor: stop_proj(+bias) → SiLU → stop_head → softmax.
+    // Computing this inside the graph ensures the stop decision uses the
+    // same numerical path as the hidden state, avoiding the compounding
+    // divergence that caused the stop predictor to never fire when
+    // stop_score was computed separately on CPU (issue #164).
+    if (W.stop_proj_w && W.stop_proj_b && W.stop_head_w) {
+        ggml_tensor* sp = ggml_mul_mat(ctx0, W.stop_proj_w, cur);
+        sp = ggml_add(ctx0, sp, W.stop_proj_b);
+        sp = ggml_silu(ctx0, sp);
+        ggml_tensor* sl = ggml_mul_mat(ctx0, W.stop_head_w, sp);
+        sl = ggml_soft_max(ctx0, sl);
+        ggml_set_name(sl, "stop_probs");
+        ggml_set_output(sl);
+        ggml_build_forward_expand(gf, sl);
+    }
+
     if (!arena_ctx) {
         ggml_free(ctx0);
     }
@@ -1305,6 +1326,11 @@ static ggml_cgraph* get_or_build_tslm_step_graph(voxcpm2_context* ctx, int bucke
         bk.arena_meta.clear();
         return nullptr;
     }
+    // Cache output tensor pointers NOW — ggml_graph_get_tensor uses a
+    // hash table that ggml_gallocr_reserve (below) resets internally.
+    // After reserve, name-based lookup silently fails on reused graphs.
+    bk.cached_hidden_out = ggml_graph_get_tensor(bk.gf, "hidden_out");
+    bk.cached_stop_probs = ggml_graph_get_tensor(bk.gf, "stop_probs");
     bk.galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
     if (!bk.galloc || !ggml_gallocr_reserve(bk.galloc, bk.gf)) {
         if (bk.galloc) {
@@ -1333,7 +1359,8 @@ static ggml_cgraph* get_or_build_tslm_step_graph(voxcpm2_context* ctx, int bucke
 // attention work on the masked tail — flash-attn computes Q·K^T over
 // the full Lk even when the tail is -inf masked, so 128 is meaningfully
 // cheaper than 2048 for short prompts; multi-bucket lets us pick.
-static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hidden_in, int pos) {
+static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hidden_in, int pos,
+                                          float* out_stop_score = nullptr) {
     const int d = (int)ctx->hp.tslm_d_model;
     int32_t pos_i = pos;
 
@@ -1385,9 +1412,34 @@ static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hid
         return std::vector<float>(d, 0.0f);
     }
 
-    ggml_tensor* out = ggml_graph_get_tensor(gf, "hidden_out");
+    // Output tensor pointers. Bucketed graphs cache these in TslmBucket
+    // (looked up at build time before ggml_gallocr_reserve resets the hash).
+    // Dynamic (non-bucketed) graphs look up fresh each call.
+    ggml_tensor* out = nullptr;
+    ggml_tensor* sp_tensor = nullptr;
+    if (bucketed) {
+        out = ctx->tslm_buckets[bucket_idx].cached_hidden_out;
+        sp_tensor = ctx->tslm_buckets[bucket_idx].cached_stop_probs;
+    } else {
+        out = ggml_graph_get_tensor(gf, "hidden_out");
+        sp_tensor = ggml_graph_get_tensor(gf, "stop_probs");
+    }
     std::vector<float> result(d);
-    ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
+    if (out) {
+        ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
+    }
+
+    // Extract stop score from the graph if available and requested.
+    if (out_stop_score) {
+        if (sp_tensor) {
+            float probs[2] = {0.0f, 0.0f};
+            ggml_backend_tensor_get(sp_tensor, probs, 0, 2 * sizeof(float));
+            *out_stop_score = probs[1]; // p(stop) = softmax[1]
+        } else {
+            *out_stop_score = -1.0f; // signal: not available
+        }
+    }
+
     return result;
 }
 
@@ -3144,11 +3196,13 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
     };
     std::vector<WnEntry> wn_entries;
     std::vector<std::string> alpha_names; // for snake1d inv_alpha precompute
+    std::vector<std::string> bias_names;  // bias tensors that need GPU copies
     std::vector<std::string> sr_names;    // "vae.dec.sr_cond.<b>"
 
     // layer.0: depthwise k=7, groups=feat_dim=64
     wn_entries.push_back({"vae.dec.layer.0", "vae.dec.layer.0.weight_g", "vae.dec.layer.0.weight_v",
                           /*out_ch*/ 64, /*in_ch*/ 1, /*ksize*/ 7});
+    bias_names.push_back("vae.dec.layer.0.bias");
     // layer.1: 1x1 dense, 64 -> 2048
     {
         auto it_g = T.find("vae.dec.layer.1.weight_g");
@@ -3156,6 +3210,7 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
         wn_entries.push_back({"vae.dec.layer.1", "vae.dec.layer.1.weight_g", "vae.dec.layer.1.weight_v",
                               /*out_ch*/ out_ch1, /*in_ch*/ 64, /*ksize*/ 1});
     }
+    bias_names.push_back("vae.dec.layer.1.bias");
 
     // Upsample blocks 2..7
     static const int up_rates[] = {8, 6, 5, 2, 2, 2};
@@ -3177,6 +3232,7 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
             ksize_up = 2 * up_rates[b];
         wn_entries.push_back({lp + ".block.1", lp + ".block.1.weight_g", lp + ".block.1.weight_v",
                               /*out_ch (wn arg)*/ Cc_in, /*in_ch (wn arg)*/ out_ch_b, /*ksize*/ ksize_up});
+        bias_names.push_back(lp + ".block.1.bias");
 
         // 3x residual units .block.{2,3,4} operating on out_ch_b channels
         for (int r = 0; r < 3; r++) {
@@ -3187,9 +3243,11 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
             // .1: depthwise k=7, channels=out_ch_b
             wn_entries.push_back({rp + ".1", rp + ".1.weight_g", rp + ".1.weight_v",
                                   /*out_ch*/ out_ch_b, /*in_ch*/ 1, /*ksize*/ 7});
+            bias_names.push_back(rp + ".1.bias");
             // .3: 1x1 dense, out_ch_b -> out_ch_b
             wn_entries.push_back({rp + ".3", rp + ".3.weight_g", rp + ".3.weight_v",
                                   /*out_ch*/ out_ch_b, /*in_ch*/ out_ch_b, /*ksize*/ 1});
+            bias_names.push_back(rp + ".3.bias");
         }
 
         Cc_in = out_ch_b;
@@ -3200,9 +3258,12 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
     // layer.9: k=7 dense, last_ch -> 1
     wn_entries.push_back({"vae.dec.layer.9", "vae.dec.layer.9.weight_g", "vae.dec.layer.9.weight_v",
                           /*out_ch*/ 1, /*in_ch*/ Cc_in, /*ksize*/ 7});
+    bias_names.push_back("vae.dec.layer.9.bias");
 
-    // Sum tensor overhead — generous, will be exact once we count
-    const size_t n_tensors_estimate = wn_entries.size() + alpha_names.size() + 2 * sr_names.size() + 16;
+    // Sum tensor overhead — generous, will be exact once we count.
+    // Includes: wn weights + inv_alpha + alpha copies + bias copies + sr scale/bias.
+    const size_t n_tensors_estimate =
+        wn_entries.size() + 2 * alpha_names.size() + bias_names.size() + 2 * sr_names.size() + 16;
     const size_t meta_size = ggml_tensor_overhead() * n_tensors_estimate;
 
     ggml_init_params ip = {
@@ -3249,12 +3310,34 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
         if (it == T.end() || !it->second)
             continue;
         int C = (int)ggml_nelements(it->second);
+        // inv_alpha tensor (precomputed 1/(alpha + eps))
         ggml_tensor* t = ggml_new_tensor_1d(ctx->vae_wn_ggml_ctx, GGML_TYPE_F32, C);
         if (!t)
             return false;
         std::string key = name + ".inv";
         ggml_set_name(t, key.c_str());
         M[key] = t;
+        // GPU copy of alpha itself — the graph references alpha tensors
+        // directly, which must be on the compute backend (#164 VAE crash).
+        ggml_tensor* ta = ggml_new_tensor_1d(ctx->vae_wn_ggml_ctx, GGML_TYPE_F32, C);
+        if (!ta)
+            return false;
+        ggml_set_name(ta, name.c_str());
+        M[name] = ta;
+    }
+
+    // GPU copies of bias tensors. The GGUF-loaded biases live in the CPU
+    // weight buffer; the VAE graph needs them on the compute backend.
+    for (const auto& name : bias_names) {
+        auto it = T.find(name);
+        if (it == T.end() || !it->second)
+            continue;
+        int C = (int)ggml_nelements(it->second);
+        ggml_tensor* t = ggml_new_tensor_1d(ctx->vae_wn_ggml_ctx, GGML_TYPE_F32, C);
+        if (!t)
+            return false;
+        ggml_set_name(t, name.c_str());
+        M[name] = t;
     }
 
     for (const auto& sr_pfx : sr_names) {
@@ -3310,20 +3393,37 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
         ggml_backend_tensor_set(M[e.key], w.data(), 0, w.size() * sizeof(float));
     }
 
-    // Snake1d inv_alpha = 1 / (α + 1e-9) per channel (matches Python's
-    // (alpha + 1e-9).reciprocal() semantics — including for tiny α the
-    // legacy CPU path silently rewrote as 1.0).
+    // Snake1d: populate inv_alpha + copy alpha to the compute backend.
     for (const auto& name : alpha_names) {
         auto it = T.find(name);
         if (it == T.end() || !it->second)
             continue;
         int C = (int)ggml_nelements(it->second);
         const float* a = (const float*)it->second->data;
+        // inv_alpha = 1 / (α + 1e-9) per channel (matches Python's
+        // (alpha + 1e-9).reciprocal() semantics)
         std::vector<float> inv(C);
         for (int i = 0; i < C; i++) {
             inv[i] = 1.0f / (a[i] + 1e-9f);
         }
         ggml_backend_tensor_set(M[name + ".inv"], inv.data(), 0, inv.size() * sizeof(float));
+        // Copy alpha itself to the GPU (#164 — graph must not reference
+        // CPU-resident tensors on discrete GPU backends like Vulkan).
+        if (M.count(name)) {
+            ggml_backend_tensor_set(M[name], a, 0, (size_t)C * sizeof(float));
+        }
+    }
+
+    // Copy bias tensors to the compute backend.
+    for (const auto& name : bias_names) {
+        auto it = T.find(name);
+        if (it == T.end() || !it->second)
+            continue;
+        int C = (int)ggml_nelements(it->second);
+        const float* b = (const float*)it->second->data;
+        if (M.count(name)) {
+            ggml_backend_tensor_set(M[name], b, 0, (size_t)C * sizeof(float));
+        }
     }
 
     // SR conditioning: scale_embed/bias_embed PyTorch shape (C, 4) — bucket
@@ -3463,12 +3563,22 @@ static std::vector<float> vae_decode_graph(voxcpm2_context* ctx, const std::vect
         auto it = M.find(key);
         return it == M.end() ? nullptr : it->second;
     };
+    // Bias and Alpha: prefer GPU copies from M (created by vae_wn_init_ggml
+    // to avoid mixing CPU/GPU tensors in the graph — #164 Vulkan crash).
     auto Bias = [&](const std::string& prefix) -> ggml_tensor* {
-        auto it = Tens.find(prefix + ".bias");
+        std::string key = prefix + ".bias";
+        auto it_m = M.find(key);
+        if (it_m != M.end())
+            return it_m->second;
+        auto it = Tens.find(key);
         return (it == Tens.end()) ? nullptr : it->second;
     };
     auto Alpha = [&](const std::string& prefix) -> ggml_tensor* {
-        auto it = Tens.find(prefix + ".alpha");
+        std::string key = prefix + ".alpha";
+        auto it_m = M.find(key);
+        if (it_m != M.end())
+            return it_m->second;
+        auto it = Tens.find(key);
         return (it == Tens.end()) ? nullptr : it->second;
     };
     auto InvAlpha = [&](const std::string& prefix) -> ggml_tensor* { return Wget(prefix + ".alpha.inv"); };
@@ -5106,6 +5216,7 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     std::vector<std::vector<float>> patches;
     float stop_thresh = 0.5f;
     int step = 0;
+    float graph_stop_score = -1.0f; // < 0 = not yet computed; set by tslm_step_graph
 
     // Effective max_len: Python _generate() caps the AR loop at
     //   min(int(target_text_length * retry_badcase_ratio_threshold + 10), max_len)
@@ -5212,17 +5323,22 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
             }
         }
 
-        // 2. Stop check — BEFORE TSLM step, using PREVIOUS tslm_hidden
-        // Python: stop_head(stop_actn(stop_proj(lm_hidden))).argmax() == 1
-        // At step 0, tslm_hidden is the normed prefill output (not FSQ'd).
-        // At step >0, tslm_hidden is the FSQ'd output from the previous step.
+        // 2. Stop check — BEFORE TSLM step, using PREVIOUS tslm_hidden.
+        // When the graph path is active, use the stop score computed inside
+        // the TSLM graph (same numerical path as the hidden state — avoids
+        // compounding divergence between graph flash_attn and CPU scalar
+        // attention that caused the stop predictor to never fire, #164).
+        // At step 0, graph_stop_score is < 0 (not yet computed), so we
+        // fall through to the CPU stop_score as before.
         {
             tb = bench ? vox_now_ms() : 0;
-            float sp = stop_score(ctx, tslm_hidden.data(), cpu_be);
+            const bool have_graph_stop = use_graph_tslm && graph_stop_score >= 0.0f;
+            float sp = have_graph_stop ? graph_stop_score : stop_score(ctx, tslm_hidden.data(), cpu_be);
             if (bench)
                 sum_stop += vox_now_ms() - tb;
             if (ctx->verbosity >= 2) {
-                fprintf(stderr, "voxcpm2: step %d stop=%.3f (%.1f ms)\n", step, sp, vox_now_ms() - t0_step);
+                fprintf(stderr, "voxcpm2: step %d stop=%.4f (%s) (%.1f ms)\n", step, sp,
+                        have_graph_stop ? "graph" : "cpu", vox_now_ms() - t0_step);
             }
             if (sp > stop_thresh && step > min_len) {
                 if (ctx->verbosity >= 1) {
@@ -5241,11 +5357,32 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
                     if (!init_tslm_kv_backend(ctx)) {
                         fprintf(stderr, "voxcpm2: tslm kv backend init failed; falling back to legacy step\n");
                     } else {
-                        sync_tslm_kv_cpu_to_backend(ctx);
+                        // Replay prefill through the graph to populate the
+                        // backend KV cache directly, avoiding the numerical
+                        // divergence between legacy CPU attention (used by
+                        // prefill) and ggml_flash_attn_ext (used by graph
+                        // steps). sync_tslm_kv_cpu_to_backend transposes
+                        // the layout correctly, but the KV VALUES from the
+                        // legacy attention path compound differently through
+                        // 28 layers, causing the stop predictor to never
+                        // fire (#164).
+                        const int n_prefill = ctx->tslm_kv.n_past;
+                        if (n_prefill > 0 && !pi.combined_embed.empty()) {
+                            const int d = (int)ctx->hp.tslm_d_model;
+                            ctx->tslm_kv.n_past = 0;
+                            for (int t = 0; t < n_prefill; t++) {
+                                const float* emb = pi.combined_embed.data() + (size_t)t * d;
+                                tslm_step_graph(ctx, emb, t);
+                                ctx->tslm_kv.n_past = t + 1;
+                            }
+                            if (ctx->verbosity >= 1) {
+                                fprintf(stderr, "voxcpm2: replayed %d prefill tokens through graph KV\n", n_prefill);
+                            }
+                        }
                         ctx->tslm_kv_synced = true;
                     }
                 }
-                tslm_hidden = tslm_step_graph(ctx, enc_lm.data(), tslm_pos);
+                tslm_hidden = tslm_step_graph(ctx, enc_lm.data(), tslm_pos, &graph_stop_score);
             } else {
                 std::vector<float> h = enc_lm;
                 for (int l = 0; l < (int)ctx->hp.tslm_n_layers; l++) {
