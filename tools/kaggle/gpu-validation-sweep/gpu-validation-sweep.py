@@ -63,48 +63,36 @@ def download_model(repo, filename, token=None):
 
 
 def run_crispasr(args, env_extra=None, timeout=300):
-    """Run crispasr CLI, return (rc, stdout+stderr, elapsed_s)."""
+    """Run crispasr CLI with -np, return (rc, transcript, elapsed_s).
+
+    Always passes -np (no-prints) to suppress log output to stderr.
+    Transcript is read from stdout only — clean, no log-line pollution.
+    Stderr is printed for diagnostics but not mixed into the transcript.
+    """
     e = os.environ.copy()
     if env_extra:
         e.update(env_extra)
+    # Ensure -np is present so stdout has only the transcript
+    if "-np" not in args and "--no-prints" not in args:
+        args = list(args) + ["-np"]
     cmd = [str(CLI)] + args
     print(f"\n$ {' '.join(cmd)}", flush=True)
     t0 = time.time()
     try:
-        # Use bytes mode + manual decode to handle binary stderr from some backends
         r = subprocess.run(cmd, env=e, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=timeout)
         rc = r.returncode
-        out = (r.stdout + b"\n" + r.stderr).decode("utf-8", errors="replace")
+        transcript = r.stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = r.stderr.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired as ex:
         rc = -99
-        out = ((ex.stdout or b"") + b"\n" + (ex.stderr or b"")).decode("utf-8", errors="replace")
+        transcript = (ex.stdout or b"").decode("utf-8", errors="replace").strip()
+        stderr_text = (ex.stderr or b"").decode("utf-8", errors="replace")
     elapsed = round(time.time() - t0, 1)
-    return rc, out, elapsed
-
-
-# Log-line prefixes emitted by backends — filter these when extracting transcripts.
-_LOG_PREFIXES = (
-    "crispasr", "whisper", "firered", "mimo", "gemma", "moss", "qwen",
-    "granite", "omniasr", "parakeet", "canary", "voxtral", "cohere",
-    "moonshine", "sensevoice", "funasr", "paraformer", "kyutai", "glm",
-    "indextts", "chatterbox", "vibevoice", "fireredpunc", "nemotron",
-    "core_", "ggml", "gguf", "  ", "[", "  fbank", "  enc_out",
-)
-
-
-def extract_transcript(output_text):
-    """Extract the actual transcript from crispasr CLI output."""
-    lines = [l.strip() for l in output_text.splitlines() if l.strip()]
-    # The transcript is typically the last line that doesn't look like a log line
-    for line in reversed(lines):
-        low = line.lower()
-        if any(low.startswith(p) for p in _LOG_PREFIXES):
-            continue
-        if line.startswith("$") or line.startswith("--") or "=" in line[:20]:
-            continue
-        return line
-    return ""
+    # Print last few stderr lines for diagnostics
+    for line in stderr_text.strip().splitlines()[-3:]:
+        print(f"  [stderr] {line}", flush=True)
+    return rc, transcript, elapsed
 
 
 # ── Early diagnostics (before anything can fail) ──────────────────
@@ -230,7 +218,7 @@ try:
         "-f", str(jfk_wav), "-v",
     ], timeout=300)
 
-    transcript = extract_transcript(out)
+    transcript = out
 
     mimo_ok = rc == 0 and len(transcript) > 10
     summary["mimo_cuda_smoke"] = {
@@ -249,7 +237,7 @@ try:
             "-m", str(mimo_model), "--tokenizer-model", str(mimo_tok),
             "-f", str(long_wav), "-v",
         ], timeout=600)
-        t2 = extract_transcript(out2)
+        t2 = out2
         summary["mimo_cuda_long"] = {"rc": rc2, "elapsed": elapsed2, "ok": rc2 == 0, "chars": len(t2)}
         print(f"  mimo-asr CUDA long: rc={rc2} elapsed={elapsed2}s chars={len(t2)}", flush=True)
         kh.step("test1.long.done", **summary["mimo_cuda_long"])
@@ -275,13 +263,13 @@ try:
     rc_a, out_a, elapsed_a = run_crispasr([
         "-m", str(gemma_model), "-f", str(jfk_wav), "-v",
     ], timeout=300)
-    ta = extract_transcript(out_a)
+    ta = out_a
 
     # B: force CPU residency
     rc_b, out_b, elapsed_b = run_crispasr([
         "-m", str(gemma_model), "-f", str(jfk_wav), "-v",
     ], env_extra={"CRISPASR_N_GPU_LAYERS": "0"}, timeout=300)
-    tb = extract_transcript(out_b)
+    tb = out_b
 
     speedup = round(elapsed_b / elapsed_a, 2) if elapsed_a > 0 else 0
     summary["gemma4_gpu_residency"] = {
@@ -318,7 +306,7 @@ try:
     rc, out, elapsed = run_crispasr([
         "-m", str(moss_model), "-f", str(jfk_wav), "-v",
     ], timeout=300)
-    transcript = extract_transcript(out)
+    transcript = out
 
     # Also test with --prompt for audio understanding mode
     rc2, out2, elapsed2 = run_crispasr([
@@ -326,7 +314,7 @@ try:
         "--prompt", "What is the speaker talking about?",
         "-v",
     ], timeout=300)
-    answer = extract_transcript(out2)
+    answer = out2
 
     summary["moss_audio_gpu"] = {
         "asr_rc": rc, "asr_elapsed": elapsed,
@@ -372,7 +360,7 @@ for backend_name, repo, fname, extra in chunk_backends:
         rc_short, out_short, el_short = run_crispasr([
             "-m", str(model_path), "-f", str(jfk_wav), "-v",
         ], timeout=300)
-        t_short = extract_transcript(out_short)
+        t_short = out_short
 
         # B: long audio (60s concat) — tests chunking
         if long_wav.exists():
@@ -381,7 +369,7 @@ for backend_name, repo, fname, extra in chunk_backends:
             ], timeout=600)
         else:
             rc_long, out_long, el_long = -1, "", 0
-        t_long = extract_transcript(out_long)
+        t_long = out_long
 
         # C: long audio with explicit chunk-seconds
         if long_wav.exists():
@@ -391,7 +379,7 @@ for backend_name, repo, fname, extra in chunk_backends:
             ], timeout=600)
         else:
             rc_chunk, out_chunk, el_chunk = -1, "", 0
-        t_chunk = extract_transcript(out_chunk)
+        t_chunk = out_chunk
 
         result = {
             "short_rc": rc_short, "short_chars": len(t_short),
@@ -435,13 +423,13 @@ try:
         rc_a, out_a, el_a = run_crispasr([
             "-m", str(gemma_model), "-f", str(long_wav), "-v",
         ], timeout=600)
-        ta = extract_transcript(out_a)
+        ta = out_a
 
         # B: with CRISPASR_GEMMA4_AUTO_CHUNK=1
         rc_b, out_b, el_b = run_crispasr([
             "-m", str(gemma_model), "-f", str(long_wav), "-v",
         ], env_extra={"CRISPASR_GEMMA4_AUTO_CHUNK": "1"}, timeout=600)
-        tb = extract_transcript(out_b)
+        tb = out_b
 
         summary["gemma4_auto_chunk"] = {
             "default_rc": rc_a, "default_chars": len(ta), "default_elapsed": el_a,
@@ -470,14 +458,14 @@ print("=" * 70, flush=True)
 kh.step("test6.start")
 
 try:
-    cohere_ja_model = download_model("cstr/cohere-asr-ja-v0.1-GGUF", "cohere-asr-ja-v0.1-q4_k.gguf", token)
+    cohere_ja_model = download_model("CKHO/cohere-asr-ja-GGUF", "cohere-asr-ja-q4_k.gguf", token)
     kh.step("test6.model_downloaded")
 
     # JFK EN (should still produce something — model is JA-tuned but EN is in the base)
     rc_en, out_en, el_en = run_crispasr([
         "-m", str(cohere_ja_model), "-f", str(jfk_wav), "-v",
     ], timeout=300)
-    t_en = extract_transcript(out_en)
+    t_en = out_en
 
     summary["cohere_asr_ja"] = {
         "en_rc": rc_en, "en_chars": len(t_en), "en_elapsed": el_en,
