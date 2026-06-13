@@ -1405,6 +1405,16 @@ set_tests_properties(test-dry-run-resolve PROPERTIES
     LABELS "cli"
     TIMEOUT 60)
 
+# ─── test-server-ws-stream — live: --ws-port real-time WebSocket ASR streaming.
+# Raw-socket client (stdlib only) verifies the RFC 6455 handshake + a streaming
+# transcription. Needs a whisper ggml model; SKIPs otherwise.
+add_test(NAME test-server-ws-stream
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test-server-ws-stream.py
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(test-server-ws-stream PROPERTIES
+    LABELS "live;server"
+    TIMEOUT 300)
+
 # ─── test-release-workflow — validate release.yml targets (issue #131).
 # Static test: no binary or model needed, just parses YAML.
 add_test(NAME test-release-workflow

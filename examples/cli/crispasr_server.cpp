@@ -38,8 +38,9 @@
 #include "crispasr_truecase_loader.h"    // shared --truecase-model resolution + apply (CLI parity)
 #include "crispasr_punctuation_policy.h" // crispasr_should_auto_enable_punctuation()
 
-#include "common-crispasr.h" // read_audio_data
-#include "crispasr_chat.h"   // /v1/chat/completions
+#include "common-crispasr.h"     // read_audio_data
+#include "crispasr_chat.h"       // /v1/chat/completions
+#include "../server/ws_stream.h" // real-time WebSocket ASR streaming (--ws-port)
 #include "crispasr_c2pa.h"
 #include "crispasr_tts_chunking.h"
 #include "crispasr_tts_disclaimer.h"
@@ -2292,13 +2293,31 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     if (!params.chat_model.empty()) {
         fprintf(stderr, "  POST /v1/chat/completions        — text-LLM chat (model '%s')\n", params.chat_model.c_str());
     }
-    fprintf(stderr, "\n");
     if (!api_keys.empty())
         fprintf(stderr, "crispasr-server: API key authentication enabled\n");
+
+    // Real-time WebSocket ASR streaming on a second port (--ws-port). Opt-in:
+    // -1 disables (default), 0 = main port + 1, N = port N. Reuses the streaming
+    // session API (crispasr_session_stream_*); clients send binary 16 kHz mono
+    // float32 PCM and receive JSON partial/final text events. Whisper-only today.
+    bool ws_started = false;
+    if (params.server_ws_port >= 0) {
+        const int ws_port = params.server_ws_port == 0 ? port + 1 : params.server_ws_port;
+        if (ws_stream_start(params.model.c_str(), ws_port, params.n_threads) == 0) {
+            ws_started = true;
+            fprintf(stderr, "  WS   ws://%s:%d                 — real-time streaming ASR (binary PCM in, JSON out)\n",
+                    host.c_str(), ws_port);
+        } else {
+            fprintf(stderr, "crispasr-server: warning: failed to start WebSocket streaming on port %d\n", ws_port);
+        }
+    }
+    fprintf(stderr, "\n");
 
     svr.listen(host, port);
 
     // Clean up cached VAD context on shutdown (#132).
+    if (ws_started)
+        ws_stream_stop();
     crispasr_vad_free_cache();
 
     return 0;
