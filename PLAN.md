@@ -5662,14 +5662,23 @@ position 4 data back through the attention path produces NaN on CUDA.
 - Direct ggml_graph_node scan for tensor lookup (`f94e84c2`)
 - Verbosity-gated debug logging (`6bd49dda`)
 
+**Ruled out (2026-06-13):**
+- `ggml_set_rows` vs `ggml_cpy` — both NaN identically
+  (`VOXCPM2_NO_BUCKET=1` test, same NaN at pos=5)
+- FSQ in graph — removed, still NaN
+- cuBLAS F16 overflow — the upstream-prs #15 fix
+  (`use_fp16 = !(src1->type == GGML_TYPE_F32)`) is already applied
+
 **Next steps:**
-1. Test with `ggml_cpy` (static-offset KV write) instead of
-   `ggml_set_rows` (index-scatter) — this is what the dynamic (non-
-   bucketed) graph path uses. If the dynamic path doesn't NaN, the
-   bucket reuse + set_rows combination is the culprit.
-2. Test with explicit F32 cache (`CRISPASR_KV_QUANT=f32`).
-3. If set_rows is confirmed broken, force the dynamic graph path as
-   a workaround (disables bucket caching, costs ~10% more per step).
+1. `VOXCPM2_NAN_CHECK=1` per-node NaN checker (`3683ad0a`) — walks
+   every graph node after compute and reports the first op with
+   NaN/Inf (op name, shape, tensor name). Same approach as the
+   funasr #15 diagnosis. Kernel queued on chr1str.
+2. Once the guilty op is identified: check if it's a known ggml CUDA
+   issue (flash_attn_ext, Q4_K mul_mat, or a scheduler bug) and
+   either patch locally or file upstream per `tools/upstream-prs/`
+   workflow.
+3. Test with F16 model to rule out Q4_K dequant as the source.
 
 ### Part 3 — VAE decode crash on Vulkan — DONE
 
