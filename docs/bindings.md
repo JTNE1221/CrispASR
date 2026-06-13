@@ -33,7 +33,9 @@ backend doesn't expose that knob, but the call is safe to make.
 | `set_alt_n(n)` | `set_alt_n` / `set_alt_n` / `SetAltN` / `setAltN` | Per-token alternative candidates (whisper greedy) |
 | `set_whisper_decode_extras(...)` | `set_whisper_decode_extras` / `set_whisper_decode_extras` / `SetWhisperDecodeExtras` / `setWhisperDecodeExtras` | suppress_nst, suppress_regex, carry_initial_prompt |
 | `set_ask(prompt)` | `set_ask` / `set_ask` / `SetAsk` / `setAsk` | Free-form prompt for instruct-tuned audio-LLM backends (granite, voxtral, qwen3-asr, glm-asr, gemma4-e2b, mimo-asr). Empty string clears. |
-| `set_punc_model(alias\|path)` | `set_punc_model` / — / `SetPuncModel` / `setPuncModel` (Dart) | Load FireRedPunc/PCS punctuation restoration on the session (`auto`/`firered`/`fullstop`/`punctuate-all`/`pcs`/path; auto-downloads). Restores punctuation on backends that emit none (parakeet RNNT/CTC, …). `"none"`/`""` unloads. |
+| `set_punc_model(alias\|path)` | `set_punc_model` / `set_punc_model` / `SetPuncModel` / `setPuncModel` | Load FireRedPunc/PCS punctuation restoration on the session (`auto`/`firered`/`fullstop`/`punctuate-all`/`pcs`/path; auto-downloads). Restores punctuation on backends that emit none (parakeet RNNT/CTC, …). `"none"`/`""` unloads. (Also Java/Ruby.) |
+| `set_hotwords(words, boost)` | `set_hotwords` / `set_hotwords` / `SetHotwords` / `setHotwords` | Comma-separated contextual-biasing hotwords, boosted per token match (parakeet CTC/TDT trie; LLM-backend prompt injection). Empty string clears. (All six wrappers.) |
+| `set_g2p_dict(source)` | `set_g2p_dict` / `set_g2p_dict` / `SetG2PDict` / `setG2pDict` | Select the G2P pronunciation dictionary for TTS phonemization (`olaph`/`open-dict`/path). (All six wrappers.) |
 
 > **Tip — chunk-boundary dedup for bindings.** When a binding drives a
 > CAP_UNBOUNDED_INPUT backend (parakeet, canary, …) chunk-by-chunk and
@@ -52,9 +54,15 @@ backend doesn't expose that knob, but the call is safe to make.
 | Rust | ✓ | Full — same surface as Python |
 | Dart / Flutter | ✓ | Full — used by [CrisperWeaver](https://github.com/CrispStrobe/CrisperWeaver) |
 | Go | ✓ | Full (all 11 capabilities) |
-| Java | ✓ | Transcribe + align + LID |
-| Ruby | ✓ | Transcribe |
-| JavaScript | partial | WebAssembly approach; see PLAN.md #59 |
+| Java | ✓ | Transcribe + align + LID; full session-setter parity (JNA) |
+| Ruby | ✓ | Transcribe; full session-setter parity (C ext) |
+| JavaScript | partial | WASM ASR is whisper-only today; session-setter parity for TTS. See PLAN.md #59. |
+
+> **Setter parity.** Python, Rust (`crispasr-sys` + `crispasr` at the repo root),
+> Go, Dart, Java, and Ruby all expose the complete `crispasr_session_set_*`
+> surface from `include/crispasr_session.h`. The native Node addon
+> (`examples/addon.node`, see below) reaches it via `transcribeSession`; the
+> WASM/JS ASR path is the remaining gap (tracked in PLAN.md).
 
 ## Python
 

@@ -221,7 +221,7 @@ if (TARGET yourmodel_lib)
 endif()
 ```
 
-### Bindings — docstrings only (dispatch is automatic once the C ABI is wired)
+### Bindings — docstrings only for a new *backend* (dispatch is automatic once the C ABI is wired)
 - `python/crispasr/_binding.py` — add the name to the TTS-backend lists in
   the `synthesize` comment + docstring.
 - `bindings/go/crispasr_session.go` — add to the header/type comments.
@@ -229,6 +229,26 @@ endif()
 - `flutter/crispasr/lib/src/crispasr.dart` — add to the synthesize
   docstring. Dart uses `DynamicLibrary.lookupFunction` with symbol-presence
   checks, so new C-ABI functions are discovered automatically.
+
+### Bindings — adding a new *session setter* (`crispasr_session_set_*`)
+A new setter is **not** auto-discovered; every wrapper exposes it explicitly
+and they are kept at full parity. Add the new method to **all six** wrappers
+(mirror the nearest existing setter in each — argtypes/restype, error-on-rc≠0):
+- `python/crispasr/_binding.py` — ctypes method on `Session`.
+- `bindings/go/crispasr_session.go` — the cgo-preamble `int crispasr_session_set_X(...)`
+  declaration **and** the `Set X` method.
+- **Rust (repo root, not `bindings/`)**: `crispasr-sys/src/lib.rs` extern decl
+  **and** `crispasr/src/lib.rs` safe `pub fn`.
+- `flutter/crispasr/lib/src/crispasr.dart` — `lookupFunction` + method.
+- `bindings/java/.../CrispasrSession.java` — JNA `Lib` interface decl + method.
+- `bindings/ruby/ext/ruby_crispasr_session.c` — `extern` decl, `rb_session_set_X`,
+  and a `rb_define_singleton_method` registration.
+- The HTTP server (`examples/cli/crispasr_server.cpp`) exposes the equivalent as
+  a per-request `form_*` field on the transcription endpoints (or a startup flag
+  for resident post-processors).
+- `bindings/javascript/emscripten.cpp` — WASM/JS (built with emcc).
+The canonical surface is `include/crispasr_session.h`; `docs/bindings.md` has the
+per-wrapper setter table.
 
 ### Docs
 - `README.md` — model-table row (TTS or ASR section).
