@@ -10,6 +10,32 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## A feature has ~8 front-ends — wiring it into one isn't "done" (§166)
+
+A user-facing option in this repo must be threaded through every surface or it
+silently drifts: the CLI (`crispasr_run.cpp`), the HTTP server
+(`crispasr_server.cpp` — per-request form params *and* resident startup state),
+the C-ABI (`crispasr_c_api.cpp` + `crispasr_session.h`), the six native wrappers
+(Python ctypes, Go cgo, **Rust at the repo root** `crispasr-sys`/`crispasr` — not
+under `bindings/`, Dart FFI, Java JNA, Ruby C-ext), the WASM/JS Embind binding,
+and the legacy Node addon. `--punc-model` started life CLI-only; closing the gap
+meant ~8 edits + a test per surface. Lessons that paid off:
+- **Share the resolution, don't copy it.** The `--punc-model` alias→model table
+  lives in one pure header (`src/crispasr_punc_model.h`) included by CLI, server,
+  and C-ABI; the truecase loader likewise. Copies drift the moment a backend or
+  URL changes.
+- **Audit by enumerating surfaces, then diff each against the C-ABI** (the source
+  of truth) — that's how the per-wrapper gaps (set_hotwords/set_g2p_dict/
+  set_punc_model/set_speaker_id missing in various wrappers) and the threadbare
+  Node addon were found.
+- **Verify per surface with the toolchain that exists** (cargo, go build, dart
+  analyze, javac+JNA, ruby `cc -fsyntax-only`, ctypes import). When a toolchain
+  is absent (emcc, cmake-js) say so and fall back to inspection — don't claim
+  green you didn't see.
+- **Resident vs per-request** is its own axis on the server: post-processors
+  (punc/truecase) and detectors (LID/VAD) should load once at startup and stay
+  resident, not reload per request (#165).
+
 ## A dry-run "preview" must mirror the real resolver, or it lies (§166)
 
 `--dry-run-resolve` had its own `build_preview()` that re-implemented model
@@ -21,6 +47,19 @@ path will eventually diverge from it. Prefer sharing the resolver; if you must
 duplicate, pin the duplicate against the original with a test (here:
 `tests/test-dry-run-resolve.sh`). Same lesson as the §166 punc-model resolver
 being shared across CLI/server/C-ABI rather than copied three times.
+
+## `ggml_backend_cpu_set_n_threads` asserts CPU — guard it after `init_best()`
+
+`ggml_backend_init_best()` returns the *best* backend (Metal on Apple Silicon,
+CUDA on NVIDIA, CPU otherwise). Calling `ggml_backend_cpu_set_n_threads()` on the
+result aborts with `GGML_ASSERT(ggml_backend_is_cpu(backend_cpu))` on any GPU
+build — that setter is CPU-only. Always gate it: `if (ggml_backend_is_cpu(b))
+ggml_backend_cpu_set_n_threads(b, n);`. This bit silero-LID (`--lid-backend
+silero` aborted on every Metal/CUDA load, #165); it's an easy one to copy-paste
+wrong into any new backend's `*_init`. The crash only shows on a GPU build, so a
+CPU-only CI lane won't catch it. (Per-call model load + free also hides it as a
+fresh abort each request rather than once at startup — see the resident-cache
+work in the same fix.)
 
 ## Regenerate Go cgo LDFLAGS from a *linux-equivalent* config, never macOS
 

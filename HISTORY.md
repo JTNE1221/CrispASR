@@ -6,6 +6,35 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-13 #165 server perf round — resident LID, CLI-matching VAD slicing, silero GPU crash
+
+Follow-ups after the #165 launch bug was fixed + reporter-confirmed (`--no-warmup`).
+The reporter profiled server-vs-CLI speed (server 16.6× vs CLI 19.0× on a 2-min
+clip); root-caused and fixed:
+
+- **Resident LID models.** The server ran `crispasr_lid_free_cache()` after every
+  request, so a non-PnC backend with `language=auto` reloaded the whisper-LID
+  model (`ggml-tiny`) per transcription. Moved the free to shutdown (mirroring the
+  VAD cache, #132) → LID loads once. Also added the same process-lifetime cache to
+  the silero/firered/ecapa LID backends (they were `_init`/`_free` per call; only
+  whisper was cached). Verified on M1: LID model loads 1× across N requests.
+- **Server VAD slicing now matches the CLI.** The server passed raw
+  `chunk_seconds=30` to `crispasr_compute_audio_slices` even with VAD on, so VAD
+  slices on a `CAP_UNBOUNDED_INPUT` backend (parakeet) were capped at 30 s — 4
+  slices where the CLI made 2 (extra boundary-overlap recompute). Mirror the CLI:
+  VAD on + `CAP_UNBOUNDED_INPUT` + `chunk_seconds` not explicit ⇒
+  `effective_chunk_seconds=0` (VAD bounds the slices). Verified server slice count
+  == CLI's on the same clip; non-VAD path unchanged (keeps 30 s, #89-safe).
+- **silero LID crashed on GPU builds — fixed.** `silero_lid_init` called
+  `ggml_backend_cpu_set_n_threads()` on the `ggml_backend_init_best()` backend
+  (Metal/CUDA), which asserts CPU → `GGML_ASSERT(ggml_backend_is_cpu)` abort on
+  every `--lid-backend silero` load. Guarded with `ggml_backend_is_cpu()`. (ecapa
+  was already safe; firered uses no ggml backend.) Surfaced while live-testing the
+  LID cache on M1 Metal; now 3 requests return 200 + detect correctly.
+
+All verified on M1 (cached whisper-tiny/moonshine/parakeet/silero models); #165
+fully resolved + closed. See LEARNINGS for the `init_best` + CPU-thread gotcha.
+
 ## 2026-06-12 Mini-Omni2 — full ASR+TTS+S2S backend (gpt-omni/mini-omni2)
 
 New multimodal speech backend: Whisper-small encoder (80 mel, 12L, 768d)

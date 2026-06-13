@@ -97,38 +97,6 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 
 ---
 
-## §165 Server fails to launch on Vulkan build (GitHub #165) — RESOLVED; perf follow-ups
-
-Launch bug **fixed + reporter-confirmed**: `--no-warmup` opt-out + guarded warmup
-(see HISTORY 2026-06-13). The AMD Radeon 780M Vulkan server now launches and
-serves. The reporter then profiled server-vs-CLI speed; two follow-ups remain:
-
-1. **Server long-audio slicing — DONE.** The server passed raw `chunk_seconds=30`
-   to `crispasr_compute_audio_slices` even with VAD on, so VAD slices on a
-   CAP_UNBOUNDED_INPUT backend got capped at 30 s (4 slices where the CLI made 2).
-   Fixed: mirror the CLI — VAD on + CAP_UNBOUNDED_INPUT + chunk_seconds not
-   explicit ⇒ `effective_chunk_seconds=0` (VAD bounds the slices). Verified
-   server slice count now equals the CLI's on the same clip. Non-VAD path
-   unchanged (keeps 30 s fixed chunking, #89-safe).
-2b. **silero LID crashed on GPU builds — FIXED.** `silero_lid_init` ran
-   `ggml_backend_cpu_set_n_threads()` on the `ggml_backend_init_best()` result
-   (Metal on M1, CUDA on NVIDIA), which asserts the backend is CPU →
-   `GGML_ASSERT(ggml_backend_is_cpu)` abort on every `--lid-backend silero` load.
-   Guarded with `ggml_backend_is_cpu()`. Verified on M1 Metal: 3 requests return
-   200, detect 'en', model loads once. (ecapa was already safe; firered uses no
-   ggml backend.)
-2. **LID resident — DONE** (whisper cached + resident verified; silero/firered/
-   ecapa now cached too, freed at shutdown — mirrors the whisper path) (`crispasr_lid_free_cache` moved to shutdown; LID model
-   loads once, not per request). VAD was already resident (#132). Smaller
-   remaining bit: the silero/firered/ecapa LID backends `_init`/`_free` inline
-   (no cache) — only the default whisper-LID is cached; add caching to the others
-   if a non-whisper LID backend is used on a server.
-
-Best first move for (1) is letting the server reuse the dispatcher's VAD slices
-instead of fixed `chunk_seconds` cuts.
-
----
-
 ## §166 follow-up — WASM `asr*` session surface needs a build-verify (OPEN)
 
 Round 4 (2026-06-13, see HISTORY) added a backend-agnostic ASR session surface to
