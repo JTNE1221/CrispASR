@@ -85,7 +85,9 @@ r = subprocess.run([
     "-f", str(REPO / "samples" / "jfk.wav"),
     "-l", "en-US",
     "--no-prints",
-], capture_output=True, text=True, timeout=600)
+    "--no-gpu",        # CPU — avoids CUDA flash_attn crash on P100 sm_60
+    "--no-flash-attn", # belt and suspenders
+], capture_output=True, text=True, timeout=1800)  # 30 min for chunked encoder on CPU
 dt = time.time() - t0
 
 print(f"  rc={r.returncode}  time={dt:.1f}s", flush=True)
@@ -113,6 +115,8 @@ r2 = subprocess.run([
     "-f", str(REPO / "samples" / "jfk.wav"),
     "-l", "en-US",
     "--no-prints",
+    "--no-gpu",
+    "--no-flash-attn",
 ], capture_output=True, text=True, timeout=600, env=env)
 dt2 = time.time() - t0
 transcript2 = r2.stdout.strip()

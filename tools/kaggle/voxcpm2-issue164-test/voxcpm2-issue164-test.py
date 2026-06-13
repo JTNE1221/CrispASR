@@ -25,7 +25,10 @@ except (AttributeError, ValueError):
 
 WORK = Path("/kaggle/working")
 REPO = WORK / "CrispASR"
-BUILD = WORK / "build"
+# Build in /kaggle/temp to avoid filling up /kaggle/working (capped at ~20 GB,
+# saved as kernel output). /kaggle/temp is ephemeral scratch space.
+_TEMP = Path("/kaggle/temp") if Path("/kaggle/temp").is_dir() else WORK
+BUILD = _TEMP / "build"
 CRISPASR_REPO = "https://github.com/CrispStrobe/CrispASR.git"
 CRISPASR_REF = os.environ.get("CRISPASR_REF", "main")
 MODEL_REPO = "cstr/voxcpm2-GGUF"
@@ -119,7 +122,7 @@ os.environ["LD_LIBRARY_PATH"] = (
 )
 
 # -- Download model --
-MODEL_DIR = WORK / "models"
+MODEL_DIR = _TEMP / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 model_path = MODEL_DIR / MODEL_FILE
 

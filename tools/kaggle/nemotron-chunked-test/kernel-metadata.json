@@ -1,5 +1,5 @@
 {
-  "id": "chr1str/crispasr-nemotron-chunked-test",
+  "id": "chr1s4/crispasr-nemotron-chunked-test",
   "title": "crispasr-nemotron-chunked-test",
   "code_file": "nemotron_chunked_test.py",
   "language": "python",
@@ -7,7 +7,7 @@
   "is_private": "true",
   "enable_gpu": "true",
   "enable_internet": "true",
-  "dataset_sources": ["chr1str/crispasr-hf-token", "chr1s4/crispasr-ccache"],
+  "dataset_sources": ["chr1s4/crispasr-hf-token"],
   "competition_sources": [],
   "kernel_sources": []
 }
