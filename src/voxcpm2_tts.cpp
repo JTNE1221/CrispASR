@@ -1459,6 +1459,43 @@ static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hid
         return std::vector<float>(d, 0.0f);
     }
 
+    // Per-node NaN checker (#164 diagnosis). Walks every graph node after
+    // compute and reports the first op that produced NaN/Inf. Gated on
+    // VOXCPM2_NAN_CHECK=1 (expensive — reads every tensor back to CPU).
+    static const bool nan_check = vox_env_bool("VOXCPM2_NAN_CHECK");
+    if (nan_check) {
+        for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+            ggml_tensor* nd = ggml_graph_node(gf, i);
+            size_t n = ggml_nelements(nd);
+            if (n == 0 || nd->type != GGML_TYPE_F32)
+                continue;
+            std::vector<float> buf(n);
+            ggml_backend_tensor_get(nd, buf.data(), 0, n * sizeof(float));
+            int nans = 0, infs = 0;
+            float mn = buf[0], mx = buf[0];
+            for (size_t j = 0; j < n; j++) {
+                if (std::isnan(buf[j]))
+                    nans++;
+                else if (std::isinf(buf[j]))
+                    infs++;
+                else {
+                    if (buf[j] < mn)
+                        mn = buf[j];
+                    if (buf[j] > mx)
+                        mx = buf[j];
+                }
+            }
+            if (nans > 0 || infs > 0) {
+                fprintf(stderr,
+                        "voxcpm2[nan_check] pos=%d node#%d %-12s ne=[%lld,%lld,%lld] "
+                        "nan=%d inf=%d min=%.4g max=%.4g name=%s\n",
+                        pos, i, ggml_op_name(nd->op), (long long)nd->ne[0], (long long)nd->ne[1], (long long)nd->ne[2],
+                        nans, infs, mn, mx, nd->name);
+                break; // stop at first bad node
+            }
+        }
+    }
+
     // Output tensor pointers. Scan graph nodes directly — ggml_graph_get_tensor
     // does the same linear scan, but we explicitly search to be robust against
     // any gallocr hash-table invalidation (#164).
