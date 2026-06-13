@@ -1,10 +1,12 @@
 name: Examples Tests
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - examples/addon.node/**
       - crispasr.h
+      - .github/workflows/examples.yml
   pull_request:
     branches: [main]
     paths:
