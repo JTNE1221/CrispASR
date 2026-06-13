@@ -1214,8 +1214,6 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
             int skip = T_win - keep;
             cache.k_cache.assign(win_output.begin() + (size_t)skip * d, win_output.end());
             cache.n_cached = keep;
-
-            chunk_in = std::move(new_output);
         }
 
         memcpy(enc_out.data() + (size_t)t_start * d, chunk_in.data(), (size_t)n_new * d * sizeof(float));

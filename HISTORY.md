@@ -6,6 +6,33 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-13 #164 voxcpm2 graph path — NaN + SIGABRT fix
+
+Three-layer bug in the `VOXCPM2_USE_GRAPH=1` fast path, reported by HubSana
+(Arc B580 Vulkan) and reproduced on P100 CUDA (Kaggle).
+
+**Layer 1 — NaN from pos=5 onwards:** RALM has `rope_theta=0` (no positional
+encoding). `ggml_rope_ext` computed `powf(0, -2/d) = inf`, cascading NaN
+through the entire RALM → mu → CFM → LocEnc → enc_lm → TSLM pipeline.
+Fix: skip RoPE when `rope_theta <= 0` in `core/attention.h`.
+
+**Layer 2 — SIGABRT (`GGML_ASSERT(tensor)`):** Intermediate commits between
+`3683ad0a` and `657e851e` (FSQ removal, PREC_F32, RALM replay, ggml_cont
+fallback) changed graph topology, causing `ggml_graph_get_tensor` to return
+NULL. Fix: reverted to `3683ad0a` base + RoPE skip + FA_CPU (`6679f485`).
+
+**Layer 3 — FSQ broadcast SIGABRT + unguarded tensor lookups:** The in-graph
+FSQ rounding used a 1-element `fsq_half` tensor in `ggml_add([512,1], [1])` —
+broadcast across ne[0] SIGABRTs on CUDA/Vulkan. Shaped to `th->ne[0]`.
+Also null-guarded all 13 `ggml_graph_get_tensor` → `ggml_backend_tensor_set/get`
+chains across tslm, ralm, locenc, locdit, and vae_decode graph functions —
+graceful fallback instead of SIGABRT on any future tensor name mismatch.
+
+VAE decode Vulkan crash (separate, Part 3 of §166) was already fixed in
+`7449f793` (GPU copies of bias/alpha tensors). graph=0 path unaffected
+throughout. Awaiting Kaggle CUDA + HubSana Vulkan validation of the full
+graph=1 path.
+
 ## 2026-06-13 #165 server perf round — resident LID, CLI-matching VAD slicing, silero GPU crash
 
 Follow-ups after the #165 launch bug was fixed + reporter-confirmed (`--no-warmup`).

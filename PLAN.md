@@ -5631,44 +5631,35 @@ The f16 variant passed `A_TYPE=float16_t` without enabling the required
 
 Fix: enable the extension + cast kernel element to float in `fma()`.
 
-### Part 2 — VOXCPM2_USE_GRAPH TSLM NaN on CUDA — IN PROGRESS
+### Part 2 — VOXCPM2_USE_GRAPH NaN + SIGABRT — MOSTLY FIXED
 
-**Root cause (confirmed 2026-06-13, 8+ Kaggle P100 runs):** The TSLM
-step graph produces valid hidden_out on its first AR call (pos 4) but
-**NaN on every subsequent call** (pos 5+). The stop predictor not firing
-was a symptom — the hidden state itself is garbage from step 1 onwards.
+**NaN root cause (confirmed 2026-06-13):** RALM has `rope_theta=0`.
+`ggml_rope_ext` computes `powf(0, -2/d) = inf`, cascading NaN through
+RALM → mu → CFM → LocEnc → enc_lm → TSLM input from pos=5 onwards.
+**Fix:** skip RoPE when `rope_theta <= 0` in `core/attention.h`
+(`6679f485`).
 
-The NaN originates in the bucketed TSLM step graph's KV cache path.
-The first AR step writes K/V at position 4 via `ggml_set_rows` (index-
-scatter). The second step reads positions 0-5 via `ggml_cont` +
-`ggml_flash_attn_ext`. Something about reading the just-written
-position 4 data back through the attention path produces NaN on CUDA.
+**SIGABRT root cause (confirmed 2026-06-13):** Two issues:
+1. **Accumulated graph topology changes** (FSQ removal, PREC_F32, RALM
+   replay, ggml_cont fallback) between `3683ad0a` and `657e851e`
+   caused `ggml_graph_get_tensor` to return NULL for input tensors,
+   triggering `GGML_ASSERT(tensor)` in `ggml_backend_tensor_set`
+   (ggml-backend.cpp:325). Reproduced on P100 CUDA + Arc B580 Vulkan.
+   **Fix:** reverted to `3683ad0a` base + RoPE skip + FA_CPU
+   (`6679f485`).
+2. **FSQ `fsq_half` 1-element tensor broadcast** — the in-graph FSQ
+   rounding (`floor(x + 0.5)`) used `ggml_add([512,1], [1])`.
+   Broadcasting across ne[0] SIGABRTs on CUDA/Vulkan backends.
+   **Fix:** shape `fsq_half` to `th->ne[0]` so the add is element-wise.
+3. **All `ggml_graph_get_tensor` calls were unguarded** — 13 call sites
+   across tslm_step_graph, ralm_step_graph, locenc/locdit_forward_graph,
+   and vae_decode_graph passed results directly to tensor_set/get without
+   null-checking. Any future graph change would SIGABRT again.
+   **Fix:** null-guard every call; graceful fallback to CPU or zero-fill.
 
-**Mitigations on main (7 commits):**
-- Prefill replay through graph KV (`7449f793`)
-- In-graph stop predictor (stop_proj → SiLU → stop_head → softmax,
-  no FSQ — ggml_round produces NaN on CUDA) (`a6aef4cf`, `2062180c`)
-- NaN guard on graph_stop_score (`4cd7de23`)
-- Direct ggml_graph_node scan for tensor lookup (`f94e84c2`)
-- Verbosity-gated debug logging (`6bd49dda`)
-
-**Ruled out (2026-06-13):**
-- `ggml_set_rows` vs `ggml_cpy` — both NaN identically
-  (`VOXCPM2_NO_BUCKET=1` test, same NaN at pos=5)
-- FSQ in graph — removed, still NaN
-- cuBLAS F16 overflow — the upstream-prs #15 fix
-  (`use_fp16 = !(src1->type == GGML_TYPE_F32)`) is already applied
-
-**Next steps:**
-1. `VOXCPM2_NAN_CHECK=1` per-node NaN checker (`3683ad0a`) — walks
-   every graph node after compute and reports the first op with
-   NaN/Inf (op name, shape, tensor name). Same approach as the
-   funasr #15 diagnosis. Kernel queued on chr1str.
-2. Once the guilty op is identified: check if it's a known ggml CUDA
-   issue (flash_attn_ext, Q4_K mul_mat, or a scheduler bug) and
-   either patch locally or file upstream per `tools/upstream-prs/`
-   workflow.
-3. Test with F16 model to rule out Q4_K dequant as the source.
+**Status:** RoPE NaN fix + revert + fsq_half shape fix + null-guards all
+on main. Needs Kaggle P100 CUDA + HubSana Vulkan validation to confirm
+the graph path produces correct stop_score and output audio.
 
 ### Part 3 — VAE decode crash on Vulkan — DONE
 

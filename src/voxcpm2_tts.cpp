@@ -1127,9 +1127,16 @@ static std::vector<float> ralm_step_graph(voxcpm2_context* ctx, const float* hid
         return std::vector<float>(d, 0.0f);
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "ralm_hidden_in"), hidden_in, 0, (size_t)d * sizeof(float));
+    ggml_tensor* t_hidden_in = ggml_graph_get_tensor(gf, "ralm_hidden_in");
+    ggml_tensor* t_positions = ggml_graph_get_tensor(gf, "ralm_positions");
+    if (!t_hidden_in || !t_positions) {
+        fprintf(stderr, "voxcpm2: ralm_step graph missing input tensors (hidden_in=%p positions=%p)\n",
+                (void*)t_hidden_in, (void*)t_positions);
+        return std::vector<float>(d, 0.0f);
+    }
     int32_t pos_i = pos;
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "ralm_positions"), &pos_i, 0, sizeof(int32_t));
+    ggml_backend_tensor_set(t_hidden_in, hidden_in, 0, (size_t)d * sizeof(float));
+    ggml_backend_tensor_set(t_positions, &pos_i, 0, sizeof(int32_t));
 
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, g_cpu_n_threads);
@@ -1140,8 +1147,12 @@ static std::vector<float> ralm_step_graph(voxcpm2_context* ctx, const float* hid
     }
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "ralm_hidden_out");
-    std::vector<float> result(d);
-    ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
+    std::vector<float> result(d, 0.0f);
+    if (out) {
+        ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
+    } else {
+        fprintf(stderr, "voxcpm2: ralm_step graph missing ralm_hidden_out tensor\n");
+    }
     return result;
 }
 
@@ -1275,8 +1286,10 @@ static ggml_cgraph* build_tslm_step_graph(voxcpm2_context* ctx, int n_past, int 
         }
         ggml_tensor* th = ggml_tanh(ctx0, fsq_in);
         th = ggml_scale(ctx0, th, 9.0f);
-        // round(x) = floor(x + 0.5) — avoids ggml_round NaN on CUDA
-        ggml_tensor* half_const = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+        // round(x) = floor(x + 0.5) — avoids ggml_round NaN on CUDA.
+        // Shape must match th's ne[0] to avoid broadcast add; a 1-element
+        // tensor SIGABRTs on CUDA/Vulkan backends (#164).
+        ggml_tensor* half_const = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, th->ne[0]);
         ggml_set_name(half_const, "fsq_half");
         ggml_set_input(half_const);
         th = ggml_add(ctx0, th, half_const);
@@ -1428,27 +1441,41 @@ static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hid
         return std::vector<float>(d, 0.0f);
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "hidden_in"), hidden_in, 0, (size_t)d * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &pos_i, 0, sizeof(int32_t));
+    ggml_tensor* t_hidden_in = ggml_graph_get_tensor(gf, "hidden_in");
+    ggml_tensor* t_positions = ggml_graph_get_tensor(gf, "positions");
+    if (!t_hidden_in || !t_positions) {
+        fprintf(stderr, "voxcpm2: tslm_step graph missing input tensors (hidden_in=%p positions=%p)\n",
+                (void*)t_hidden_in, (void*)t_positions);
+        return std::vector<float>(d, 0.0f);
+    }
+    ggml_backend_tensor_set(t_hidden_in, hidden_in, 0, (size_t)d * sizeof(float));
+    ggml_backend_tensor_set(t_positions, &pos_i, 0, sizeof(int32_t));
     if (bucketed) {
         // Mask: shape (Lk, 1). 0 for k <= pos (visible written slots);
         // -inf for k > pos (unwritten tail). F16 to match the helper's
         // declared mask type.
+        ggml_tensor* t_mask = ggml_graph_get_tensor(gf, "causal_mask");
+        if (!t_mask) {
+            fprintf(stderr, "voxcpm2: tslm_step graph missing causal_mask tensor\n");
+            return std::vector<float>(d, 0.0f);
+        }
         std::vector<ggml_fp16_t> mask((size_t)Lk);
         const ggml_fp16_t z = ggml_fp32_to_fp16(0.0f);
         const ggml_fp16_t ninf = ggml_fp32_to_fp16(-INFINITY);
         for (int k = 0; k < Lk; k++) {
             mask[k] = (k <= pos) ? z : ninf;
         }
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
-                                mask.size() * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(t_mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     }
 
-    // FSQ half-constant for floor(x + 0.5) rounding (#164)
+    // FSQ half-constant for floor(x + 0.5) rounding (#164).
+    // Tensor is shaped to match th's ne[0] (FSQ intermediate dim) — a
+    // 1-element broadcast caused SIGABRT on CUDA/Vulkan backends.
     ggml_tensor* fsq_half_t = ggml_graph_get_tensor(gf, "fsq_half");
     if (fsq_half_t) {
-        const float half_val = 0.5f;
-        ggml_backend_tensor_set(fsq_half_t, &half_val, 0, sizeof(float));
+        const int64_t n = ggml_nelements(fsq_half_t);
+        std::vector<float> half_buf((size_t)n, 0.5f);
+        ggml_backend_tensor_set(fsq_half_t, half_buf.data(), 0, (size_t)n * sizeof(float));
     }
 
     if (ggml_backend_is_cpu(ctx->backend)) {
@@ -2032,10 +2059,14 @@ static std::vector<float> locenc_forward_graph(voxcpm2_context* ctx, const float
         return locenc_forward(ctx, patch, ctx->backend_cpu);
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "patch_in"), patch_buf.data(), 0,
-                            patch_buf.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
-                            positions.size() * sizeof(int32_t));
+    ggml_tensor* t_patch = ggml_graph_get_tensor(gf, "patch_in");
+    ggml_tensor* t_pos = ggml_graph_get_tensor(gf, "positions");
+    if (!t_patch || !t_pos) {
+        fprintf(stderr, "voxcpm2: locenc graph missing input tensors\n");
+        return locenc_forward(ctx, patch, ctx->backend_cpu);
+    }
+    ggml_backend_tensor_set(t_patch, patch_buf.data(), 0, patch_buf.size() * sizeof(float));
+    ggml_backend_tensor_set(t_pos, positions.data(), 0, positions.size() * sizeof(int32_t));
 
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, g_cpu_n_threads);
@@ -2046,6 +2077,10 @@ static std::vector<float> locenc_forward_graph(voxcpm2_context* ctx, const float
     }
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "cls_out");
+    if (!out) {
+        fprintf(stderr, "voxcpm2: locenc graph missing cls_out tensor\n");
+        return locenc_forward(ctx, patch, ctx->backend_cpu);
+    }
     std::vector<float> result(d);
     ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
     return result;
@@ -2545,13 +2580,22 @@ static std::vector<float> locdit_forward_graph(voxcpm2_context* ctx, const float
         return std::vector<float>(feat_dim * P, 0.0f);
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "x_in"), x_buf.data(), 0, x_buf.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "cond_in"), cond_buf.data(), 0, cond_buf.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mu_in"), mu_buf.data(), 0, mu_buf.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "t_sin"), t_sin.data(), 0, t_sin.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dt_sin"), dt_sin.data(), 0, dt_sin.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
-                            positions.size() * sizeof(int32_t));
+    ggml_tensor* t_x = ggml_graph_get_tensor(gf, "x_in");
+    ggml_tensor* t_cond = ggml_graph_get_tensor(gf, "cond_in");
+    ggml_tensor* t_mu = ggml_graph_get_tensor(gf, "mu_in");
+    ggml_tensor* t_tsin = ggml_graph_get_tensor(gf, "t_sin");
+    ggml_tensor* t_dsin = ggml_graph_get_tensor(gf, "dt_sin");
+    ggml_tensor* t_pos = ggml_graph_get_tensor(gf, "positions");
+    if (!t_x || !t_cond || !t_mu || !t_tsin || !t_dsin || !t_pos) {
+        fprintf(stderr, "voxcpm2: locdit graph missing input tensors\n");
+        return std::vector<float>(feat_dim * P, 0.0f);
+    }
+    ggml_backend_tensor_set(t_x, x_buf.data(), 0, x_buf.size() * sizeof(float));
+    ggml_backend_tensor_set(t_cond, cond_buf.data(), 0, cond_buf.size() * sizeof(float));
+    ggml_backend_tensor_set(t_mu, mu_buf.data(), 0, mu_buf.size() * sizeof(float));
+    ggml_backend_tensor_set(t_tsin, t_sin.data(), 0, t_sin.size() * sizeof(float));
+    ggml_backend_tensor_set(t_dsin, dt_sin.data(), 0, dt_sin.size() * sizeof(float));
+    ggml_backend_tensor_set(t_pos, positions.data(), 0, positions.size() * sizeof(int32_t));
 
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, g_cpu_n_threads);
@@ -2562,8 +2606,12 @@ static std::vector<float> locdit_forward_graph(voxcpm2_context* ctx, const float
     }
 
     ggml_tensor* vel = ggml_graph_get_tensor(gf, "vel");
-    std::vector<float> out((size_t)feat_dim * P);
-    ggml_backend_tensor_get(vel, out.data(), 0, out.size() * sizeof(float));
+    std::vector<float> out((size_t)feat_dim * P, 0.0f);
+    if (vel) {
+        ggml_backend_tensor_get(vel, out.data(), 0, out.size() * sizeof(float));
+    } else {
+        fprintf(stderr, "voxcpm2: locdit graph missing vel tensor\n");
+    }
     return out;
 }
 
@@ -3800,8 +3848,13 @@ static std::vector<float> vae_decode_graph(voxcpm2_context* ctx, const std::vect
         return vae_decode(ctx, patches, ctx->backend_cpu);
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "latents"), latents_host.data(), 0,
-                            latents_host.size() * sizeof(float));
+    ggml_tensor* t_latents = ggml_graph_get_tensor(gf, "latents");
+    if (!t_latents) {
+        fprintf(stderr, "voxcpm2: vae_decode_graph missing latents tensor; falling back to CPU\n");
+        ggml_free(ctx0);
+        return vae_decode(ctx, patches, ctx->backend_cpu);
+    }
+    ggml_backend_tensor_set(t_latents, latents_host.data(), 0, latents_host.size() * sizeof(float));
 
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, g_cpu_n_threads);

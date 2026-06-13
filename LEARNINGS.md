@@ -10,6 +10,35 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Never pass `ggml_graph_get_tensor` directly to `ggml_backend_tensor_set` (#164)
+
+`ggml_graph_get_tensor` returns NULL when a tensor name isn't found in the
+graph's leafs/nodes. Passing that NULL directly to `ggml_backend_tensor_set`
+triggers `GGML_ASSERT(tensor)` → SIGABRT. This is silent and hard to diagnose
+because the crash gives only a file:line in ggml-backend.cpp, not the tensor
+name or call site. Two rules:
+
+1. **Always null-check** the return of `ggml_graph_get_tensor` before passing
+   it to any `ggml_backend_tensor_*` function. Log the missing tensor name
+   and return zeros or fall back to the CPU path.
+2. **Shape input tensors to avoid broadcast.** `ggml_add(a, b)` where
+   `b->ne[0] != a->ne[0]` (e.g. a 1-element scalar broadcast) works on CPU
+   but SIGABRTs on some CUDA/Vulkan backends. Use `b->ne[0] == a->ne[0]` and
+   fill the buffer. The voxcpm2 `fsq_half` 1-element tensor was this exact bug.
+
+Both patterns existed in 13 call sites across 5 graph functions (tslm, ralm,
+locenc, locdit, vae_decode) and were only caught when an unrelated graph
+topology change made a name lookup fail.
+
+## `rope_theta=0` means "no positional encoding" — skip RoPE entirely (#164)
+
+Some sub-models (VoxCPM2 RALM) intentionally set `rope_theta=0` to disable
+positional encoding. `ggml_rope_ext` computes `powf(theta, -2k/d)` →
+`powf(0, negative) = inf` → NaN cascade. The NaN was latent (hidden by the
+CPU stop fallback) until the RoPE skip was needed to fix the graph path. If a
+model's attention has `rope_theta <= 0`, gate the RoPE call; don't pass zero
+through and hope the math works out.
+
 ## A feature has ~8 front-ends — wiring it into one isn't "done" (§166)
 
 A user-facing option in this repo must be threaded through every surface or it
