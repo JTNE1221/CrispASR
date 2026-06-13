@@ -6,6 +6,22 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-13 #89 parakeet-ja auto-VAD for long audio
+
+parakeet-ja's FastConformer encoder degenerates past ~12 s on real audio
+(repetition loops from z-norm drift). Fixed-size chunks (10 s or 30 s) still
+produce garbage because the collapse happens inside each chunk. VAD gives
+silence-bounded segments matching the model's ~10-15 s training utterances.
+
+Added `CrispasrBackend::prefers_vad()` virtual. `ParakeetBackend` returns true
+for JA models (vocab ≤ 4096). `crispasr_run.cpp` auto-enables `params.vad`
+when `prefers_vad() && audio > 30 s && no explicit --vad/--chunk-seconds`.
+
+Kaggle-validated on `reazon_baseball_14s` ×3 (42 s): auto-VAD recovers
+3/3 keyword 岡本 (442 chars, byte-identical to explicit `--vad`); old 30 s
+chunking gets 1/3 (596 chars of repetitive output). Short audio (14 s)
+unaffected — no auto-VAD triggered.
+
 ## 2026-06-13 §166 cross-surface parity — round 2 (C-ABI punc-model, server truecase/diarize/LID, alias preview)
 
 Follow-up to the §166 audit: closed five of the open parity gaps.
