@@ -198,7 +198,7 @@ struct nemotron_context {
 
     // Streaming state
     int att_context_preset = 0;
-    int prompt_id = 0; // language prompt index (0 = en-US)
+    int prompt_id = 7; // language prompt index (7 = en-US in sorted order)
 
     // Decode controls
     float decode_temperature = 0.0f;
@@ -260,7 +260,7 @@ static std::vector<float> tensor_to_f32(ggml_tensor* t) {
 // ===========================================================================
 
 static bool nemotron_load_model(nemotron_model& model, nemotron_vocab& vocab,
-                                std::unordered_map<std::string, int>& /*lang_to_prompt*/, const char* path,
+                                std::unordered_map<std::string, int>& lang_to_prompt, const char* path,
                                 ggml_backend_t backend) {
     // ---- pass 1: read hparams + vocab ----
     {
@@ -308,6 +308,24 @@ static bool nemotron_load_model(nemotron_model& model, nemotron_vocab& vocab,
         // Reading them requires the GGUFv3 array API which core_gguf doesn't
         // expose directly for int arrays. Use defaults for now; the runtime
         // picks the preset index and the C++ code handles the mapping.
+
+        // Populate language → prompt_id mapping (alphabetically sorted, matching converter)
+        {
+            const char* langs[] = {
+                "ar-AR", "bg-BG", "cs-CZ", "da-DK", "de-DE", "el-GR", "en-GB", "en-US", "es-ES", "es-US",
+                "et-EE", "fi-FI", "fr-CA", "fr-FR", "he-IL", "hi-IN", "hr-HR", "hu-HU", "it-IT", "ja-JP",
+                "ko-KR", "lt-LT", "lv-LV", "nb-NO", "nl-NL", "nn-NO", "pl-PL", "pt-BR", "pt-PT", "ro-RO",
+                "ru-RU", "sk-SK", "sl-SL", "sv-SE", "th-TH", "tr-TR", "uk-UA", "vi-VN", "zh-CN",
+            };
+            for (int i = 0; i < 39; i++) {
+                lang_to_prompt[langs[i]] = i;
+                // Also add lowercase version for case-insensitive matching
+                std::string lo = langs[i];
+                for (auto& c : lo)
+                    c = (char)std::tolower((unsigned char)c);
+                lang_to_prompt[lo] = i;
+            }
+        }
 
         core_gguf::free_metadata(gctx);
     }
@@ -1627,8 +1645,9 @@ extern "C" void nemotron_set_language(struct nemotron_context* ctx, const char* 
     if (it != ctx->lang_to_prompt.end()) {
         ctx->prompt_id = it->second;
     } else {
-        // Default to English
-        ctx->prompt_id = 0;
+        // Default to English (en-US = index 7 in sorted lang order)
+        fprintf(stderr, "nemotron: unknown language '%s', defaulting to en-US\n", lang_code);
+        ctx->prompt_id = 7;
     }
 }
 
