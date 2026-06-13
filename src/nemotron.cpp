@@ -1135,32 +1135,28 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
     };
     std::map<std::tuple<int, int, int>, layer_graph> graph_cache;
 
-    auto get_or_build = [&](int il, int T_new, int T_cache) -> layer_graph& {
-        auto key = std::make_tuple(il, T_new, T_cache);
+    // Use the non-streaming block (full window): pass [cached, new] through the
+    // complete conformer block. Simpler and includes rel-pos bias. The cached
+    // frames get re-processed through FFN1 but FFN1 is pointwise so this is
+    // mathematically equivalent to NeMo's cache_last_channel approach.
+    auto get_or_build = [&](int il, int T_win) -> layer_graph& {
+        auto key = std::make_tuple(il, T_win, 0);
         auto it = graph_cache.find(key);
         if (it != graph_cache.end())
             return it->second;
-        int T_full = T_cache + T_new;
         size_t msz = ggml_tensor_overhead() * 2048 + ggml_graph_overhead_custom(2048, false);
         auto* meta = new std::vector<uint8_t>(msz);
         ggml_init_params ip2 = {msz, meta->data(), true};
         layer_graph lg;
         lg.ctx0 = ggml_init(ip2);
         lg.gf = ggml_new_graph_custom(lg.ctx0, 2048, false);
-        ggml_tensor* new_in = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, T_new);
-        ggml_set_name(new_in, "new_in");
-        ggml_set_input(new_in);
-        ggml_tensor* cache_ch = nullptr;
-        if (T_cache > 0) {
-            cache_ch = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, T_cache);
-            ggml_set_name(cache_ch, "cache_ch");
-            ggml_set_input(cache_ch);
-        }
-        ggml_tensor* pos2 = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, 2 * T_full - 1);
+        ggml_tensor* inp2 = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, T_win);
+        ggml_set_name(inp2, "block_in");
+        ggml_set_input(inp2);
+        ggml_tensor* pos2 = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, 2 * T_win - 1);
         ggml_set_name(pos2, "pos_enc");
         ggml_set_input(pos2);
-        ggml_tensor* out2 =
-            nemotron_build_block_streaming(lg.ctx0, new_in, cache_ch, pos2, T_new, T_cache, m.enc[il], bp);
+        ggml_tensor* out2 = nemotron_build_block(lg.ctx0, inp2, pos2, T_win, m.enc[il], bp, nullptr);
         ggml_set_name(out2, "block_out");
         ggml_set_output(out2);
         ggml_build_forward_expand(lg.gf, out2);
@@ -1185,60 +1181,39 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
         for (int il = 0; il < n_layers; il++) {
             auto& cache = ctx->enc_cache[il];
             int n_ctx = std::min(cache.n_cached, L);
-            int T_full = n_ctx + n_new;
+            int T_win = n_ctx + n_new;
 
-            auto& lg = get_or_build(il, n_new, n_ctx);
-
-            // Set new frames
-            ggml_tensor* new_t = ggml_graph_get_tensor(lg.gf, "new_in");
-            ggml_backend_tensor_set(new_t, chunk_in.data(), 0, (size_t)n_new * d * sizeof(float));
-
-            // Set cached post-FFN1 frames
-            if (n_ctx > 0) {
-                ggml_tensor* cache_t = ggml_graph_get_tensor(lg.gf, "cache_ch");
-                if (cache_t) {
-                    int off = cache.n_cached - n_ctx;
-                    ggml_backend_tensor_set(cache_t, cache.k_cache.data() + (size_t)off * d, 0,
-                                            (size_t)n_ctx * d * sizeof(float));
-                }
+            // Assemble [cached, new] window
+            std::vector<float> win_input((size_t)T_win * d);
+            if (n_ctx > 0 && !cache.k_cache.empty()) {
+                int off = cache.n_cached - n_ctx;
+                memcpy(win_input.data(), cache.k_cache.data() + (size_t)off * d, (size_t)n_ctx * d * sizeof(float));
             }
+            memcpy(win_input.data() + (size_t)n_ctx * d, chunk_in.data(), (size_t)n_new * d * sizeof(float));
 
-            // Set pos_enc for full window
-            auto pe = core_conformer::make_pos_enc(d, T_full);
+            auto& lg = get_or_build(il, T_win);
+
+            ggml_tensor* inp_t = ggml_graph_get_tensor(lg.gf, "block_in");
+            ggml_backend_tensor_set(inp_t, win_input.data(), 0, (size_t)T_win * d * sizeof(float));
+
+            auto pe = core_conformer::make_pos_enc(d, T_win);
             ggml_tensor* pos_t = ggml_graph_get_tensor(lg.gf, "pos_enc");
             ggml_backend_tensor_set(pos_t, pe.data(), 0, pe.size() * sizeof(float));
 
             ggml_backend_graph_compute(ctx->backend, lg.gf);
 
-            // Read block output (T_new frames only)
+            // Read full window output, extract last n_new frames
             ggml_tensor* out_t = ggml_graph_get_tensor(lg.gf, "block_out");
-            std::vector<float> new_output((size_t)n_new * d);
-            ggml_backend_tensor_get(out_t, new_output.data(), 0, new_output.size() * sizeof(float));
+            std::vector<float> win_output((size_t)T_win * d);
+            ggml_backend_tensor_get(out_t, win_output.data(), 0, win_output.size() * sizeof(float));
 
-            // Update cache: use post-FFN1 if available, else block output.
-            // FFN1 is pointwise so caching block output and re-running FFN1
-            // on cached frames produces the same result — no corruption.
-            ggml_tensor* cco = ggml_graph_get_tensor(lg.gf, "cache_ch_out");
-            const float* cache_src = cco ? nullptr : new_output.data();
-            std::vector<float> post_ffn1_data;
-            if (cco) {
-                post_ffn1_data.resize((size_t)n_new * d);
-                ggml_backend_tensor_get(cco, post_ffn1_data.data(), 0, post_ffn1_data.size() * sizeof(float));
-                cache_src = post_ffn1_data.data();
-            } else {
-                cache_src = new_output.data(); // fall back to block output
-            }
-            {
-                std::vector<float> combined;
-                if (n_ctx > 0)
-                    combined.assign(cache.k_cache.begin(), cache.k_cache.begin() + (size_t)cache.n_cached * d);
-                combined.insert(combined.end(), cache_src, cache_src + (size_t)n_new * d);
-                int total = (int)(combined.size() / d);
-                int keep = std::min(L, total);
-                int skip = total - keep;
-                cache.k_cache.assign(combined.begin() + (size_t)skip * d, combined.end());
-                cache.n_cached = keep;
-            }
+            chunk_in.assign(win_output.data() + (size_t)n_ctx * d, win_output.data() + (size_t)(n_ctx + n_new) * d);
+
+            // Cache: keep last min(L, T_win) frames of block output
+            int keep = std::min(L, T_win);
+            int skip = T_win - keep;
+            cache.k_cache.assign(win_output.begin() + (size_t)skip * d, win_output.end());
+            cache.n_cached = keep;
 
             chunk_in = std::move(new_output);
         }
