@@ -103,14 +103,13 @@ Launch bug **fixed + reporter-confirmed**: `--no-warmup` opt-out + guarded warmu
 (see HISTORY 2026-06-13). The AMD Radeon 780M Vulkan server now launches and
 serves. The reporter then profiled server-vs-CLI speed; two follow-ups remain:
 
-1. **Server long-audio slicing is coarser than the CLI.** On a 2-min clip the CLI
-   makes 2 slices (19.0×) but the server makes 4 fixed ~30 s slices (16.6×) — same
-   VAD segments, but the server's `crispasr_compute_audio_slices` cuts fixed
-   `chunk_seconds=30` while the CLI consolidates VAD segments into fewer/larger
-   slices. More slices ⇒ more boundary-overlap recompute ⇒ ~11 % slower.
-   **Workaround:** per-request `chunk_seconds=120` (param now exists). **Proper
-   fix:** make the server slicing VAD-segment-aware (consolidate like the CLI) or
-   align the default chunk size.
+1. **Server long-audio slicing — DONE.** The server passed raw `chunk_seconds=30`
+   to `crispasr_compute_audio_slices` even with VAD on, so VAD slices on a
+   CAP_UNBOUNDED_INPUT backend got capped at 30 s (4 slices where the CLI made 2).
+   Fixed: mirror the CLI — VAD on + CAP_UNBOUNDED_INPUT + chunk_seconds not
+   explicit ⇒ `effective_chunk_seconds=0` (VAD bounds the slices). Verified
+   server slice count now equals the CLI's on the same clip. Non-VAD path
+   unchanged (keeps 30 s fixed chunking, #89-safe).
 2. **LID resident — DONE** (`crispasr_lid_free_cache` moved to shutdown; LID model
    loads once, not per request). VAD was already resident (#132). Smaller
    remaining bit: the silero/firered/ecapa LID backends `_init`/`_free` inline
