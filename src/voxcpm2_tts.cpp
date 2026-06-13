@@ -1443,12 +1443,23 @@ static std::vector<float> tslm_step_graph(voxcpm2_context* ctx, const float* hid
         ggml_backend_tensor_get(out, result.data(), 0, (size_t)d * sizeof(float));
     }
 
+    // Check for NaN in hidden_out — if the TSLM graph produces NaN,
+    // the entire AR loop is poisoned. Log once per synthesis for diag.
+    if (ctx->verbosity >= 1 && !result.empty() && std::isnan(result[0])) {
+        fprintf(stderr, "voxcpm2: WARNING: tslm_step_graph hidden_out[0]=NaN at pos=%d\n", pos);
+    }
+
     // Extract stop score from the graph if available and requested.
     if (out_stop_score) {
         if (sp_tensor) {
             float probs[2] = {0.0f, 0.0f};
             ggml_backend_tensor_get(sp_tensor, probs, 0, 2 * sizeof(float));
-            *out_stop_score = probs[1]; // p(stop) = softmax[1]
+            float s = probs[1]; // p(stop) = softmax[1]
+            // Guard against NaN — the TSLM graph can produce NaN on some
+            // CUDA backends when the hidden state diverges. Fall back to
+            // -1.0 (CPU stop_score path) rather than poisoning subsequent
+            // stop checks (#164).
+            *out_stop_score = std::isnan(s) ? -1.0f : s;
         } else {
             *out_stop_score = -1.0f; // signal: not available
             if (ctx->verbosity >= 1) {
