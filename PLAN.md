@@ -110,7 +110,14 @@ serves. The reporter then profiled server-vs-CLI speed; two follow-ups remain:
    explicit ⇒ `effective_chunk_seconds=0` (VAD bounds the slices). Verified
    server slice count now equals the CLI's on the same clip. Non-VAD path
    unchanged (keeps 30 s fixed chunking, #89-safe).
-2. **LID resident — DONE** (`crispasr_lid_free_cache` moved to shutdown; LID model
+2b. **Found bug (separate): silero LID crashes on the Metal build.** `--lid-backend
+   silero` aborts in `silero_lid_init` with `GGML_ASSERT(ggml_backend_is_cpu(
+   backend_cpu))` (ggml-cpu.cpp:254) on M1 Metal — pre-existing (the per-call path
+   hit it too; not caused by the LID-cache work). Likely the same ggml
+   cross-backend-resolution tightening that needs an explicit per-tensor/CPU
+   backend in `silero_lid.cpp`'s setup. Default LID (whisper) is unaffected.
+2. **LID resident — DONE** (whisper cached + resident verified; silero/firered/
+   ecapa now cached too, freed at shutdown — mirrors the whisper path) (`crispasr_lid_free_cache` moved to shutdown; LID model
    loads once, not per request). VAD was already resident (#132). Smaller
    remaining bit: the silero/firered/ecapa LID backends `_init`/`_free` inline
    (no cache) — only the default whisper-LID is cached; add caching to the others
