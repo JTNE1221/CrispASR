@@ -449,8 +449,10 @@ static bool nemotron_load_model(nemotron_model& model, nemotron_vocab& vocab,
     fprintf(stderr, "nemotron: vocab=%u  d_model=%u  n_layers=%u  n_heads=%u  ff=%u  pred=%u  joint=%u\n",
             model.hparams.vocab_size, model.hparams.d_model, model.hparams.n_layers, model.hparams.n_heads,
             model.hparams.ff_dim, model.hparams.pred_hidden, model.hparams.joint_hidden);
-    fprintf(stderr, "nemotron: streaming: %u presets, causal_ds=%d, conv_norm=layer_norm\n",
-            model.hparams.n_att_context_presets, model.hparams.causal_downsampling ? 1 : 0);
+    fprintf(stderr,
+            "nemotron: streaming: %u presets, causal_ds=%d, conv_norm=layer_norm, conv_ln=%s, prompt_kernel=%s\n",
+            model.hparams.n_att_context_presets, model.hparams.causal_downsampling ? 1 : 0,
+            model.enc[0].conv_ln_w ? "loaded" : "NULL", model.prompt_kernel.l0_w ? "loaded" : "NULL");
     return true;
 }
 
@@ -1669,6 +1671,20 @@ extern "C" struct nemotron_result* nemotron_transcribe_ex(struct nemotron_contex
             d_model = (int)pre_out->ne[0];
             std::vector<float> pre_enc((size_t)T_enc * d_model);
             ggml_backend_tensor_get(pre_out, pre_enc.data(), 0, pre_enc.size() * sizeof(float));
+
+            {
+                float pmin = 1e30f, pmax = -1e30f, psum = 0.0f;
+                for (size_t i = 0; i < pre_enc.size(); i++) {
+                    float v = pre_enc[i];
+                    if (v < pmin)
+                        pmin = v;
+                    if (v > pmax)
+                        pmax = v;
+                    psum += v;
+                }
+                fprintf(stderr, "nemotron: pre-encode T=%d d=%d min=%.2f max=%.2f mean=%.4f\n", T_enc, d_model, pmin,
+                        pmax, psum / (float)pre_enc.size());
+            }
 
             ggml_gallocr_free(alloc);
             ggml_free(ctx0);
