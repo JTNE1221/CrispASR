@@ -95,6 +95,21 @@ tensor optional — if the graph doesn't need it, don't require it.
 active), the setter code must tolerate `ggml_graph_get_tensor` returning NULL for
 it. Don't fail on a legitimately unused input.
 
+## Orpheus/SNAC TTS: `token_embd` must stay F16 for sub-Q8 quants
+
+Orpheus (Llama-3.2-3B with SNAC 24kHz codec) uses tied weights:
+`talker.token_embd.weight` serves as both input embedding and LM head.
+The SNAC codec emits peaked distributions over 4096 audio tokens —
+quantization noise from Q4_K is enough to break the 7:1 super-frame
+slot pattern and produce gibberish. The upstream repo's README says
+"sub-Q8 quants tend to break the SNAC super-frame slot pattern."
+
+**Fix:** `crispasr-quantize` now has an `is_orpheus` guard that keeps
+`talker.token_embd.weight` at F16. Block projections (attn, FFN) quantize
+safely to Q4_K. Same reasoning as qwen3-tts `talker.token_embd`, bark
+`token_embd`, and LFM2's `lfm.embed_tokens` — tied/output weights on
+peaked-distribution codecs are always quant-sensitive.
+
 ## `ggml_backend_cpu_set_n_threads` asserts CPU — guard it after `init_best()`
 
 `ggml_backend_init_best()` returns the *best* backend (Metal on Apple Silicon,
