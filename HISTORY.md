@@ -42,7 +42,15 @@ Fix (`602308fc`): positions is optional in `ralm_step_graph`.
 pass — stop fires at step 7, audio is speech (RMS 2500-3070, 1.12s), and
 parakeet ASR transcribes "Hello world." on every path. Graph path 5×
 faster (4.5s vs 21.9s). FA_CPU only needed on P100 (sm_60) where F16
-flash_attn accumulator overflows. Awaiting HubSana re-test on Arc B580.
+flash_attn accumulator overflows.
+
+**HubSana Arc B580 Vulkan confirmation (2026-06-14, `602308fc`):** All
+four fixes confirmed working end-to-end. 5 voice-clone runs clean, stop
+fires (scores 0.70-0.98), ~180 ms/step (13-15× speedup vs graph=0).
+Reporter's production workflow: 81 hours → 5 hours with graph=1+server.
+FA_CPU not needed on Intel Vulkan. Separate long-sequence VAE crash
+found (Vulkan maxComputeWorkGroupCount overflow at ~60s output) — tracked
+as Part 4, not blocking.
 
 ## 2026-06-13 #165 server perf round — resident LID, CLI-matching VAD slicing, silero GPU crash
 

@@ -5665,12 +5665,32 @@ tensor was never consumed by any graph node, so
 treated this as fatal and returned all-zero RALM hidden states → noise.
 **Fix:** `602308fc` — positions is optional in `ralm_step_graph`.
 
-**Status: DONE.** Validated on Kaggle T4 with ASR roundtrip (2026-06-14,
-`chr1s4/crispasr-voxcpm2-164-v8`): all 3 configs pass — stop fires
-(step 7), audio is speech (RMS 2500-3070), and parakeet ASR transcribes
-back "Hello world." on every path. graph_default 5× faster (4.5s vs
-21.9s). FA_CPU only needed on P100 (sm_60). Awaiting HubSana Vulkan
-re-test on Arc B580 with `602308fc`.
+**Status: DONE.** Validated on Kaggle T4 (2026-06-14) + HubSana Arc B580
+Vulkan (2026-06-14, `602308fc` CONFIRMED WORKING). All configs pass:
+stop fires correctly (step 7 short, step 54-391 voice-clone), audio is
+clean, ~180 ms/step on Vulkan (13-15× speedup vs graph=0's ~2700 ms/step).
+FA_CPU not needed on Intel Vulkan. Reporter's workflow: 81 h → 5 h.
+
+### Part 4 — VAE decode Vulkan work-group overflow on long sequences (NEW)
+
+**Reporter:** HubSana, Arc B580 Vulkan, long narration (443 positions,
+390 AR steps → ~60s audio). Graph path + stop predictor work perfectly;
+crash is purely in the VAE decode dispatch:
+```
+ggml-vulkan.cpp:6691: GGML_ASSERT(wg0 <= maxComputeWorkGroupCount[0] && ...)
+```
+The VAE decode work-group count scales with decoded sample count. At
+390 steps × 1024 samples/step ≈ 400K samples, one dispatch axis exceeds
+the Vulkan `maxComputeWorkGroupCount` limit (65535 on standard GPUs).
+CUDA has higher grid limits and is unaffected.
+
+**Fix needed:** tile/chunk the VAE decode dispatch when sample count
+would exceed device work-group limits. Or split the AR output into
+VAE sub-windows (overlap-add). Not blocking (reporter chunks long
+narration), but a guard prevents abort on long single utterances.
+
+**Priority:** LOW — workaround exists (chunk input text). Only affects
+Vulkan + sequences >~50s.
 
 ### Part 3 — VAE decode crash on Vulkan — DONE
 
