@@ -6,6 +6,8 @@
 
 #include "moss_audio.h"
 
+#include "core/beam_decode.h"
+
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -190,6 +192,8 @@ struct moss_audio_context {
     std::mt19937 rng;
 
     std::string model_path;
+
+    int beam_size = 1; // 1 = greedy (default); >1 = beam search (§167g)
 };
 
 // ===========================================================================
@@ -1865,44 +1869,69 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     if (!logits)
         return nullptr;
 
-    // 9. Greedy decode loop
+    // 9. Decode (greedy or beam search)
     std::vector<int32_t> generated;
     int max_new = 512;
-    for (int step = 0; step < max_new; step++) {
-        // Argmax
-        int best_id = 0;
-        float best_val = logits[0];
-        for (int i = 1; i < vocab; i++) {
-            if (logits[i] > best_val) {
-                best_val = logits[i];
-                best_id = i;
-            }
-        }
-        free(logits);
+
+    if (ctx->beam_size > 1) {
+        // Beam search via core_beam_decode replay-from-prefix
+        auto replay = [&vocab](moss_audio_context* c, const int32_t* toks, int n, int prompt_len) -> float* {
+            float* emb = moss_audio_embed_tokens(c, toks, n);
+            if (!emb)
+                return nullptr;
+            int dummy_n = 0;
+            float* lg = moss_audio_run_llm_kv(c, emb, n, prompt_len, &dummy_n, &vocab);
+            std::free(emb);
+            return lg;
+        };
+
+        core_beam_decode::Config cfg;
+        cfg.max_new_tokens = max_new;
+        cfg.eos_id = (int)hp.eos_token_id;
+        cfg.vocab_size = vocab;
+        cfg.beam_size = ctx->beam_size;
+        cfg.prompt_len = n_prompt;
+
+        auto br = core_beam_decode::run_with_probs(ctx, logits, replay, cfg);
+        generated = std::move(br.tokens);
+        // logits ownership transferred to core_beam_decode
         logits = nullptr;
+    } else {
+        // Greedy decode
+        for (int step = 0; step < max_new; step++) {
+            int best_id = 0;
+            float best_val = logits[0];
+            for (int i = 1; i < vocab; i++) {
+                if (logits[i] > best_val) {
+                    best_val = logits[i];
+                    best_id = i;
+                }
+            }
+            free(logits);
+            logits = nullptr;
 
-        if (ctx->params.verbosity >= 1 && step < 5)
-            fprintf(stderr, "moss_audio: step %d argmax=%d (%.4f) token='%s'\n", step, best_id, best_val,
-                    (best_id >= 0 && best_id < (int)ctx->vocab.id_to_token.size())
-                        ? ctx->vocab.id_to_token[best_id].c_str()
-                        : "?");
-        if (best_id == (int)hp.eos_token_id)
-            break;
-        generated.push_back(best_id);
+            if (ctx->params.verbosity >= 1 && step < 5)
+                fprintf(stderr, "moss_audio: step %d argmax=%d (%.4f) token='%s'\n", step, best_id, best_val,
+                        (best_id >= 0 && best_id < (int)ctx->vocab.id_to_token.size())
+                            ? ctx->vocab.id_to_token[best_id].c_str()
+                            : "?");
+            if (best_id == (int)hp.eos_token_id)
+                break;
+            generated.push_back(best_id);
 
-        // Embed next token and run one decode step
-        float* next_emb = moss_audio_embed_tokens(ctx, &best_id, 1);
-        if (!next_emb)
-            break;
+            float* next_emb = moss_audio_embed_tokens(ctx, &best_id, 1);
+            if (!next_emb)
+                break;
 
-        int dummy_n = 0;
-        logits = moss_audio_run_llm_kv(ctx, next_emb, 1, n_prompt + (int)generated.size() - 1, &dummy_n, &vocab);
-        free(next_emb);
-        if (!logits)
-            break;
+            int dummy_n = 0;
+            logits = moss_audio_run_llm_kv(ctx, next_emb, 1, n_prompt + (int)generated.size() - 1, &dummy_n, &vocab);
+            free(next_emb);
+            if (!logits)
+                break;
+        }
+        if (logits)
+            free(logits);
     }
-    if (logits)
-        free(logits);
 
     // 10. Decode tokens to text (GPT-2 byte-level BPE → raw UTF-8)
     std::string result;
@@ -2000,4 +2029,10 @@ extern "C" void moss_audio_set_seed(struct moss_audio_context* ctx, uint32_t see
         ctx->seed = seed;
         ctx->rng.seed(seed);
     }
+}
+
+extern "C" void moss_audio_set_beam_size(struct moss_audio_context* ctx, int beam_size) {
+    if (!ctx)
+        return;
+    ctx->beam_size = beam_size > 0 ? beam_size : 1;
 }

@@ -81,6 +81,10 @@ const char* moss_audio_token_text(struct moss_audio_context* ctx, int token_id);
 // Seed for sampling.
 void moss_audio_set_seed(struct moss_audio_context* ctx, uint32_t seed);
 
+// Beam search. 1 = greedy (default). >1 = beam search via
+// core_beam_decode replay-from-prefix (§167g).
+void moss_audio_set_beam_size(struct moss_audio_context* ctx, int beam_size);
+
 #ifdef __cplusplus
 }
 #endif

@@ -85,6 +85,10 @@ void mimo_asr_set_n_threads(struct mimo_asr_context* ctx, int n_threads);
 // clear and resume the default ("Please transcribe this audio file").
 void mimo_asr_set_ask(struct mimo_asr_context* ctx, const char* prompt);
 
+// Beam search. 1 = greedy (default). >1 = beam search via
+// core_beam_decode replay-from-prefix (§167f, needs Kaggle for testing).
+void mimo_asr_set_beam_size(struct mimo_asr_context* ctx, int beam_size);
+
 #ifdef __cplusplus
 }
 #endif

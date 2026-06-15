@@ -207,6 +207,8 @@ struct mimo_asr_context {
     int32_t id_eostm = 151654;    // <|eostm|>
 
     std::string ask; // custom instruction (empty = use default)
+
+    int beam_size = 1; // 1 = greedy (default); >1 = beam search (§167f)
 };
 
 static uint32_t mimo_kv_u32(gguf_context* ctx, const char* key, uint32_t def) {
@@ -1936,4 +1938,10 @@ extern "C" void mimo_asr_set_n_threads(struct mimo_asr_context* ctx, int n_threa
 extern "C" void mimo_asr_set_ask(struct mimo_asr_context* ctx, const char* prompt) {
     if (ctx)
         ctx->ask = (prompt && prompt[0]) ? prompt : "";
+}
+
+extern "C" void mimo_asr_set_beam_size(struct mimo_asr_context* ctx, int beam_size) {
+    if (!ctx)
+        return;
+    ctx->beam_size = beam_size > 0 ? beam_size : 1;
 }
