@@ -594,24 +594,34 @@ static ggml_tensor* nemotron_build_pre_encode(ggml_context* ctx0, ggml_tensor* m
     // Stage 0: Conv2d(1, C, k=3, s=2) with causal padding
     ggml_tensor* cur = ggml_conv_2d(ctx0, w.conv0_w, causal_pad(mel), 2, 2, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv0_b));
+    ggml_set_name(cur, "conv0_out");
+    ggml_set_output(cur);
     cur = ggml_relu(ctx0, cur);
 
     // Stage 2: DW Conv2d(C, k=3, s=2) with causal padding
     cur = ggml_conv_2d_dw(ctx0, w.conv2_w, causal_pad(cur), 2, 2, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv2_b));
+    ggml_set_name(cur, "conv2_out");
+    ggml_set_output(cur);
 
     // Stage 3: PW Conv2d(C, C, k=1, s=1) — no padding
     cur = ggml_conv_2d(ctx0, w.conv3_w, cur, 1, 1, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv3_b));
+    ggml_set_name(cur, "conv3_out");
+    ggml_set_output(cur);
     cur = ggml_relu(ctx0, cur);
 
     // Stage 5: DW Conv2d(C, k=3, s=2) with causal padding
     cur = ggml_conv_2d_dw(ctx0, w.conv5_w, causal_pad(cur), 2, 2, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv5_b));
+    ggml_set_name(cur, "conv5_out");
+    ggml_set_output(cur);
 
     // Stage 6: PW Conv2d(C, C, k=1, s=1)
     cur = ggml_conv_2d(ctx0, w.conv6_w, cur, 1, 1, 0, 0, 1, 1);
     cur = ggml_add(ctx0, cur, bias_4d(w.conv6_b));
+    ggml_set_name(cur, "conv6_out");
+    ggml_set_output(cur);
     cur = ggml_relu(ctx0, cur);
 
     // Flatten and linear: (OW, OH, C, 1) -> permute to (OH, C, OW, 1) -> reshape to (C*OW, OH)
@@ -1050,6 +1060,23 @@ static bool nemotron_run_encoder(nemotron_context* ctx, const float* mel, int n_
     // Read output: (d_model, T_enc) in column-major → row-major (T_enc, d_model)
     enc_out.resize((size_t)T_enc * d_model_out);
     ggml_backend_tensor_get(enc_out_t, enc_out.data(), 0, enc_out.size() * sizeof(float));
+
+    // Debug: per-stage outputs
+    auto dump_stage = [&](const char* name) {
+        ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+        if (!t)
+            return;
+        fprintf(stderr, "nemotron: %s shape=(%lld,%lld,%lld,%lld)", name, (long long)t->ne[0], (long long)t->ne[1],
+                (long long)t->ne[2], (long long)t->ne[3]);
+        std::vector<float> v(5);
+        ggml_backend_tensor_get(t, v.data(), 0, 5 * sizeof(float));
+        fprintf(stderr, " flat[0:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", v[0], v[1], v[2], v[3], v[4]);
+    };
+    dump_stage("conv0_out");
+    dump_stage("conv2_out");
+    dump_stage("conv3_out");
+    dump_stage("conv5_out");
+    dump_stage("conv6_out");
 
     // Debug: pre-encode output
     ggml_tensor* pre_enc_t = ggml_graph_get_tensor(gf, "pre_enc_out");
@@ -1616,6 +1643,12 @@ extern "C" struct nemotron_result* nemotron_transcribe_ex(struct nemotron_contex
         }
         fprintf(stderr, "nemotron: mel T=%d n_mels=%d min=%.2f max=%.2f mel[0:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", T_mel,
                 (int)ctx->model.hparams.n_mels, mmin, mmax, mel[0], mel[1], mel[2], mel[3], mel[4]);
+        // Dump mel at frame 500 for comparison with NeMo
+        if (T_mel > 500) {
+            int off = 500 * (int)ctx->model.hparams.n_mels;
+            fprintf(stderr, "nemotron: mel frame500[0:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", mel[off], mel[off + 1],
+                    mel[off + 2], mel[off + 3], mel[off + 4]);
+        }
     }
 
     // Run encoder — use cache-aware chunked path (NEMOTRON_BATCH=1 for old bidirectional path)

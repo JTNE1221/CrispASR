@@ -246,6 +246,14 @@ def is_f32_tensor(gguf_name: str, shape: tuple[int, ...]) -> bool:
         return True
     if "pos_bias_u" in gguf_name or "pos_bias_v" in gguf_name:
         return True
+    # Pre-encode weights: keep all in F32. The unnormalized mel values
+    # (range [-16, +2.5]) produce large conv intermediates (up to ~60).
+    # F16 rounding errors accumulate across 256 channels x 17 freq bins
+    # = 4352-dim linear projection, causing up to 1.6 absolute error per
+    # frame vs NeMo F32 — which cascades through 24 conformer layers into
+    # completely wrong encoder output. Pre-encode is only ~20 MB. (#81)
+    if gguf_name.startswith("encoder.pre."):
+        return True
     if len(shape) <= 1:
         return True
     return False
