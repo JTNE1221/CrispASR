@@ -898,8 +898,13 @@ static ggml_tensor* nemotron_build_block(ggml_context* ctx0, ggml_tensor* cur, g
 
     ggml_tensor* pw1_w = ggml_reshape_2d(ctx0, e.conv_pw1_w, d, 2 * d);
     ggml_tensor* cnv = mm_bias(pw1_w, x, e.conv_pw1_b);
-    // NeMo Conformer GLU: first_half=value, second_half=gate → non-swapped siglu
-    cnv = ggml_siglu(ctx0, cnv);
+    if (debug_tag) {
+        ggml_set_name(cnv, "dbg_pw1");
+        ggml_set_output(cnv);
+    }
+    // NeMo Conformer GLU: first_half * sigmoid(second_half) = swapped siglu
+    // ggml_siglu does sigmoid(first) * second; ggml_siglu_swapped does first * sigmoid(second)
+    cnv = ggml_siglu_swapped(ctx0, cnv);
     if (debug_tag) {
         ggml_set_name(cnv, "dbg_siglu");
         ggml_set_output(cnv);
@@ -922,14 +927,13 @@ static ggml_tensor* nemotron_build_block(ggml_context* ctx0, ggml_tensor* cur, g
     }
     cnv = ggml_cont(ctx0, ggml_permute(ctx0, cnv, 1, 2, 0, 3));
     cnv = ggml_reshape_2d(ctx0, cnv, d, T);
-    if (debug_tag) {
-        ggml_set_name(cnv, "dbg_dwconv");
-        ggml_set_output(cnv);
-    }
-
     // LayerNorm (replaces BN-folded bias add in parakeet)
     if (e.conv_ln_w && e.conv_ln_b) {
         cnv = ggml_norm_affine(ctx0, cnv, e.conv_ln_w, e.conv_ln_b, eps);
+    }
+    if (debug_tag) {
+        ggml_set_name(cnv, "dbg_postln");
+        ggml_set_output(cnv);
     }
     cnv = ggml_silu(ctx0, cnv);
 
@@ -1091,7 +1095,7 @@ static bool nemotron_run_encoder(nemotron_context* ctx, const float* mel, int n_
                 (long long)t->ne[2], (long long)t->ne[3]);
         std::vector<float> v(5);
         ggml_backend_tensor_get(t, v.data(), 0, 5 * sizeof(float));
-        fprintf(stderr, " flat[0:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", v[0], v[1], v[2], v[3], v[4]);
+        fprintf(stderr, " flat[0:5]=[%.8f,%.8f,%.8f,%.8f,%.8f]\n", v[0], v[1], v[2], v[3], v[4]);
     };
     dump_stage("conv0_out");
     dump_stage("conv2_out");
@@ -1101,8 +1105,9 @@ static bool nemotron_run_encoder(nemotron_context* ctx, const float* mel, int n_
     // Layer 0 sub-module dumps
     dump_stage("dbg_ffn1");
     dump_stage("dbg_attn");
+    dump_stage("dbg_pw1");
     dump_stage("dbg_siglu");
-    dump_stage("dbg_dwconv");
+    dump_stage("dbg_postln");
     dump_stage("dbg_conv");
 
     // Debug: pre-encode output
