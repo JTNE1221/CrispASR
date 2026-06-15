@@ -363,8 +363,8 @@
         "approx_size_mb": 1240
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "PLACEHOLDER — tokenizer outputs RVQ codes, not a transcript; rebake will print a deterministic hash/digest for regression.",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive. The transcript field may be repurposed as a codes-hash; confirm convention with the validate script when flipping skip_diff."
+      "expected_transcript": "RVQ codes output — regression by codes-hash, not transcript",
+      "expected_transcript_source": "tokenizer outputs 8-channel RVQ codes; transcript field N/A"
     },
     {
       "name": "lid-cld3-f16",
@@ -399,8 +399,8 @@
       },
       "sample": "samples/jfk.wav",
       "_sample_note": "Reference audio for voice cloning. The synth text comes from VOXCPM2_SYN_TEXT (default in voxcpm2_tts.py).",
-      "expected_transcript": "PLACEHOLDER — TTS output, not a transcript. Rebake will capture a deterministic hash of the decoded audio.",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+      "expected_transcript": "TTS backend — regression via tts_backends roundtrip section",
+      "expected_transcript_source": "TTS-only; ASR roundtrip regression in tts_backends section"
     },
     {
       "name": "indextts-1.5",
@@ -421,8 +421,8 @@
       },
       "sample": "samples/jfk.wav",
       "_sample_note": "Reference audio for voice cloning. The synth phrase is configurable in indextts.py at dump time.",
-      "expected_transcript": "PLACEHOLDER — TTS output, not a transcript. Rebake will capture a deterministic hash of the decoded audio.",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+      "expected_transcript": "TTS backend — regression via tts_backends roundtrip section",
+      "expected_transcript_source": "TTS-only; ASR roundtrip regression in tts_backends section"
     },
     {
       "name": "titanet-large",
@@ -458,8 +458,8 @@
       },
       "sample": "samples/jfk.wav",
       "_sample_note": "Reference audio for voice cloning. The synth phrase is fixed inside chatterbox_turbo.py (deterministic seed).",
-      "expected_transcript": "PLACEHOLDER — TTS output, not a transcript. Rebake will capture a deterministic hash of the decoded audio.",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+      "expected_transcript": "TTS backend — regression via tts_backends roundtrip section",
+      "expected_transcript_source": "TTS-only; ASR roundtrip regression in tts_backends section"
     },
     {
       "name": "wav2vec2-xlsr-en",
@@ -668,8 +668,8 @@
         "approx_size_mb": 3200
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "PLACEHOLDER",
-      "expected_transcript_source": "TODO"
+      "expected_transcript": "SIGABRT on CUDA+CPU (rc=-6) — known runtime bug, needs investigation",
+      "expected_transcript_source": "2026-06-15: rc=-6 on both T4 GPU and CPU-only Kaggle. Needs granite_nle.cpp debugging."
     },
     {
       "name": "voxtral4b-realtime",
@@ -1124,6 +1124,53 @@
       "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
       "wer_max": 0.3,
       "wer_max_note": "Initial placeholder — zonos roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "voxcpm2-tts-2b",
+      "backend_id": "voxcpm2-tts",
+      "gguf": {
+        "repo": "cstr/voxcpm2-GGUF",
+        "revision": "11c5ad6b0a9b0b0f6876ec18b3c3b555d5b5cb44",
+        "file": "voxcpm2-q4_k.gguf",
+        "approx_size_mb": 1611
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "VoxCPM2 2B diffusion TTS. Needs reference WAV for voice cloning.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "indextts-1.5",
+      "backend_id": "indextts",
+      "gguf": {
+        "repo": "cstr/indextts-1.5-GGUF",
+        "revision": "6e35d352cc95160054c662489fc7293341a1f0e4",
+        "file": "indextts-gpt.gguf",
+        "approx_size_mb": 2175,
+        "companion_files": ["indextts-bigvgan.gguf"]
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "IndexTTS-1.5 GPT + BigVGAN. Needs reference WAV for voice cloning.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "chatterbox-turbo-s3gen",
+      "backend_id": "chatterbox-turbo",
+      "gguf": {
+        "repo": "cstr/chatterbox-turbo-GGUF",
+        "revision": "1c7e7f8886aed773fb12970edf4d4f65a67d4b85",
+        "file": "chatterbox-turbo-s3gen-f16-regen.gguf",
+        "approx_size_mb": 627,
+        "_companion_note": "Also needs chatterbox-turbo-t3 model (auto-located)."
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "ChatterboxTurbo meanflow TTS. Uses built-in voice.",
       "voice_preset": "default"
     }
   ]
