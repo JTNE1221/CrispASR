@@ -2881,51 +2881,69 @@ WER benchmarking against NeMo on standard test sets.
 
 ## 168. GPU scheduler migration — gallocr-only backends
 
-**Status:** open.
+**Status:** partially done (4/7 migrated, streaming encoder incomplete).
 
-Seven model backends still use `ggml_gallocr` + `ggml_backend_graph_compute`
-directly instead of `ggml_backend_sched`. This means they can't automatically
-split ops across GPU + CPU, can't benefit from GPU offloading, and some
-(`paraformer`, `dia_tts`, `outetts_wavtok`) are stuck on CPU even when GPU
-is available.
+### Completed (2026-06-15, commits `f3a57d7c`, `d393b506`, `8f481aa2`)
+
+Four backends migrated from `ggml_gallocr` to `ggml_backend_sched`:
+- **nemotron** — encoder, chunked encoder, pre-encode graph
+- **paraformer** — encoder, decoder
+- **dia_tts** — encoder, cross-attn, decoder loop, DAC decode
+- **outetts_wavtok** — decode graph
+
+All verified: identical output on CPU, ASR roundtrip for TTS, 435 unit tests pass.
+
+### Remaining gallocr backends
 
 | Backend | gallocr | init_best | Status |
 |---------|:-------:|:---------:|--------|
-| `paraformer` | 13 | ❌ | **CPU-only** — no GPU path at all |
-| `dia_tts` | 23 | ❌ | **CPU-only** — sched declared but unused |
-| `outetts_wavtok` | 5 | ❌ | **CPU-only** — sched declared but unused |
-| `nemotron` | 15 | ✅ | gallocr on GPU backend — works but no auto-split |
 | `voxcpm2_tts` | 27 | ✅ | gallocr on GPU backend — graph path uses GPU |
 | `lfm2_audio` | 12 | ✅ | gallocr on GPU backend — works |
 | `audioseal` | 10 | ✅ | gallocr on GPU backend — small model |
 
-**Priority order:**
-1. `paraformer` — popular ASR backend, large model, biggest speedup potential
-2. `dia_tts` — large dialogue TTS model, very slow on CPU
-3. `nemotron` — streaming ASR, latency-sensitive
-4. `outetts_wavtok` — small but used in speech generation pipeline
-5. `voxcpm2_tts` / `lfm2_audio` / `audioseal` — already use GPU via gallocr,
-   just need sched migration for proper multi-backend routing
+### Nemotron streaming encoder — QUALITY PROBLEM
 
-**Migration pattern** (from the 60+ backends that already use sched):
-```cpp
-// Old: gallocr
-ggml_gallocr_t alloc = ggml_gallocr_new(buf_type);
-ggml_gallocr_reserve(alloc, gf);
-ggml_gallocr_alloc_graph(alloc, gf);
-ggml_backend_graph_compute(backend, gf);
+The streaming (chunked) encoder path is architecturally complete:
+- `nemotron_build_block_streaming`: FFN1 new-only, Q-new/KV-context,
+  causal conv, FFN2+LN new-only, cache_last_channel
+- Asymmetric rel-pos bias via stride-trick rel_shift (same formula as
+  symmetric, offset = T_new-1 instead of T-1)
+- Gated by `CRISPASR_NEMOTRON_STREAMING=1`
 
-// New: sched
-ggml_backend_sched_reset(sched);
-ggml_backend_sched_alloc_graph(sched, gf);
-// set inputs...
-ggml_backend_sched_graph_compute(sched, gf);
-```
+**Problem:** output quality is severely degraded compared to the full-sequence
+encoder with `chunked_limited` attention mask. The RNNT decoder produces
+mostly blank tokens with preset 0 (R=3, chunk=4). Preset 3 (R=13, chunk=14)
+produces recognizable but garbled text ("And so, yes, it's my fellow American
+for you..."). Per-frame encoder output diverges from the full-sequence path
+starting at frame 10 (magnitudes ~10x smaller in streaming).
 
-Also excluded from this list (too small / non-model):
-`silero_lid`, `firered_lid`, `firered_vad`, `truecaser*`, `pyannote_seg`,
-`titanet`, `lid_*`, `text_lid_dispatch` — these are tiny CPU-only models
-where GPU scheduling overhead would exceed the compute.
+**Root cause hypotheses (to investigate):**
+1. The full-sequence encoder uses `chunked_limited` attention which allows
+   14 right-context chunks per frame. The streaming path has zero right
+   context beyond the current chunk. This is the fundamental streaming
+   quality gap — but NeMo claims the model works in streaming mode.
+2. The cache stores post-FFN1 output. When re-used for K/V attention in
+   the next chunk, it gets re-normalized by `norm_attn`. The full-sequence
+   encoder normalizes all frames together (different statistics).
+3. The conv module uses causal left-padding (K-1=8 zeros) for the first
+   chunk. The full-sequence encoder uses symmetric padding. This changes
+   the first few frames' representations permanently.
+4. NeMo's streaming path may use a different cache strategy (e.g. caching
+   post-attention output, not post-FFN1) or a different normalization
+   approach in streaming mode.
+
+**Next step:** dump NeMo's Python streaming encoder activations layer-by-layer
+and compare with the C++ path using `crispasr-diff`. The first divergence
+point will reveal which hypothesis is correct.
+
+### Env vars added
+
+| Var | Effect |
+|-----|--------|
+| `CRISPASR_NEMOTRON_STREAMING=1` | Enable streaming chunked encoder |
+| `CRISPASR_NEMOTRON_CONTEXT_PRESET=N` | Attention context preset (0-3) |
+| `CRISPASR_NEMOTRON_NO_WINDOW_MASK=1` | Disable banded attention mask |
+| `CRISPASR_NEMOTRON_DEBUG=1` | Encoder/decoder debug prints |
 
 ---
 
