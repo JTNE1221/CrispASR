@@ -119,11 +119,14 @@ struct wavtok_decoder_ctx {
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
 
     ~wavtok_decoder_ctx() {
+        if (sched)
+            ggml_backend_sched_free(sched);
         if (ctx_w)
             ggml_free(ctx_w);
         if (buf_w)
@@ -740,19 +743,22 @@ extern "C" float* wavtok_decoder_decode(struct wavtok_decoder_ctx* ctx, const in
     ggml_build_forward_expand(gf, x);
 
     // Allocate and compute
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-    if (!ggml_gallocr_alloc_graph(alloc, gf)) {
-        fprintf(stderr, "wavtok: graph alloc failed\n");
-        ggml_gallocr_free(alloc);
+    if (!ctx->sched) {
+        ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
+        int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 8192, false, false);
+    }
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "wavtok: sched alloc graph failed\n");
         ggml_free(ctx0);
         return nullptr;
     }
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "codes_in"), codes, 0, T * sizeof(int32_t));
 
-    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS) {
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "wavtok: graph compute failed\n");
-        ggml_gallocr_free(alloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -806,7 +812,6 @@ extern "C" float* wavtok_decoder_decode(struct wavtok_decoder_ctx* ctx, const in
     std::vector<float> stft_data(stft_dim * T_out);
     ggml_backend_tensor_get(stft_out, stft_data.data(), 0, stft_data.size() * sizeof(float));
 
-    ggml_gallocr_free(alloc);
     ggml_free(ctx0);
 
     // Split into magnitude and phase

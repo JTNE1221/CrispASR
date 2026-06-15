@@ -198,6 +198,15 @@ struct dia_tts_context {
 // Helpers
 // -----------------------------------------------------------------------
 
+static bool dia_ensure_sched(dia_tts_context* ctx) {
+    if (ctx->sched)
+        return true;
+    ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
+    int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+    return ctx->sched != nullptr;
+}
+
 static uint32_t read_u32(gguf_context* meta, const char* key, uint32_t def) {
     int idx = gguf_find_key(meta, key);
     return (idx >= 0) ? gguf_get_val_u32(meta, idx) : def;
@@ -1132,15 +1141,13 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
     ggml_cgraph* gf = dac_build_decode_graph(m.dac, ctx0, (int)n_frames);
 
     // Allocate graph buffers
-    ggml_backend_t backend = ctx->backend ? ctx->backend : ctx->backend_cpu;
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc) {
+    if (!dia_ensure_sched(ctx)) {
         ggml_free(ctx0);
         return nullptr;
     }
-    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "dia_dac: failed to allocate decode graph\n");
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -1152,7 +1159,6 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
         ggml_tensor* inp = ggml_graph_get_tensor(gf, name);
         if (!inp) {
             fprintf(stderr, "dia_dac: input tensor '%s' not in graph\n", name);
-            ggml_gallocr_free(galloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1164,10 +1170,9 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
     }
 
     // Compute
-    ggml_status st = ggml_backend_graph_compute(backend, gf);
+    ggml_status st = ggml_backend_sched_graph_compute(ctx->sched, gf);
     if (st != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "dia_dac: graph compute failed (status=%d)\n", (int)st);
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -1176,7 +1181,6 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
     ggml_tensor* pcm_out = ggml_graph_get_tensor(gf, "dac_pcm");
     if (!pcm_out) {
         fprintf(stderr, "dia_dac: pcm output tensor not in graph\n");
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -1184,7 +1188,6 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
     const int n_samples = (int)ggml_nelements(pcm_out);
     float* pcm = (float*)malloc(n_samples * sizeof(float));
     if (!pcm) {
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -1197,7 +1200,6 @@ static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filt
                 (float)n_samples / cfg.sample_rate, cfg.sample_rate);
     }
 
-    ggml_gallocr_free(galloc);
     ggml_free(ctx0);
     return pcm;
 }
@@ -1374,11 +1376,13 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
         ggml_build_forward_expand(gf, enc_out);
 
-        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-        if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf)) {
+        if (!dia_ensure_sched(ctx)) {
+            ggml_free(ctx0);
+            return nullptr;
+        }
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "dia_tts: encoder graph alloc failed\n");
-            if (alloc)
-                ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1391,10 +1395,9 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_mask"), enc_mask.data(), 0,
                                 enc_mask.size() * sizeof(float));
 
-        ggml_status st = ggml_backend_graph_compute(ctx->backend, gf);
+        ggml_status st = ggml_backend_sched_graph_compute(ctx->sched, gf);
         if (st != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "dia_tts: encoder compute failed (status=%d)\n", (int)st);
-            ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1404,7 +1407,6 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         encoder_output.resize(enc_hidden * T_enc * B);
         ggml_backend_tensor_get(enc_result, encoder_output.data(), 0, encoder_output.size() * sizeof(float));
 
-        ggml_gallocr_free(alloc);
         ggml_free(ctx0);
     }
 
@@ -1470,11 +1472,9 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         for (auto* o : outputs)
             ggml_build_forward_expand(gf, o);
 
-        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-        if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "dia_tts: cross-attn graph alloc failed\n");
-            if (alloc)
-                ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1482,10 +1482,9 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_in"), encoder_output.data(), 0,
                                 encoder_output.size() * sizeof(float));
 
-        ggml_status st = ggml_backend_graph_compute(ctx->backend, gf);
+        ggml_status st = ggml_backend_sched_graph_compute(ctx->sched, gf);
         if (st != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "dia_tts: cross-attn compute failed\n");
-            ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1516,7 +1515,6 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             fprintf(stderr, "DIA_DUMP: cpp_cross_{k,v}0.f32 (cross_kv_dim=%d T_enc=%d B=%d)\n", cross_kv_dim, T_enc, B);
         }
 
-        ggml_gallocr_free(alloc);
         ggml_free(ctx0);
     }
 
@@ -1787,11 +1785,9 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             ggml_build_forward_expand(gf, new_v_outputs[l]);
         }
 
-        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-        if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "dia_tts: decoder step %u graph alloc failed\n", step);
-            if (alloc)
-                ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1845,10 +1841,9 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
         }
 
         // Compute
-        ggml_status st = ggml_backend_graph_compute(ctx->backend, gf);
+        ggml_status st = ggml_backend_sched_graph_compute(ctx->sched, gf);
         if (st != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "dia_tts: decoder step %u compute failed\n", step);
-            ggml_gallocr_free(alloc);
             ggml_free(ctx0);
             return nullptr;
         }
@@ -1981,7 +1976,6 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             }
         }
 
-        ggml_gallocr_free(alloc);
         ggml_free(ctx0);
 
         // EOS/delay override on the sampled tokens (end-of-sequence delay) + stop check.

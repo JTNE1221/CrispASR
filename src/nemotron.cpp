@@ -1002,6 +1002,19 @@ static ggml_cgraph* nemotron_build_graph_encoder(nemotron_context* ctx, int T_me
 }
 
 // ===========================================================================
+// Lazy-init backend scheduler (replaces per-call gallocr)
+// ===========================================================================
+
+static bool nemotron_ensure_sched(nemotron_context* ctx) {
+    if (ctx->sched)
+        return true;
+    ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
+    int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 8192, false, false);
+    return ctx->sched != nullptr;
+}
+
+// ===========================================================================
 // Run encoder: mel → encoder output
 // ===========================================================================
 
@@ -1009,16 +1022,11 @@ static bool nemotron_run_encoder(nemotron_context* ctx, const float* mel, int n_
                                  std::vector<float>& enc_out, int& T_enc, int& d_model_out) {
     ggml_cgraph* gf = nemotron_build_graph_encoder(ctx, T_mel);
 
-    // Allocate with gallocr
-    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-    if (!ggml_gallocr_reserve(alloc, gf)) {
-        fprintf(stderr, "nemotron: gallocr reserve failed\n");
-        ggml_gallocr_free(alloc);
+    if (!nemotron_ensure_sched(ctx))
         return false;
-    }
-    if (!ggml_gallocr_alloc_graph(alloc, gf)) {
-        fprintf(stderr, "nemotron: gallocr alloc failed\n");
-        ggml_gallocr_free(alloc);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "nemotron: sched alloc encoder graph failed\n");
         return false;
     }
 
@@ -1048,19 +1056,15 @@ static bool nemotron_run_encoder(nemotron_context* ctx, const float* mel, int n_
     }
 
     // Run
-    if (ctx->backend_cpu) {
-        ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "nemotron: encoder graph compute failed\n");
+        return false;
     }
-    if (ggml_backend_is_cpu(ctx->backend)) {
-        ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
-    }
-    ggml_backend_graph_compute(ctx->backend, gf);
 
     // Read output: (d_model, T_enc) in column-major → row-major (T_enc, d_model)
     enc_out.resize((size_t)T_enc * d_model_out);
     ggml_backend_tensor_get(enc_out_t, enc_out.data(), 0, enc_out.size() * sizeof(float));
 
-    ggml_gallocr_free(alloc);
     return true;
 }
 
@@ -1123,7 +1127,6 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
     struct layer_graph {
         ggml_context* ctx0 = nullptr;
         ggml_cgraph* gf = nullptr;
-        ggml_gallocr_t alloc = nullptr;
     };
     std::map<std::tuple<int, int, int>, layer_graph> graph_cache;
 
@@ -1152,15 +1155,12 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
         ggml_set_name(out2, "block_out");
         ggml_set_output(out2);
         ggml_build_forward_expand(lg.gf, out2);
-        lg.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-        ggml_gallocr_reserve(lg.alloc, lg.gf);
-        ggml_gallocr_alloc_graph(lg.alloc, lg.gf);
         graph_cache[key] = lg;
         return graph_cache[key];
     };
 
-    if (ggml_backend_is_cpu(ctx->backend))
-        ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
+    if (!nemotron_ensure_sched(ctx))
+        return false;
 
     // Process each chunk
     for (int ci = 0; ci < n_chunks; ci++) {
@@ -1185,6 +1185,12 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
 
             auto& lg = get_or_build(il, T_win);
 
+            ggml_backend_sched_reset(ctx->sched);
+            if (!ggml_backend_sched_alloc_graph(ctx->sched, lg.gf)) {
+                fprintf(stderr, "nemotron: sched alloc chunked layer %d failed\n", il);
+                return false;
+            }
+
             ggml_tensor* inp_t = ggml_graph_get_tensor(lg.gf, "block_in");
             ggml_backend_tensor_set(inp_t, win_input.data(), 0, (size_t)T_win * d * sizeof(float));
 
@@ -1192,7 +1198,10 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
             ggml_tensor* pos_t = ggml_graph_get_tensor(lg.gf, "pos_enc");
             ggml_backend_tensor_set(pos_t, pe.data(), 0, pe.size() * sizeof(float));
 
-            ggml_backend_graph_compute(ctx->backend, lg.gf);
+            if (ggml_backend_sched_graph_compute(ctx->sched, lg.gf) != GGML_STATUS_SUCCESS) {
+                fprintf(stderr, "nemotron: chunked layer %d compute failed\n", il);
+                return false;
+            }
 
             // Read full window output, extract last n_new frames
             ggml_tensor* out_t = ggml_graph_get_tensor(lg.gf, "block_out");
@@ -1230,7 +1239,6 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
 
     // Cleanup
     for (auto& [key, lg] : graph_cache) {
-        ggml_gallocr_free(lg.alloc);
         ggml_free(lg.ctx0);
     }
 
@@ -1564,6 +1572,8 @@ extern "C" void nemotron_free(struct nemotron_context* ctx) {
     if (!ctx)
         return;
 
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
     if (ctx->model.buf)
         ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)
@@ -1657,16 +1667,25 @@ extern "C" struct nemotron_result* nemotron_transcribe_ex(struct nemotron_contex
             ggml_set_output(pre);
             ggml_build_forward_expand(gf, pre);
 
-            ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-            ggml_gallocr_reserve(alloc, gf);
-            ggml_gallocr_alloc_graph(alloc, gf);
+            if (!nemotron_ensure_sched(ctx)) {
+                ggml_free(ctx0);
+                return nullptr;
+            }
+            ggml_backend_sched_reset(ctx->sched);
+            if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+                fprintf(stderr, "nemotron: sched alloc pre-encode graph failed\n");
+                ggml_free(ctx0);
+                return nullptr;
+            }
 
             ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel");
             ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
 
-            if (ggml_backend_is_cpu(ctx->backend))
-                ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
-            ggml_backend_graph_compute(ctx->backend, gf);
+            if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+                fprintf(stderr, "nemotron: pre-encode compute failed\n");
+                ggml_free(ctx0);
+                return nullptr;
+            }
 
             ggml_tensor* pre_out = ggml_graph_get_tensor(gf, "pre_enc");
             T_enc = (int)pre_out->ne[1];
@@ -1688,7 +1707,6 @@ extern "C" struct nemotron_result* nemotron_transcribe_ex(struct nemotron_contex
                         pmax, psum / (float)pre_enc.size());
             }
 
-            ggml_gallocr_free(alloc);
             ggml_free(ctx0);
 
             // Step 2: run chunked encoder on pre-encode output
