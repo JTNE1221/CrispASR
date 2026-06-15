@@ -2879,6 +2879,56 @@ WER benchmarking against NeMo on standard test sets.
 
 ---
 
+## 168. GPU scheduler migration — gallocr-only backends
+
+**Status:** open.
+
+Seven model backends still use `ggml_gallocr` + `ggml_backend_graph_compute`
+directly instead of `ggml_backend_sched`. This means they can't automatically
+split ops across GPU + CPU, can't benefit from GPU offloading, and some
+(`paraformer`, `dia_tts`, `outetts_wavtok`) are stuck on CPU even when GPU
+is available.
+
+| Backend | gallocr | init_best | Status |
+|---------|:-------:|:---------:|--------|
+| `paraformer` | 13 | ❌ | **CPU-only** — no GPU path at all |
+| `dia_tts` | 23 | ❌ | **CPU-only** — sched declared but unused |
+| `outetts_wavtok` | 5 | ❌ | **CPU-only** — sched declared but unused |
+| `nemotron` | 15 | ✅ | gallocr on GPU backend — works but no auto-split |
+| `voxcpm2_tts` | 27 | ✅ | gallocr on GPU backend — graph path uses GPU |
+| `lfm2_audio` | 12 | ✅ | gallocr on GPU backend — works |
+| `audioseal` | 10 | ✅ | gallocr on GPU backend — small model |
+
+**Priority order:**
+1. `paraformer` — popular ASR backend, large model, biggest speedup potential
+2. `dia_tts` — large dialogue TTS model, very slow on CPU
+3. `nemotron` — streaming ASR, latency-sensitive
+4. `outetts_wavtok` — small but used in speech generation pipeline
+5. `voxcpm2_tts` / `lfm2_audio` / `audioseal` — already use GPU via gallocr,
+   just need sched migration for proper multi-backend routing
+
+**Migration pattern** (from the 60+ backends that already use sched):
+```cpp
+// Old: gallocr
+ggml_gallocr_t alloc = ggml_gallocr_new(buf_type);
+ggml_gallocr_reserve(alloc, gf);
+ggml_gallocr_alloc_graph(alloc, gf);
+ggml_backend_graph_compute(backend, gf);
+
+// New: sched
+ggml_backend_sched_reset(sched);
+ggml_backend_sched_alloc_graph(sched, gf);
+// set inputs...
+ggml_backend_sched_graph_compute(sched, gf);
+```
+
+Also excluded from this list (too small / non-model):
+`silero_lid`, `firered_lid`, `firered_vad`, `truecaser*`, `pyannote_seg`,
+`titanet`, `lid_*`, `text_lid_dispatch` — these are tiny CPU-only models
+where GPU scheduling overhead would exceed the compute.
+
+---
+
 ## 86. Per-backend flash-attention wiring (CrisperWeaver-driven)
 
 **Status:** open. Plumbing complete in 0.6.2 (commit `ff5536a6`),
