@@ -59,7 +59,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **DONE** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | **DONE.** GGUFs at `cstr/VibeVoice-7B-GGUF` (Q3_K 4.7 GB – F16 17.4 GB). ASR+TTS working. Layer offload validated on M1 Metal (ASR 28L, TTS 20L). |
 | **DONE** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | **DONE 2026-05-20.** Full LLM-decoder runtime shipped; GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`; byte-identical diffs; ~9× RT on M1 Metal. CTC two-pass rescore is a separate low-pri follow-up. |
 | **DONE** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80a parked; **80b DONE**; **80c DONE**; **80d DONE** 2026-05-23 (audit: no fixes needed — all backends use energy chunker); 80e low-priority warmup deferred |
-| **HIGH** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | **IN PROGRESS.** Full scaffold on main. Default (bidirectional) path working perfectly on F16+Q4_K. Sched migration done. Streaming path (`CRISPASR_NEMOTRON_STREAMING=1`): architecture complete (cache_last_channel + asymmetric rel-pos bias), but quality degraded — preset 3 (R=13) gives recognizable but garbled text, preset 0 (R=3) gives blank. See §168 for root cause hypotheses. 3 live integration tests added. |
+| **DONE** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | **WORKING** on all 4 context presets. Default bidirectional + streaming (`CRISPASR_NEMOTRON_STREAMING=1`) both produce correct text. Conv cache fix (`7f4feff9`) was the root cause of blank output — NeMo prepends last K-1 pre-DW-conv frames instead of zero-padding. Sched migration done. Asymmetric rel-pos bias. 3 live tests. Remaining: WER benchmarking, make streaming the default when perf+quality verified on GPU. |
 | **DONE** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | — | All backends now route through core helpers (`core_attn`, `core_sanm`, `core_conformer`) that unconditionally use `ggml_flash_attn_ext`. Only t5_translate excluded (T5 rel-pos bias incompatible). |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
 | **LOW** | [#95 IndexTTS Chinese TN binary alternative](#95-indextts-15-chinese-tn--binary-alternative-to-the-python-wetext-hook) | survey only | Python `INDEXTTS_TEXT_NORMALIZER` hook shipped 2026-05-19. Hand-roll (#95a) is the right next step *when* a user reports a digit/date prompt that breaks; OpenFST vendoring (#95b) only after #95a grows past ~5 cases. |
@@ -2886,8 +2886,16 @@ Additional fixes along the way:
   root cause analysis.
 - 3 live integration tests added (init, JFK, F16/Q4_K parity)
 
-**Remaining:** streaming quality investigation (NeMo Python ref dump comparison),
-WER benchmarking on standard test sets.
+**2026-06-15 — STREAMING FIXED (`7f4feff9`).** Root cause: conv module
+zero-padded K-1=8 frames instead of prepending cached pre-DW-conv signal.
+NeMo's `CausalConv1D.update_cache` does `torch.cat([cache, x])`.
+All 4 presets now produce correct text:
+- Preset 0 (R=3, 160ms): "And so, my fellow Americans..."
+- Preset 3 (R=13, 1120ms): "And so, my fellow Americans..."
+- F16 preset 0: "And so my fellow Americans..."
+
+**Remaining:** WER benchmarking on standard test sets, GPU perf testing,
+consider making streaming the default path.
 
 ---
 
@@ -2933,31 +2941,15 @@ The streaming (chunked) encoder path is architecturally complete:
   symmetric, offset = T_new-1 instead of T-1)
 - Gated by `CRISPASR_NEMOTRON_STREAMING=1`
 
-**Problem:** output quality is severely degraded compared to the full-sequence
-encoder with `chunked_limited` attention mask. The RNNT decoder produces
-mostly blank tokens with preset 0 (R=3, chunk=4). Preset 3 (R=13, chunk=14)
-produces recognizable but garbled text ("And so, yes, it's my fellow American
-for you..."). Per-frame encoder output diverges from the full-sequence path
-starting at frame 10 (magnitudes ~10x smaller in streaming).
+**FIXED (2026-06-15, `7f4feff9`).** Root cause was hypothesis #3: the conv
+module zero-padded the left by K-1=8 on every chunk instead of prepending
+the cached pre-DW-conv signal from the previous chunk. NeMo's
+`CausalConv1D.update_cache` does `torch.cat([cache, new_x], dim=-1)` — our
+code was using `ggml_conv_2d_dw_direct(..., pad_left=K-1)` which fills zeros.
 
-**Root cause hypotheses (to investigate):**
-1. The full-sequence encoder uses `chunked_limited` attention which allows
-   14 right-context chunks per frame. The streaming path has zero right
-   context beyond the current chunk. This is the fundamental streaming
-   quality gap — but NeMo claims the model works in streaming mode.
-2. The cache stores post-FFN1 output. When re-used for K/V attention in
-   the next chunk, it gets re-normalized by `norm_attn`. The full-sequence
-   encoder normalizes all frames together (different statistics).
-3. The conv module uses causal left-padding (K-1=8 zeros) for the first
-   chunk. The full-sequence encoder uses symmetric padding. This changes
-   the first few frames' representations permanently.
-4. NeMo's streaming path may use a different cache strategy (e.g. caching
-   post-attention output, not post-FFN1) or a different normalization
-   approach in streaming mode.
-
-**Next step:** dump NeMo's Python streaming encoder activations layer-by-layer
-and compare with the C++ path using `crispasr-diff`. The first divergence
-point will reveal which hypothesis is correct.
+Fix: added `conv_cache_in` / `conv_cache_out` to the streaming block. Each
+layer stores the last K-1 frames of the post-GLU signal and prepends them
+on the next chunk. All 4 context presets now produce correct text.
 
 ### Env vars added
 

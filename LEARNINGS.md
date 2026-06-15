@@ -58,6 +58,31 @@ per-frame values were wrong.
 gate and which is the value. `ggml_siglu` = `σ(a) × b` (swapped from the
 PyTorch convention). `ggml_siglu_swapped` = `a × σ(b)` (matches PyTorch).
 
+## Streaming conv modules need cached left context, not zero-padding (#81)
+
+NeMo's `CausalConv1D` in streaming mode does NOT zero-pad the left side.
+Instead, it prepends the last K-1 frames of the previous chunk's pre-DW-conv
+signal (`cache_last_time`). Zero-padding every chunk means the depthwise conv
+sees 8 zeros as left context on every chunk boundary, which destroys the
+activations from the second chunk onwards.
+
+**Symptom:** streaming encoder aggregate stats (min/max/mean) looked almost
+identical to the full-sequence encoder, but per-frame values diverged from
+frame 10 onwards (magnitudes ~10x smaller). RNNT decoder produced all-blank
+tokens.
+
+**Rule:** Any streaming conformer conv module must cache the pre-DW-conv
+signal (post pointwise1+GLU, pre depthwise conv). First chunk zero-pads;
+all subsequent chunks prepend the cache. This is separate from the
+`cache_last_channel` (post-FFN1) cache used for attention K/V context.
+
+## Asymmetric rel-pos shift uses the same formula as symmetric (#81)
+
+For streaming attention with Q(T_new) × K(T_full), the rel_shift is:
+`view_3d(BD_raw, T_full, T_new, H, s1-s0, s2, (T_new-1)*s0)` — exactly
+the same stride-trick as the symmetric case, but using T_new for the
+offset instead of T. Derivation: BD[k,q] = BD_raw[(T_new-1)+k-q, q].
+
 ## A feature has ~8 front-ends — wiring it into one isn't "done" (§166)
 
 A user-facing option in this repo must be threaded through every surface or it
