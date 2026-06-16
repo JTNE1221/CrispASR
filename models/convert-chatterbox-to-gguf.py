@@ -986,7 +986,11 @@ def main():
         return
 
     conds_path = model_dir / "conds.pt"
-    tokenizer_path = model_dir / "tokenizer.json"
+    # Prefer multilingual tokenizer (mtl_tokenizer.json) over base
+    # tokenizer.json — the mtl variant has language tags ([ar], [de], etc.)
+    # and extended Unicode graphemes needed for non-English TTS (#170).
+    mtl_tokenizer_path = model_dir / "mtl_tokenizer.json"
+    tokenizer_path = mtl_tokenizer_path if mtl_tokenizer_path.exists() else model_dir / "tokenizer.json"
 
     if not args.s3gen_only:
         write_t3_gguf(
