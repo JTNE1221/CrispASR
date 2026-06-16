@@ -23,7 +23,10 @@
 #include "ggml-cpu.h"
 
 #include "core/conv.h"
+#include "core/g2p_de.h"
 #include "core/g2p_en.h"
+#include "core/g2p_es.h"
+#include "core/g2p_fr.h"
 #include "core/gguf_loader.h"
 #include "phonemizer.h" // strip_espeak_lang_markers (#169)
 // crispasr_cache is part of crispasr-lib, not piper-tts; guard behind CRISPASR_BUILD.
@@ -372,15 +375,30 @@ static void g2p_ensure_cmudict() {
 #endif
 }
 
+// Per-language G2P contexts (lazy-loaded, same pattern as kokoro.cpp).
+static g2p_de::context g_g2p_de_ctx;
+static g2p_fr::context g_g2p_fr_ctx;
+static g2p_es::context g_g2p_es_ctx;
+
 static bool phonemize_builtin(const std::string& voice, const std::string& text, std::string& out) {
-    // Only English for now
-    if (!voice.empty() && voice.find("en") == std::string::npos)
-        return false;
+    // Language-specific built-in G2P based on espeak voice string
+    if (voice.find("de") != std::string::npos) {
+        out = g2p_de::text_to_ipa(g_g2p_de_ctx, text);
+        return !out.empty();
+    }
+    if (voice.find("fr") != std::string::npos) {
+        out = g2p_fr::text_to_ipa(g_g2p_fr_ctx, text);
+        return !out.empty();
+    }
+    if (voice.find("es") != std::string::npos) {
+        out = g2p_es::text_to_ipa(g_g2p_es_ctx, text);
+        return !out.empty();
+    }
+    // English: LTS + CMUdict (always available)
     {
         std::lock_guard<std::mutex> g(g_g2p_mu);
         if (!g_g2p_tried) {
             g_g2p_tried = true;
-            // Load dicts in priority order: espeak IPA dict > CMUdict
             g2p_ensure_espeak_dict();
             g2p_ensure_cmudict();
         }

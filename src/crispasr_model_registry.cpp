@@ -641,6 +641,9 @@ constexpr Entry k_registry[] = {
     {"piper", "piper-en_US-lessac-medium-f16.gguf",
      "https://huggingface.co/cstr/piper-en_US-lessac-medium-GGUF/resolve/main/piper-en_US-lessac-medium-f16.gguf",
      "~16 MB", nullptr, nullptr},
+    {"piper", "piper-de_DE-thorsten-medium-f16.gguf",
+     "https://huggingface.co/cstr/piper-de_DE-thorsten-medium-GGUF/resolve/main/piper-de_DE-thorsten-medium-f16.gguf",
+     "~30 MB", nullptr, nullptr},
 
     // Bark — suno/bark 3-stage hierarchical TTS (MIT). bark-small ~300M params,
     // 24 kHz, 10 German speakers (v2/de_speaker_0..9). Single GGUF packs all
