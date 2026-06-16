@@ -92,6 +92,8 @@ jobs:
       - uses: actions/checkout@v6
       - run: pip install huggingface_hub
       - run: python tests/regression/run_one.py --dry-run
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   # Tier 2: per-backend regression. Each entry of the matrix downloads
   # its pinned-revision GGUF + pinned-revision reference dump from HF,
@@ -217,7 +219,9 @@ jobs:
           BUILD_DIR: build-regression
           WORK_DIR: ${{ runner.temp }}/regression-${{ matrix.backend }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_ENABLE_HF_TRANSFER: "0"
+          HF_HUB_DOWNLOAD_TIMEOUT: "120"
         run: |
           mkdir -p "$WORK_DIR"
           tests/regression/run_one.py "${{ matrix.backend }}"
