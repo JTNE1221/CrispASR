@@ -38,6 +38,10 @@ TEST_SENTENCES = [
 # ═══════════════════════════════════════════════════════════════════
 
 step("Install chatterbox-tts Python package")
+# Kaggle's torchvision conflicts with chatterbox's torch pin; remove it
+# before installing (chatterbox doesn't need torchvision).
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchvision"],
+               capture_output=True)
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "chatterbox-tts", "soundfile"])
 
