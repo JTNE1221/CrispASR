@@ -5979,3 +5979,8 @@ Branch: `feat/beam-maes-cache`
 **§167c Firered KV cache**: Already implemented (sa_k/sa_v per beam).
 **§167d Sensevoice CTC beam**: Already implemented (core_ctc).
 **§167e–h**: Compile-verified; no local models for A/B testing.
+
+**2026-06-16: GGUFs uploaded to `cstr/parakeet-unified-en-0.6b-GGUF`**
+(F16 1181 MB + Q4_K). Runtime fix for 8x subsampling is the remaining
+step to make `--backend parakeet -m parakeet-unified-en-0.6b-q4_k.gguf`
+work end-to-end.
