@@ -1311,8 +1311,18 @@ so existing builds don't regress.
 3. **Japanese kanji.** espeak-ng falls back to English pronunciation
    for kanji (e.g. 日本語 → "Chinese letter"), inserting `(en)…(ja)`
    voice-switch markers that aren't IPA. For full Japanese support,
-   pre-process input with a Japanese frontend (`pyopenjtalk` /
-   `mecab` + `kakasi`) to convert kanji → kana before espeak.
+   pre-process input with a Japanese frontend to convert kanji → kana
+   before espeak. **MIT-clean approach (2026-06-16 survey):**
+   - MeCab (BSD-3-Clause) + unidic-lite (MIT) for morphological
+     analysis → kanji reading extraction
+   - NO kakasi/pykakasi (GPL-3.0 — viral license, incompatible)
+   - Feed kana output to existing espeak-ng `ja` voice for IPA
+   - Implementation: either libmecab C API via dlopen (like espeak)
+     or a pre-built kanji→kana lookup dictionary shipped as a flat
+     file (avoids runtime MeCab dependency). The dict approach is
+     simpler but less accurate on rare/compound words.
+   - fugashi (MIT) is a Python MeCab wrapper; cutlet (MIT) does
+     kanji→romaji. Either can generate the offline dict.
 4. ~~**Diff harness reference backend.**~~ **DONE — phonemizer-step
    diff (May 2026).** The model-side reference dumper at
    `tools/reference_backends/kokoro.py` already covered the 16 model
