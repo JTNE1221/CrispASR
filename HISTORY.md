@@ -88,8 +88,10 @@ kanji to kana before espeak-ng IPA phonemization. No kakasi/pykakasi (GPL).
 Falls back gracefully when libmecab is not installed.
 
 **#92 Regression CI (2026-06-16):** manifest 0 PLACEHOLDERs (32 ASR + 21
-TTS). Nightly matrix expanded to 29 backends. Smoke test name-collision
-fix. granite-4.1-nar confirmed working (SIGABRT was stale build artifact).
+TTS). Nightly matrix expanded to 29 backends. Smoke test name-collision fix.
+granite-4.1-nar confirmed working (SIGABRT was stale build artifact).
+First nightly run: 14/29 pass, 6 fail (4 decode-drift → added WER tolerance,
+1 bad SHA → fixed, 1 HF 429 → transient). Main CI green (CI + Docker + WASM + Lint).
 
 **#97 parakeet-unified survey (2026-06-16):** `EncDecRNNTBPEModel` (same
 class as parakeet). Blocked on NeMo >=2.8 for `att_chunk_context_size`.

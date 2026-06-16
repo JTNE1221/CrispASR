@@ -58,6 +58,20 @@ per-frame values were wrong.
 gate and which is the value. `ggml_siglu` = `σ(a) × b` (swapped from the
 PyTorch convention). `ggml_siglu_swapped` = `a × σ(b)` (matches PyTorch).
 
+## Regression transcripts need WER tolerance, not byte-exact match (#92)
+
+The first nightly CI regression run failed on 4 backends with minor
+punctuation/decode differences across platforms (GH runner vs Kaggle T4
+vs VPS CPU). Example: `"for you, ask"` vs `"for you; ask"` — same words,
+different punctuation. These are decoder tie-flips, not real regressions.
+
+**Rule:** Pin `expected_transcript` from a single authoritative platform,
+but add `transcript_tolerance: {cer_max: 0.02, wer_max: 0.05}` for any
+backend whose decoder is stochastic or punctuation-sensitive. The
+`run_one.py` driver computes Levenshtein CER/WER after case+punct
+normalization and asserts against the thresholds. Only use byte-exact
+match for backends with fully deterministic output (CTC, greedy argmax).
+
 ## Kaggle regression kernels: write output incrementally, crash-guard everything
 
 Kaggle kernels fail silently — the only output you get is `/kaggle/working` files.
