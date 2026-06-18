@@ -7808,6 +7808,11 @@ a different name and update `crispasr_model_registry.cpp` to point
 at it. The C++ side is already correct. The patched GGUF was
 verified locally as `chatterbox-t3-q8_0-bpe.gguf`.
 
+Follow-up for multilingual v3: the language signal should be injected
+as a model-input token, not concatenated into the user text. Otherwise
+the language tag can leak into speech output as a spoken prefix even
+when the tokenizer contains the tag.
+
 ### Operational note — the regen variants already have merges
 
 The `chatterbox-t3-q8_0-regen.gguf` and `chatterbox-t3-q4_k-regen.gguf`

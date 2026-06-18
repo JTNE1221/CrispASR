@@ -813,6 +813,17 @@ struct chatterbox_context {
     }
 };
 
+static void prepend_language_token(chatterbox_context* ctx, std::vector<int32_t>& text_tokens) {
+    if (!ctx || ctx->language.empty() || text_tokens.empty()) {
+        return;
+    }
+    const auto it = ctx->tokenizer.token_to_id.find(ctx->language);
+    if (it == ctx->tokenizer.token_to_id.end()) {
+        return;
+    }
+    text_tokens.insert(text_tokens.begin(), it->second);
+}
+
 namespace {
 
 // ── Metadata loading ────────────────────────────────────────────
@@ -2526,11 +2537,6 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     // 1. Normalize and tokenize text
     std::string norm_text = punc_norm(text);
 
-    // Multilingual: prepend [lang] token if set (#170)
-    if (!ctx->language.empty()) {
-        norm_text = ctx->language + norm_text;
-    }
-
     std::vector<int32_t> text_tokens;
     if (ctx->tokenizer.has_bpe) {
         text_tokens = ctx->tokenizer.bpe_byte_level ? tokenize_text_bpe(ctx->tokenizer, norm_text)
@@ -2538,6 +2544,7 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     } else {
         text_tokens = tokenize_text(ctx->tokenizer, norm_text);
     }
+    prepend_language_token(ctx, text_tokens);
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: text \"%s\" → %zu %s tokens\n", norm_text.c_str(), text_tokens.size(),
@@ -3864,6 +3871,7 @@ extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx,
     } else {
         text_tokens = tokenize_text(ctx->tokenizer, norm_text);
     }
+    prepend_language_token(ctx, text_tokens);
     text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
     text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
 
@@ -3915,6 +3923,7 @@ extern "C" int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, co
     } else {
         text_tokens = tokenize_text(ctx->tokenizer, norm_text);
     }
+    prepend_language_token(ctx, text_tokens);
     text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
     text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
 

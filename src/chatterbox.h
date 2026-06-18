@@ -136,7 +136,7 @@ void chatterbox_set_seed(struct chatterbox_context* ctx, uint32_t seed);
 // Set language for multilingual models (chatterbox multilingual, lahgtna-chatterbox).
 // lang is an ISO 639-1 code: "ar", "de", "fr", "es", "it", etc.
 // Pass NULL or "" to clear (English default, no prefix).
-// The tokenizer prepends [lang] to the text before encoding.
+// The runtime inserts the [lang] token into the model input if the vocab contains it.
 void chatterbox_set_language(struct chatterbox_context* ctx, const char* lang);
 
 void chatterbox_tokens_free(int32_t* tokens);
