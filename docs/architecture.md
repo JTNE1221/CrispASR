@@ -356,8 +356,18 @@ remains the recommended path for production-quality cloning.
 S3Gen GGUF is auto-discovered next to T3 or passed via `--codec-model`.
 See [`docs/tts.md`](tts.md#voice-cloning) for the workflow.
 
+For multilingual base Chatterbox, `-l <code>` sets
+`chatterbox_set_language()` in the CLI adapter. The runtime validates the
+`[code]` token against the embedded tokenizer and prepends it to the text
+token sequence before the `[STOP]`-wrapped T3 prompt is built. The
+2026-06-18 rebuilt `cstr/chatterbox-GGUF` artifacts use the paired
+`grapheme_mtl_merged_expanded_v1.json` tokenizer (`2454` T3 text vocab
+entries, `2454` tokenizer tokens, `265` merges); older mismatched GGUFs
+are rejected at load time. A Q4_K smoke check confirmed `-l fr` inserts
+`[fr]` (id 634) and changes the generated speech tokens and waveform.
+
 Variants:
-- [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — base, English
+- [`cstr/chatterbox-GGUF`](https://huggingface.co/cstr/chatterbox-GGUF) — base multilingual v3
 - [`cstr/chatterbox-turbo-GGUF`](https://huggingface.co/cstr/chatterbox-turbo-GGUF) — 350M distilled, meanflow
 - [`cstr/kartoffelbox-turbo-GGUF`](https://huggingface.co/cstr/kartoffelbox-turbo-GGUF) — German fine-tune of turbo
 - [`cstr/lahgtna-chatterbox-v1-GGUF`](https://huggingface.co/cstr/lahgtna-chatterbox-v1-GGUF) — Arabic fine-tune of base
@@ -891,4 +901,3 @@ supporting ASR, TTS, and speech-to-speech.
 
 Models: single GGUF (F16 ~1.6 GB) converted from `lit_model.pth` + `small.pt`.
 For TTS/S2S, also needs SNAC codec GGUF (`--codec-model snac-24khz.gguf`).
-

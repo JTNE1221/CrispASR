@@ -7853,6 +7853,31 @@ Fixes:
 - runtime load fails on the same mismatch so broken GGUFs cannot produce
   plausible but invalid multilingual audio.
 
+Follow-up verification after regenerating and uploading
+`cstr/chatterbox-GGUF` on 2026-06-18:
+
+- all rebuilt T3 variants (`f16`, `q8_0`, `q4_k`) have
+  `chatterbox.t3.text_vocab_size=2454`, `tokenizer.ggml.tokens=2454`,
+  and `tokenizer.ggml.merges=265`;
+- `-l fr` is not a no-op in the C++ CLI. With fixed Q4_K, seed 123,
+  and text `"justice justice"`, no-language tokenization is
+  `[START], J, ust, ic, e, [SPACE], just, ic, e, ., [STOP]`, while
+  `-l fr` is `[START], [fr], just, ic, e, [SPACE], just, ic, e, .,
+  [STOP]` (`[fr]` is token id 634);
+- the no-language repeat is bit-identical, but no-language vs `-l fr`
+  produces different AR speech tokens, different duration
+  (`1.52 s` vs `1.92 s` for `"justice justice"`), and near-zero
+  waveform cosine (`-0.004`). For `"bonjour tout le monde"`, `-l fr`
+  similarly inserts `[fr]`, changes speech tokens, and improves the
+  Parakeet roundtrip from `"Bonjour tout monde."` to
+  `"Bonjour tout le monde."`.
+
+That proves the CLI/runtime language wiring is active after the artifact
+fix. It does **not** prove French quality is solved; listening tests still
+reported heavy accent / imperfect pronunciation on some Q4_K French
+samples, so remaining work is model-semantics / upstream-text-prep parity,
+not "is `-l` wired at all?".
+
 ### Operational note — the regen variants already have merges
 
 The `chatterbox-t3-q8_0-regen.gguf` and `chatterbox-t3-q4_k-regen.gguf`

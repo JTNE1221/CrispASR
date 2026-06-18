@@ -385,6 +385,31 @@ and the GPT-2-T3 path (turbo/kartoffelbox-turbo):
     --tts "مرحباً" -ow out-ar.wav
 ```
 
+### Multilingual language selection
+
+The base `chatterbox` backend uses the upstream multilingual v3 T3 weights
+from `cstr/chatterbox-GGUF`. Pass `-l <code>` / `--language <code>` to
+select the language token for multilingual synthesis:
+
+```bash
+./build/bin/crispasr --backend chatterbox -m auto -l fr \
+    --tts "bonjour tout le monde" \
+    --tts-output out-fr.wav
+```
+
+The flag is wired into the T3 prompt, not concatenated into the spoken text.
+With the rebuilt 2026-06-18 GGUFs, `-l fr` inserts the `[fr]` token after
+`[START]` (token id 634 in the multilingual tokenizer) and changes the
+generated speech-token stream. A local Q4_K smoke check with seed 123 showed
+that no-language `bonjour tout le monde` roundtripped through Parakeet as
+`Bonjour tout monde.`, while `-l fr` roundtripped as
+`Bonjour tout le monde.`.
+
+Quality is still model-dependent. The rebuilt artifacts fix the previous
+tokenizer/model mismatch and make `-l` active, but some French Q4_K samples
+remain heavily accented. Treat language-token checks as a wiring smoke test,
+not a guarantee of native pronunciation.
+
 ### Voice cloning
 
 Two paths are supported. **The recommended path is the python baker
@@ -533,7 +558,7 @@ warms the cache for the rest.
 
 | Variant | T3 default | S3Gen companion | Total |
 |---|---|---|---:|
-| `chatterbox`         | T3 Q8_0 (541 MB)  | base S3Gen Q8_0  (342 MB) | ~880 MB |
+| `chatterbox`         | T3 Q8_0 (610 MB)  | base S3Gen Q8_0  (348 MB) | ~960 MB |
 | `chatterbox-turbo`   | T3 F16  (963 MB)  | turbo S3Gen F16  (627 MB) | ~1.6 GB |
 | `kartoffelbox-turbo` | T3 Q8_0 (623 MB)  | turbo S3Gen F16  (shared)  | ~1.25 GB |
 | `lahgtna-chatterbox` | T3 F16  (1059 MB) | base S3Gen Q8_0  (shared)  | ~1.4 GB |
