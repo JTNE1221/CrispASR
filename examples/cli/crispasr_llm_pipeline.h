@@ -502,56 +502,75 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline_streamed(typen
     return out;
 }
 
-void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_cs, const whisper_params& params,
-                          crispasr_stream_callback on_text) override {
-    (void)t_offset_cs; // Simplified streaming doesn't use t_offset_cs for token events
-    // ---- Prepare prompts ----------------------------------------------------
-    std::string text_prompt = params.prompt;
-    if (text_prompt.empty())
-        text_prompt = "<|en|>";
-
-    int prompt_len = 0;
-    int32_t* prompt_ids = Ops::tokenize(ctx, text_prompt.c_str(), &prompt_len);
-    if (!prompt_ids)
+template <typename Ops>
+void crispasr_run_voxtral_style_pipeline_streamed_cb(typename Ops::CtxT* ctx, const float* samples, int n_samples,
+                                                     const whisper_params& params,
+                                                     CrispasrBackend::crispasr_stream_callback on_text) {
+    if (!ctx)
         return;
-    std::vector<int32_t> ids(prompt_ids, prompt_ids + prompt_len);
-    free(prompt_ids);
 
-    ids.push_back(Ops::audio_pad_id);
+    const char* BE = Ops::name();
+    constexpr int kSampleRate = 16000;
 
-    int prompt_tail = 0;
-    int32_t* tail_ids = Ops::tokenize(ctx, "<|transcribe|>", &prompt_tail);
-    if (tail_ids) {
-        ids.insert(ids.end(), tail_ids, tail_ids + prompt_tail);
-        free(tail_ids);
+    // ---- Mel spectrogram ----
+    int n_mels = 0, T_mel = 0;
+    float* mel = Ops::compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    if (!mel) {
+        fprintf(stderr, "crispasr[%s]: mel failed\n", BE);
+        return;
     }
 
-    // ---- Audio pre-processing (Mel/encoder) ---------------------------------
-    int N_enc_total = 0;
-    float* audio_embeds = Ops::encode_audio(ctx, samples, n_samples, &N_enc_total);
-    if (!audio_embeds)
+    // ---- Audio encoder (+ projector) ----
+    int N_enc = 0, pdim = 0;
+    float* audio_embeds = Ops::run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
+    free(mel);
+    if (!audio_embeds) {
+        fprintf(stderr, "crispasr[%s]: encoder failed\n", BE);
         return;
+    }
 
-    std::vector<float> audio_embeds_all;
-    const int per_chunk_dim = Ops::audio_embed_dim;
-    audio_embeds_all.assign(audio_embeds, audio_embeds + (size_t)N_enc_total * per_chunk_dim);
-    free(audio_embeds);
+    // ---- Build prompt via the backend's tokenizer ----
+    const std::string prefix = Ops::build_prefix(params);
+    const std::string suffix = Ops::build_suffix(params);
 
-    // ---- Embed + splice -----------------------------------------------------
+    int n_prefix = 0, n_suffix = 0;
+    int32_t* pid = Ops::tokenize(ctx, prefix.c_str(), &n_prefix);
+    int32_t* sid = Ops::tokenize(ctx, suffix.c_str(), &n_suffix);
+    if (!pid || !sid) {
+        fprintf(stderr, "crispasr[%s]: tokenize failed\n", BE);
+        free(pid);
+        free(sid);
+        free(audio_embeds);
+        return;
+    }
+
+    std::vector<int32_t> ids;
+    ids.reserve((size_t)n_prefix + N_enc + n_suffix);
+    ids.insert(ids.end(), pid, pid + n_prefix);
+    for (int i = 0; i < N_enc; i++)
+        ids.push_back(Ops::audio_pad_id);
+    ids.insert(ids.end(), sid, sid + n_suffix);
+    free(pid);
+    free(sid);
+
     const int T_prompt = (int)ids.size();
+
+    // ---- Embed and splice audio frames into audio_pad positions ----
     float* text_embeds = Ops::embed_tokens(ctx, ids.data(), T_prompt);
-    if (!text_embeds)
+    if (!text_embeds) {
+        fprintf(stderr, "crispasr[%s]: embed failed\n", BE);
+        free(audio_embeds);
         return;
+    }
 
     int spliced = 0;
-    for (int i = 0; i < T_prompt && spliced < N_enc_total; i++) {
+    for (int i = 0; i < T_prompt && spliced < N_enc; i++) {
         if (ids[i] == Ops::audio_pad_id) {
-            std::memcpy(text_embeds + (size_t)i * per_chunk_dim,
-                        audio_embeds_all.data() + (size_t)spliced * per_chunk_dim,
-                        (size_t)per_chunk_dim * sizeof(float));
+            std::memcpy(text_embeds + (size_t)i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
             spliced++;
         }
     }
+    free(audio_embeds);
 
     const int audio_seconds = (n_samples + kSampleRate - 1) / kSampleRate;
     const int max_new_scaled = std::max(512, audio_seconds * 8);
@@ -560,6 +579,7 @@ void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_
 
     if (!Ops::kv_init(ctx, kv_budget)) {
         free(text_embeds);
+        fprintf(stderr, "crispasr[%s]: kv_init failed\n", BE);
         return;
     }
     Ops::kv_reset(ctx);
@@ -567,6 +587,7 @@ void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_
     int n_tokens_out = 0, vocab = 0;
     float* logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0, &n_tokens_out, &vocab);
     if (!logits) {
+        fprintf(stderr, "crispasr[%s]: prefill failed\n", BE);
         free(text_embeds);
         return;
     }

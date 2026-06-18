@@ -150,6 +150,12 @@ public:
         return crispasr_run_voxtral_style_pipeline_streamed<VoxtralOps>(ctx_, samples, n_samples, t_offset_cs, params);
     }
 
+    void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_cs, const whisper_params& params,
+                              crispasr_stream_callback on_text) override {
+        (void)t_offset_cs; // Simplified streaming doesn't use t_offset_cs for token events
+        crispasr_run_voxtral_style_pipeline_streamed_cb<VoxtralOps>(ctx_, samples, n_samples, params, on_text);
+    }
+
     void shutdown() override {
         if (ctx_) {
             VoxtralOps::free_ctx(ctx_);
