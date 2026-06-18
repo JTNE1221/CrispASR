@@ -76,6 +76,7 @@ add_executable(${TARGET}
     # Real-time WebSocket ASR streaming, shared with the standalone server
     # (examples/server). Wired into `crispasr --server` via --ws-port.
     ${CMAKE_CURRENT_SOURCE_DIR}/../server/ws_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../server/realtime_server.cpp
 )
 
 # ---------------------------------------------------------------------------

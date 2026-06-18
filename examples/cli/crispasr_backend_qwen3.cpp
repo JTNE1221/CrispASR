@@ -570,6 +570,159 @@ public:
         return out;
     }
 
+    void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_cs,
+                              const whisper_params& params,
+                              crispasr_stream_callback on_text) override {
+        (void)t_offset_cs; // For Qwen3 streaming we just stream text output
+        if (!ctx_) return;
+
+        // ---- Mel ----
+        int n_mels = 0, T_mel = 0;
+        float* mel = qwen3_asr_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
+        if (!mel) return;
+
+        // ---- Encoder ----
+        int N_enc = 0, pdim = 0;
+        float* audio_embeds = qwen3_asr_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &pdim);
+        free(mel);
+        if (!audio_embeds) return;
+
+        // ---- Prompt ----
+        std::string sys_instruction;
+        if (!params.ask.empty()) {
+            sys_instruction = params.ask;
+        } else if (params.translate) {
+            std::string tgt = params.target_lang.empty() ? "English" : params.target_lang; // Simplification
+            sys_instruction = "Translate the speech to " + tgt + ".";
+        }
+        if (!params.hotwords.empty()) {
+            if (!sys_instruction.empty() && sys_instruction.back() != ' ') sys_instruction += ' ';
+            sys_instruction += "The following words may appear in the audio: " + params.hotwords + ".";
+        }
+
+        std::string text = "<|im_start|>system\n" + sys_instruction +
+                           "<|im_end|>\n"
+                           "<|im_start|>user\n"
+                           "<|audio_start|>";
+        for (int i = 0; i < N_enc; i++) text += "<|audio_pad|>";
+        text += "<|audio_end|><|im_end|>\n<|im_start|>assistant\n";
+
+        int n_prompt = 0;
+        int32_t* raw_ids = qwen3_asr_tokenize(ctx_, text.c_str(), &n_prompt);
+        if (!raw_ids) {
+            free(audio_embeds);
+            return;
+        }
+        std::vector<int32_t> ids(raw_ids, raw_ids + n_prompt);
+        free(raw_ids);
+
+        // Look up the audio_pad token id by tokenizing just the special token.
+        int n_pad_id = 0;
+        int32_t* pad_id_arr = qwen3_asr_tokenize(ctx_, "<|audio_pad|>", &n_pad_id);
+        int audio_pad_id = -1;
+        if (pad_id_arr && n_pad_id >= 1)
+            audio_pad_id = pad_id_arr[0];
+        free(pad_id_arr);
+        if (audio_pad_id < 0) {
+            free(audio_embeds);
+            return;
+        }
+
+        // ---- Embed + splice ----
+        float* text_embeds = qwen3_asr_embed_tokens(ctx_, ids.data(), (int)ids.size());
+        if (!text_embeds) {
+            free(audio_embeds);
+            return;
+        }
+        int spliced = 0;
+        for (size_t i = 0; i < ids.size() && spliced < N_enc; i++) {
+            if (ids[i] == audio_pad_id) {
+                std::memcpy(text_embeds + i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
+                spliced++;
+            }
+        }
+        free(audio_embeds);
+        
+        const int prompt_len = (int)ids.size();
+
+        // ---- KV init ----
+        if (!qwen3_asr_kv_init(ctx_, 4096)) {
+            free(text_embeds);
+            return;
+        }
+
+        int n_t = 0, vocab = 0;
+        float* logits = qwen3_asr_run_llm_kv(ctx_, text_embeds, prompt_len, 0, &n_t, &vocab);
+        if (!logits) {
+            free(text_embeds);
+            return;
+        }
+
+        int eos_id = -1;
+        int n_eos = 0;
+        int32_t* eos_arr = qwen3_asr_tokenize(ctx_, "<|im_end|>", &n_eos);
+        if (eos_arr && n_eos >= 1) eos_id = eos_arr[0];
+        free(eos_arr);
+        if (eos_id < 0) eos_id = 151645; // Fallback
+
+        core_greedy_decode::Config dec_cfg;
+        dec_cfg.max_new_tokens = params.max_new_tokens;
+        dec_cfg.eos_id = eos_id;
+        dec_cfg.vocab_size = vocab;
+        dec_cfg.temperature = params.temperature;
+        dec_cfg.frequency_penalty = params.frequency_penalty;
+        dec_cfg.seed = params.seed;
+
+        int first_token = 0;
+        float first_prob = 1.0f;
+        const int last_off = (n_t - 1) * vocab;
+        if (params.temperature > 0.0f) {
+            std::mt19937_64 seed_rng((params.seed != 0 ? params.seed : (uint64_t)std::random_device{}()) ^ (uint64_t)0x9E3779B97F4A7C15ull);
+            first_token = core_greedy_decode::sample_temp(logits + last_off, vocab, params.temperature, seed_rng);
+        } else {
+            first_token = core_greedy_decode::argmax(logits + last_off, vocab);
+        }
+        first_prob = core_greedy_decode::softmax_of(logits + last_off, vocab, first_token, logits[last_off + first_token]);
+        free(logits);
+
+        std::string accumulated_text;
+        bool capture_language = false;
+        
+        auto token_cb = [&](int32_t id, float prob) {
+            (void)prob;
+            if (id == eos_id) return;
+            const char* raw_piece = qwen3_asr_token_text(ctx_, id);
+            if (!raw_piece || !*raw_piece) return;
+            std::string raw = raw_piece;
+            if (raw.size() >= 2 && raw[0] == '<' && raw[1] == '|') return;
+            if (raw.size() >= 2 && raw[0] == '<' && raw.back() == '>') return;
+            if (raw.size() >= 5 && raw[0] == '[' && raw[1] == 'P' && raw[2] == 'A' && raw[3] == 'D') return;
+            std::string txt = decode_token(raw);
+            if (txt == "language") {
+                capture_language = true;
+                return;
+            }
+            if (capture_language) {
+                capture_language = false;
+                return;
+            }
+            accumulated_text += txt;
+            if (!accumulated_text.empty()) {
+                on_text(accumulated_text, false);
+            }
+        };
+
+        core_greedy_decode::run_with_probs_cb(ctx_, first_token, first_prob, prompt_len, qwen3_asr_embed_tokens,
+                                              qwen3_asr_run_llm_kv, token_cb, dec_cfg);
+
+        // Emit final
+        if (!accumulated_text.empty()) {
+            on_text(accumulated_text, true);
+        } else {
+            on_text("", true);
+        }
+    }
+
     void shutdown() override {
         if (ctx_) {
             qwen3_asr_free(ctx_);

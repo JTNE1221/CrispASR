@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -98,6 +99,7 @@ enum crispasr_capability : uint32_t {
     CAP_INTERNAL_CHUNKING = 1u << 20,   // backend handles its own long-audio chunking internally
                                         // (PLAN #104: parakeet uses chunked-encode + single-decode).
                                         // Skip the crispasr_run.cpp auto-chunk fallback for these.
+    CAP_STREAMING = 1u << 22,           // backend supports true token-level streaming output
 };
 
 // ---------------------------------------------------------------------------
@@ -186,6 +188,35 @@ public:
     // encoder degenerates on arbitrary-length chunks (e.g. parakeet-ja)
     // override this to get silence-bounded segments that match training.
     virtual bool prefers_vad() const { return false; }
+
+    // Streaming transcription callback type.
+    // Called with partial text (empty string counts as keep-alive)
+    // and is_final flag. When is_final is true, partial_text is the
+    // complete final result.
+    using crispasr_stream_callback =
+        std::function<void(const std::string& partial_text, bool is_final)>;
+
+    // Transcribe with streaming output. Default implementation falls back
+    // to non-streaming transcribe().
+    virtual void transcribe_streaming(const float* samples, int n_samples,
+                                      int64_t t_offset_cs,
+                                      const whisper_params& params,
+                                      crispasr_stream_callback on_text) {
+        (void)samples; (void)n_samples; (void)t_offset_cs;
+        (void)params; (void)on_text;
+        // Fallback: run non-streaming, then push result at once.
+        auto segments = transcribe(samples, n_samples, t_offset_cs, params);
+        std::string full;
+        for (const auto& seg : segments) {
+            if (!seg.text.empty()) {
+                full += seg.text;
+            }
+        }
+        if (!full.empty()) {
+            on_text(full, false);  // partial
+        }
+        on_text(full, true);       // final
+    }
 
     // Warmup: run a short dummy transcribe to amortize first-call
     // overhead (graph allocation, GPU kernel compilation, gallocr shape

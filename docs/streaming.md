@@ -5,8 +5,9 @@ capture, and continuous live mode — and per-token confidence output.
 All work with every supported backend.
 
 > Over HTTP, the server exposes the same streaming decoder as a WebSocket
-> endpoint — start it with `--ws-port` and send binary float32 PCM frames. See
-> [`server.md`](server.md#real-time-streaming-websocket).
+> endpoint — start it with `--ws-port` and send binary float32 PCM frames,
+> or connect to `ws-port + 1` for the JSON-based **vLLM Realtime API** endpoint.
+> See [`server.md`](server.md#vllm-realtime-api-websocket).
 
 ## Pipe mode (`--stream`)
 

@@ -416,6 +416,18 @@ JSON updates as audio accumulates:
 
 Whisper-only today. (Each connection opens its own streaming session.)
 
+### vLLM Realtime API (WebSocket)
+
+When `--ws-port` is enabled, the server also exposes a **vLLM Realtime API** compatible WebSocket endpoint on `ws_port + 1`. This endpoint accepts standard JSON-encoded `input_audio_buffer.append` events (base64 PCM16) and streams back `conversation.item.input_audio_transcription.delta` events incrementally.
+
+```bash
+crispasr --server -m qwen3-asr.gguf --backend qwen3-asr --ws-port 8081
+# → WS ws://127.0.0.1:8081 (Raw PCM)
+# → WS ws://127.0.0.1:8082/v1/realtime (vLLM Realtime API)
+```
+
+This endpoint supports backends with true token-level streaming (e.g. Qwen3) and buffers the audio in chunks until `input_audio_buffer.commit` is received.
+
 ## Docker Compose
 
 The repo includes a root-level

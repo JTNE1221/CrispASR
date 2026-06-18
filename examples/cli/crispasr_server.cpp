@@ -41,6 +41,7 @@
 #include "common-crispasr.h"     // read_audio_data
 #include "crispasr_chat.h"       // /v1/chat/completions
 #include "../server/ws_stream.h" // real-time WebSocket ASR streaming (--ws-port)
+#include "../server/realtime_server.h" // vLLM Realtime API
 #include "crispasr_c2pa.h"
 #include "crispasr_tts_chunking.h"
 #include "crispasr_tts_disclaimer.h"
@@ -1123,6 +1124,65 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.n_alternatives = form_int(req, "alt_n", rp.n_alternatives);
         if (!prompt.empty())
             rp.prompt = prompt;
+
+        bool stream = form_bool(req, "stream", false);
+
+        if (stream && (backend->capabilities() & CAP_STREAMING)) {
+            std::string tmp_path = write_temp_audio(audio_file.content.data(), audio_file.content.size(), audio_file.filename);
+            if (tmp_path.empty()) {
+                json_error(res, 500, "failed to create temporary file for audio");
+                return;
+            }
+
+            std::vector<float> pcmf32;
+            std::vector<std::vector<float>> pcmf32s;
+            if (!read_audio_data(tmp_path, pcmf32, pcmf32s, rp.diarize)) {
+                std::remove(tmp_path.c_str());
+                json_error(res, 400, "failed to decode audio (unsupported format or corrupt file)");
+                return;
+            }
+            std::remove(tmp_path.c_str());
+
+            if (pcmf32.empty()) {
+                json_error(res, 400, "audio file contains no samples");
+                return;
+            }
+
+            // Capture large vectors by value for the async provider
+            res.set_chunked_content_provider("text/event-stream",
+                [pcmf32, rp, &backend, &model_mutex](size_t /*offset*/, httplib::DataSink& sink) {
+                    std::lock_guard<std::mutex> lock(model_mutex);
+                    std::string last_sent_text;
+                    
+                    backend->transcribe_streaming(pcmf32.data(), pcmf32.size(), 0, rp,
+                        [&](const std::string& partial, bool is_final) {
+                            if (!partial.empty() || is_final) {
+                                std::string diff;
+                                if (partial.size() > last_sent_text.size() &&
+                                    partial.compare(0, last_sent_text.size(), last_sent_text) == 0) {
+                                    diff = partial.substr(last_sent_text.size());
+                                } else {
+                                    diff = partial;
+                                }
+                                
+                                if (!diff.empty()) {
+                                    std::ostringstream js;
+                                    js << "data: {\"text\": \"" << crispasr_json_escape(diff) << "\"}\n\n";
+                                    std::string chunk = js.str();
+                                    sink.write(chunk.data(), chunk.size());
+                                    last_sent_text = partial;
+                                }
+                            }
+                            if (is_final) {
+                                std::string done = "data: [DONE]\n\n";
+                                sink.write(done.data(), done.size());
+                            }
+                        });
+                    sink.done();
+                    return false; // return false to signal end of stream
+                });
+            return;
+        }
 
         const bool need_timestamps =
             response_format == "verbose_json" || response_format == "srt" || response_format == "vtt";
@@ -2346,6 +2406,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     // session API (crispasr_session_stream_*); clients send binary 16 kHz mono
     // float32 PCM and receive JSON partial/final text events. Whisper-only today.
     bool ws_started = false;
+    bool rt_started = false;
     if (params.server_ws_port >= 0) {
         const int ws_port = params.server_ws_port == 0 ? port + 1 : params.server_ws_port;
         if (ws_stream_start(params.model.c_str(), ws_port, params.n_threads) == 0) {
@@ -2355,15 +2416,23 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         } else {
             fprintf(stderr, "crispasr-server: warning: failed to start WebSocket streaming on port %d\n", ws_port);
         }
+        const int rt_port = ws_port + 1; // vLLM Realtime API on ws_port + 1
+        if (realtime_server_start(backend.get(), model_mutex, params, rt_port) == 0) {
+            rt_started = true;
+            fprintf(stderr, "  WS   ws://%s:%d/v1/realtime     — vLLM Realtime API (JSON WebSocket)\n",
+                    host.c_str(), rt_port);
+        } else {
+            fprintf(stderr, "crispasr-server: warning: failed to start vLLM Realtime API on port %d\n", rt_port);
+        }
     }
     fprintf(stderr, "\n");
 
     svr.listen(host, port);
 
-    // Clean up cached VAD + LID contexts on shutdown (#132, #165). Both stay
-    // resident across requests; freed once here.
     if (ws_started)
         ws_stream_stop();
+    if (rt_started)
+        realtime_server_stop();
     crispasr_vad_free_cache();
     crispasr_lid_free_cache();
 

@@ -312,6 +312,7 @@ static constexpr feature_col kFeatures[] = {
     {"tts", CAP_TTS},
     {"s2s", CAP_S2S},
     {"voice-clone", CAP_VOICE_CLONING},
+    {"streaming", CAP_STREAMING},
 };
 
 void crispasr_print_backend_matrix() {
@@ -387,6 +388,7 @@ static constexpr cap_slug kCapSlugs[] = {
     {"tts", CAP_TTS},
     {"s2s", CAP_S2S},
     {"voice-cloning", CAP_VOICE_CLONING},
+    {"streaming", CAP_STREAMING},
 };
 
 void crispasr_print_backend_matrix_json() {
