@@ -6,6 +6,45 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-19 §158 transcribe_streaming for all opaque-C-library backends
+
+All 7 remaining autoregressive ASR backends now implement `transcribe_streaming`
+(`7f2c1f3a`). The pattern: add a `*_transcribe_cb(ctx, pcm, n, fn, ud)` C entry
+point to each library that fires `fn(tok_id, prob, ud)` per generated token, then
+wire a lambda trampoline in the adapter that decodes the token text and accumulates
+for `on_text(acc, false)` per token, `on_text(acc, true)` at the end.
+
+**C library changes:**
+- `moss_audio`: `moss_audio_process` split into `moss_audio_process_impl` (static,
+  optional callback) + thin `extern "C"` wrappers for `moss_audio_process` /
+  `moss_audio_transcribe` / `moss_audio_process_cb`.
+- `gemma4_e2b`: callback threaded through `g4e_run_prompt` and
+  `gemma4_e2b_transcribe_impl`; added `gemma4_e2b_is_control_token` (bos/eos/sot/eot
+  filter) since adapter can't inspect internal ids.
+- `moonshine_streaming`: callback added to `moonshine_streaming_transcribe_impl`
+  alongside existing `capture_probs` path.
+- `kyutai_stt`: callback fired inside the existing `emit_token` lambda, which already
+  filters `existing_text_padding_id` — so the adapter gets only valid tokens.
+- `mimo_asr`: callback added to `mimo_asr_transcribe_impl` for both prefill-first and
+  decode-loop tokens; filters `id_im_end` and `id_eos`.
+- `nemotron`: `nemotron_transcribe_ex` body extracted to static
+  `nemotron_transcribe_impl`; callback threaded into `nemotron_rnnt_decode`. Forward
+  declaration added so `nemotron_transcribe` can call `impl` before its definition.
+
+**GLM-ASR** uses no new C entry point: the adapter already has access to all
+`glm_asr_*` step APIs, so `transcribe_streaming` replicates the greedy loop
+inline using `glm_asr_embed_tokens` / `glm_asr_run_llm_kv`. EOS IDs: 59246,
+59253, 59255. BPE: GPT-2 (Ġ=0xC4 0xA0→space, Ċ=0xC4 0x8A→newline).
+
+**BPE decode** in adapters:
+- SentencePiece (Kyutai, Moonshine, Gemma4-E2B, Nemotron): replace `▁` (0xE2 0x96
+  0x81) with space.
+- GPT-2 byte-level BPE (MOSS-Audio, MiMo-ASR, GLM-ASR): full 256-entry byte_decoder
+  table; for MiMo the table is inlined in the adapter anonymous namespace since
+  `core_bpe::token_bytes_to_utf8` is not exported from the library.
+
+All adapters strip leading whitespace from the first non-empty token.
+
 ## 2026-06-15 #81 nemotron-3.5-asr-streaming — first working transcription
 
 nvidia/nemotron-3.5-asr-streaming-0.6b (39-language streaming ASR) now

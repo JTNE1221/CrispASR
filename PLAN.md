@@ -60,7 +60,8 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **DONE** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | **DONE 2026-05-20.** Full LLM-decoder runtime shipped; GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`; byte-identical diffs; ~9× RT on M1 Metal. CTC two-pass rescore is a separate low-pri follow-up. |
 | **DONE** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80a parked; **80b DONE**; **80c DONE**; **80d DONE** 2026-05-23 (audit: no fixes needed — all backends use energy chunker); 80e low-priority warmup deferred |
 | **DONE** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | **DONE 2026-06-15.** All 4 streaming presets working. Conv cache fix, asymmetric rel-pos, sched migration, C ABI + bindings, 3 live tests, HF READMEs. → HISTORY 2026-06-15. |
-| **HIGH** | [#157 Add streaming capabilities for other runtimes](#157-add-streaming-capabilities-for-other-runtimes) | Medium | Streaming is currently implemented for Qwen3 and Voxtral, but models with customized decoding loops (Granite, Voxtral4b, SpeechT5, etc.) still need manual callback ports. |
+| **DONE** | [#157 Add streaming capabilities for other runtimes](#157-add-streaming-capabilities-for-other-runtimes) | — | Granite + Voxtral4b done 2026-06-19; greedy_decode.h got dual-hook run_with_probs_cb. |
+| **DONE** | [#158 transcribe_streaming for opaque-C-library backends](#158-transcribe_streaming-for-opaque-c-library-backends) | Medium | **DONE 2026-06-19.** All 7 backends done: `_transcribe_cb` C entry points added to moss_audio, gemma4_e2b, moonshine_streaming, kyutai_stt, mimo_asr, nemotron; GLM-ASR uses exported step APIs directly. Token-callback lambda trampolines with GPT-2/SentencePiece BPE decode in all 7 adapters. → `7f2c1f3a`. |
 | **DONE** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | — | All backends now route through core helpers (`core_attn`, `core_sanm`, `core_conformer`) that unconditionally use `ggml_flash_attn_ext`. Only t5_translate excluded (T5 rel-pos bias incompatible). |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
 | **LOW** | [#95 IndexTTS Chinese TN binary alternative](#95-indextts-15-chinese-tn--binary-alternative-to-the-python-wetext-hook) | survey only | Python `INDEXTTS_TEXT_NORMALIZER` hook shipped 2026-05-19. Hand-roll (#95a) is the right next step *when* a user reports a digit/date prompt that breaks; OpenFST vendoring (#95b) only after #95a grows past ~5 cases. |
@@ -6030,3 +6031,79 @@ should output `مرحبًا` in native script with `-l ar`).
 transcript garbage. Tokenizer verified correct (same as parakeet-rnnt).
 Root cause: synthetic config mismatch vs actual training config. Need
 to diff C++ mel output against NeMo Python reference to find divergence.
+
+## 158. transcribe_streaming for opaque-C-library backends
+
+**Context:** `transcribe_streaming` now implemented for Qwen3, Voxtral, Granite,
+Voxtral4b (all expose `_run_llm_kv` so the adapter owns the loop). Seven
+remaining autoregressive ASR backends hide their decode loop inside an opaque
+C library. Each needs:
+1. A `*_transcribe_cb(ctx, pcm, n, fn, userdata)` C entry point added to the
+   library implementation — fires `fn(token_id, text_piece, userdata)` per token.
+2. A `transcribe_streaming` override in the adapter (`.cpp` in `examples/cli/`)
+   that calls the new entry point and maps it to `on_text`.
+3. Fall back to base-class batch path for beam search (best_of-N already
+   handled by single-run greedy in the callback path).
+
+### Backends in scope
+
+| Backend | C library | token-text API | Notes |
+|---------|-----------|----------------|-------|
+| GLM-ASR | `src/glm_asr.cpp` | `glm_asr_token_text()` | BPE decode lambda already in adapter |
+| Kyutai-STT | `src/kyutai_stt.cpp` | `kyutai_stt_token_text()` | |
+| Gemma4-E2B | `src/gemma4_e2b.cpp` | `gemma4_e2b_token_text()` | supports translate flag |
+| MiMo-ASR | `src/mimo_asr.cpp` | `mimo_asr_token_text()` | |
+| MOSS-Audio | `src/moss_audio.cpp` | `moss_audio_token_text()` | |
+| Moonshine-Streaming | `src/moonshine_streaming.cpp` | `moonshine_streaming_token_text()` | |
+| Nemotron (RNN-T) | `src/nemotron.cpp` | `nemotron_token_to_str()` | RNN-T already emits per-frame; callback fires on non-blank frames |
+
+### C library callback signature (uniform across all)
+
+```c
+typedef void (*crispasr_token_cb)(int token_id, const char* text, void* userdata);
+int glm_asr_transcribe_cb(struct glm_asr_context* ctx,
+                           const float* pcm, int n_samples,
+                           crispasr_token_cb cb, void* userdata);
+// ... same pattern for others
+```
+
+### Adapter pattern (same for all)
+
+```cpp
+void transcribe_streaming(const float* samples, int n_samples, int64_t,
+                           const whisper_params& params,
+                           crispasr_stream_callback on_text) override {
+    if (params.beam_size > 1) {
+        CrispasrBackend::transcribe_streaming(...);  // batch fallback
+        return;
+    }
+    std::string acc;
+    glm_asr_transcribe_cb(ctx_, samples, n_samples,
+        [](int /*id*/, const char* text, void* ud) {
+            auto& [a, fn] = *static_cast<std::pair<std::string, crispasr_stream_callback>*>(ud);
+            a += text;
+            fn(a, false);
+        }, &std::make_pair(acc, on_text));  // actual impl uses local lambda
+    on_text(acc, true);
+}
+```
+
+**Status:** **DONE 2026-06-19** (`7f2c1f3a`). All 7 implemented.
+
+### Implementation details
+
+The actual callback signatures use per-token `(int tok_id, float prob, void* userdata)` —
+not `text` in the callback, since text lookup via `*_token_text()` is done in the adapter.
+
+| Backend | C entry point | BPE decode | Notes |
+|---------|--------------|-----------|-------|
+| GLM-ASR | step APIs (`glm_asr_embed_tokens`, `glm_asr_run_llm_kv`) | GPT-2 (Ġ→space, Ċ→newline) | Full greedy loop in adapter; EOS={59246,59253,59255} |
+| MOSS-Audio | `moss_audio_process_cb` | GPT-2 full byte_decoder | `moss_audio_process` refactored to `moss_audio_process_impl` |
+| Gemma4-E2B | `gemma4_e2b_transcribe_cb` | SentencePiece ▁→space | Added `gemma4_e2b_is_control_token` to filter bos/eos/sot/eot |
+| Moonshine-Streaming | `moonshine_streaming_transcribe_cb` | SentencePiece ▁→space | — |
+| Kyutai-STT | `kyutai_stt_transcribe_cb` | SentencePiece ▁→space | `emit_token` lambda already filters padding; callback fires inside it |
+| MiMo-ASR | `mimo_asr_transcribe_cb` | GPT-2 full byte_decoder (inlined in adapter) | `core_bpe::token_bytes_to_utf8` not exported → inline table |
+| Nemotron | `nemotron_transcribe_cb` | SentencePiece ▁→space | RNN-T: fires per non-blank emitted frame; `nemotron_transcribe_ex` → `nemotron_transcribe_impl` wrapper |
+
+Forward-declaration fix needed for nemotron: `nemotron_transcribe` called `nemotron_transcribe_impl` before
+its definition — added a static forward decl.
