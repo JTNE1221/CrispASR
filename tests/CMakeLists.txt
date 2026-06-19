@@ -1496,6 +1496,36 @@ set_tests_properties(test-server-ws-stream PROPERTIES
     LABELS "live;server"
     TIMEOUT 300)
 
+# ─── test-wyoming-proto — Catch2 unit tests for Wyoming wire format, PCM
+# conversion (f32↔s16), and linear-interpolation resampler.
+# Pure CPU, no model or audio device needed. The socket-pair framing tests
+# are POSIX-only and compiled out on Windows.
+add_executable(test-wyoming-proto test-wyoming-proto.cpp)
+target_link_libraries(test-wyoming-proto PRIVATE Catch2::Catch2WithMain)
+catch_discover_tests(test-wyoming-proto
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;wyoming")
+
+# ─── test-crispasr-speaker-resample — Catch2 unit tests for the pre-resample
+# math inside crispasr_speaker_play(): upsample/downsample, mono expansion,
+# stereo mix-down, DC preservation. No audio device or model needed.
+add_executable(test-crispasr-speaker-resample test-crispasr-speaker-resample.cpp)
+target_link_libraries(test-crispasr-speaker-resample PRIVATE Catch2::Catch2WithMain)
+catch_discover_tests(test-crispasr-speaker-resample
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;speaker")
+
+# ─── test-server-wyoming — live: --wyoming-port Wyoming protocol TCP server.
+# Python stdlib client exercises describe→info, ASR transcription, disconnect
+# resilience, and unknown-event resilience. Needs a whisper ggml model; SKIPs
+# otherwise.
+add_test(NAME test-server-wyoming
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test-server-wyoming.py
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(test-server-wyoming PROPERTIES
+    LABELS "live;server;wyoming"
+    TIMEOUT 300)
+
 # ─── test-release-workflow — validate release.yml targets (issue #131).
 # Static test: no binary or model needed, just parses YAML.
 add_test(NAME test-release-workflow
