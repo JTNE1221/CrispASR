@@ -365,10 +365,11 @@ LANG_TESTS = [
         "size_mb": 400,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
-             "note": "qwen3-asr: -l en (system prompt empty for transcribe) → should produce EN",
+             "note": "qwen3-asr: -l en injects 'Transcribe in English.' → EN",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": ["-l", "de"],
-             "note": "qwen3-asr: -l de ignored in transcribe mode — still produces EN (known gap)",
+             "note": "qwen3-asr: -l de injects 'Transcribe in German.' — ASR fine-tune "
+                     "tends to transcribe source language anyway (EN here); no crash",
              "expect_nonempty": True},
         ],
     },
@@ -569,10 +570,11 @@ LANG_TESTS = [
         "size_mb": 2806,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
-             "note": "granite: -l en (adapter may ignore it) → EN transcript",
+             "note": "granite: -l en injects 'transcribe in English' → EN transcript",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": ["-l", "de"],
-             "note": "granite: -l de (likely ignored by adapter) → same EN transcript, no crash",
+             "note": "granite: -l de injects 'transcribe in German' → HONORS it, "
+                     "emits German translation (validated v6)",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": [],
              "note": "granite: no -l → baseline EN",
@@ -588,10 +590,11 @@ LANG_TESTS = [
         "size_mb": 4300,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
-             "note": "glm-asr: ZH+EN, -l en (adapter ignores it) → EN transcript",
+             "note": "glm-asr: ZH+EN, -l en injects 'Please transcribe in English.' → EN",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": ["-l", "zh"],
-             "note": "glm-asr: -l zh on EN audio (adapter ignores it) → same EN output, no crash",
+             "note": "glm-asr: -l zh injects 'Please transcribe in Chinese.' — on EN audio "
+                     "the model transcribes the source (EN); no crash",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": [],
              "note": "glm-asr: no -l → baseline",
@@ -607,10 +610,11 @@ LANG_TESTS = [
         "size_mb": 3920,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
-             "note": "moss-audio: multilingual, -l en (adapter ignores it)",
+             "note": "moss-audio: multilingual, -l en injects 'Transcribe this audio in English.'",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": ["-l", "de"],
-             "note": "moss-audio: -l de (adapter ignores it) → same output, no crash",
+             "note": "moss-audio: -l de injects 'Transcribe this audio in German.' → HONORS it, "
+                     "emits fluent German (validated v6)",
              "expect_nonempty": True},
         ],
     },
@@ -630,10 +634,11 @@ LANG_TESTS = [
         "size_mb_extra": 1240,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
-             "note": "mimo-asr: Qwen2 LLM, -l en (adapter ignores it) → EN transcript",
+             "note": "mimo-asr: Qwen2 LLM, -l en injects 'Please transcribe this audio in English.' → EN",
              "expect_nonempty": True},
             {"audio": "jfk", "lang_flags": ["-l", "zh"],
-             "note": "mimo-asr: -l zh (adapter ignores it) → same output, no crash",
+             "note": "mimo-asr: -l zh injects 'Please transcribe this audio in Chinese.' — on EN audio "
+                     "the model transcribes the source (EN); no crash",
              "expect_nonempty": True},
         ],
     },
