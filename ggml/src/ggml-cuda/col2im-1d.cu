@@ -5,10 +5,13 @@
 // columns: [K*OC, T_in]  ->  output: [T_out, OC]
 // Supports F32, F16, BF16 data with F32 accumulator.
 
+// dst (ggml_col2im_1d result) is ALWAYS F32; T types only the source column
+// buffer (f16/f32/bf16). Writing ggml_cuda_cast<T>(sum) into the f32 dst
+// corrupts the output for f16/bf16 input — dst must stay float.
 template <typename T>
 static __global__ void col2im_1d_kernel(
-        const T * __restrict__ col,
-        T       * __restrict__ dst,
+        const T     * __restrict__ col,
+        float       * __restrict__ dst,
         const int T_in, const int T_out,
         const int OC, const int K, const int K_OC,
         const int s0, const int p0, const int total) {
@@ -34,7 +37,7 @@ static __global__ void col2im_1d_kernel(
         sum += ggml_cuda_cast<float>(col[(oc * K + k) + t_in * K_OC]);
     }
 
-    dst[idx] = ggml_cuda_cast<T>(sum);
+    dst[idx] = sum;
 }
 
 void ggml_cuda_op_col2im_1d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -64,12 +67,12 @@ void ggml_cuda_op_col2im_1d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
         } break;
         case GGML_TYPE_F16: {
             col2im_1d_kernel<<<num_blocks, block_size, 0, stream>>>(
-                (const half *)src0->data, (half *)dst->data,
+                (const half *)src0->data, (float *)dst->data,
                 T_in, T_out, OC, K, K_OC, s0, p0, total);
         } break;
         case GGML_TYPE_BF16: {
             col2im_1d_kernel<<<num_blocks, block_size, 0, stream>>>(
-                (const nv_bfloat16 *)src0->data, (nv_bfloat16 *)dst->data,
+                (const nv_bfloat16 *)src0->data, (float *)dst->data,
                 T_in, T_out, OC, K, K_OC, s0, p0, total);
         } break;
         default:

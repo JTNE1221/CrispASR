@@ -5012,10 +5012,13 @@ kernel void kernel_conv_transpose_1d<half>(
 template <typename T>
 kernel void kernel_col2im_1d(
         constant ggml_metal_kargs_col2im_1d & args,
-        device const T * src0,
-        device       T * dst,
+        device const T     * src0,
+        device       float * dst,
         uint gid [[thread_position_in_grid]]) {
 
+    // dst (ggml_col2im_1d result) is ALWAYS F32 regardless of src0 type — the
+    // template parameter T types only the source column buffer (f16/f32). Writing
+    // T(sum) into the f32 destination corrupts the output for f16 input.
     const int total = args.T_out * args.OC;
     if ((int)gid >= total) return;
 
@@ -5034,7 +5037,7 @@ kernel void kernel_col2im_1d(
         sum += float(src0[(oc * args.K + k) + t_in * args.K_OC]);
     }
 
-    dst[gid] = T(sum);
+    dst[gid] = sum;
 }
 
 template [[host_name("kernel_col2im_1d_f32")]]
@@ -5047,8 +5050,8 @@ kernel void kernel_col2im_1d<float>(
 template [[host_name("kernel_col2im_1d_f16")]]
 kernel void kernel_col2im_1d<half>(
     constant ggml_metal_kargs_col2im_1d & args,
-    device const half * src0,
-    device       half * dst,
+    device const half  * src0,
+    device       float * dst,
     uint gid [[thread_position_in_grid]]);
 
 // ── CrispASR patch (PR #07-metal-aa-snake-beta) ─────────────────────
