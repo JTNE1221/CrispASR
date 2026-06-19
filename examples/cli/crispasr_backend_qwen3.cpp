@@ -175,48 +175,10 @@ public:
         // is a specialized ASR fine-tune that ignores user-turn
         // instructions but does honour system-prompt control. The
         // default transcribe path keeps the system turn empty, which
-        // is the bit-identical historical behaviour.
-        // Map ISO-639-1 codes to plain English language names — qwen3
-        // reads the system-prompt instruction literally and "Translate
-        // to de" gets interpreted as Spanish ("de" = "of"). Sending the
-        // full English name keeps the model on the right target.
-        auto iso_to_english = [](const std::string& code) -> std::string {
-            if (code == "en")
-                return "English";
-            if (code == "de")
-                return "German";
-            if (code == "fr")
-                return "French";
-            if (code == "es")
-                return "Spanish";
-            if (code == "it")
-                return "Italian";
-            if (code == "pt")
-                return "Portuguese";
-            if (code == "ru")
-                return "Russian";
-            if (code == "ja")
-                return "Japanese";
-            if (code == "ko")
-                return "Korean";
-            if (code == "zh")
-                return "Chinese";
-            if (code == "nl")
-                return "Dutch";
-            if (code == "pl")
-                return "Polish";
-            if (code == "tr")
-                return "Turkish";
-            if (code == "ar")
-                return "Arabic";
-            if (code == "hi")
-                return "Hindi";
-            // For unrecognised codes (or already-spelled-out names),
-            // pass the input through verbatim — the model will get a
-            // best-effort hint.
-            return code;
-        };
-
+        // is the bit-identical historical behaviour. ISO-639-1 codes are
+        // mapped to plain English names via crispasr_iso_to_english_lang —
+        // qwen3 reads the system prompt literally and a bare "de" gets
+        // interpreted as Spanish ("de" = "of"); the full name avoids that.
         std::string sys_instruction;
         if (!params.ask.empty()) {
             // Note: qwen3-asr is an ASR-specific fine-tune that may
@@ -225,10 +187,10 @@ public:
             sys_instruction = params.ask;
         } else if (params.translate) {
             const std::string tgt =
-                params.target_lang.empty() ? std::string("English") : iso_to_english(params.target_lang);
+                params.target_lang.empty() ? std::string("English") : crispasr_iso_to_english_lang(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
         } else if (!params.language.empty() && params.language != "auto") {
-            sys_instruction = "Transcribe the speech in " + iso_to_english(params.language) + ".";
+            sys_instruction = "Transcribe the speech in " + crispasr_iso_to_english_lang(params.language) + ".";
         }
         // PLAN #98 Phase B: hotword prompt injection
         if (!params.hotwords.empty()) {
@@ -592,47 +554,15 @@ public:
             return;
 
         // ---- Prompt ----
-        auto lang_name = [](const std::string& code) -> std::string {
-            if (code == "en")
-                return "English";
-            if (code == "de")
-                return "German";
-            if (code == "fr")
-                return "French";
-            if (code == "es")
-                return "Spanish";
-            if (code == "it")
-                return "Italian";
-            if (code == "pt")
-                return "Portuguese";
-            if (code == "ru")
-                return "Russian";
-            if (code == "ja")
-                return "Japanese";
-            if (code == "ko")
-                return "Korean";
-            if (code == "zh")
-                return "Chinese";
-            if (code == "nl")
-                return "Dutch";
-            if (code == "pl")
-                return "Polish";
-            if (code == "tr")
-                return "Turkish";
-            if (code == "ar")
-                return "Arabic";
-            if (code == "hi")
-                return "Hindi";
-            return code;
-        };
         std::string sys_instruction;
         if (!params.ask.empty()) {
             sys_instruction = params.ask;
         } else if (params.translate) {
-            const std::string tgt = params.target_lang.empty() ? std::string("English") : lang_name(params.target_lang);
+            const std::string tgt =
+                params.target_lang.empty() ? std::string("English") : crispasr_iso_to_english_lang(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
         } else if (!params.language.empty() && params.language != "auto") {
-            sys_instruction = "Transcribe the speech in " + lang_name(params.language) + ".";
+            sys_instruction = "Transcribe the speech in " + crispasr_iso_to_english_lang(params.language) + ".";
         }
         if (!params.hotwords.empty()) {
             if (!sys_instruction.empty() && sys_instruction.back() != ' ')

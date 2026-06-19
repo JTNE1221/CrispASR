@@ -136,27 +136,7 @@ public:
             eos_tok = kLegacyEos4;
         (void)vocab_sz;
 
-        auto iso_to_eng = [](const std::string& c) -> std::string {
-            if (c == "en")
-                return "English";
-            if (c == "de")
-                return "German";
-            if (c == "fr")
-                return "French";
-            if (c == "es")
-                return "Spanish";
-            if (c == "it")
-                return "Italian";
-            if (c == "pt")
-                return "Portuguese";
-            if (c == "ru")
-                return "Russian";
-            if (c == "ja")
-                return "Japanese";
-            if (c == "zh")
-                return "Chinese";
-            return c;
-        };
+        auto iso_to_eng = [](const std::string& c) -> std::string { return crispasr_iso_to_english_lang(c); };
 
         // Chat-template selection.
         //

@@ -49,7 +49,7 @@ public:
         if (!params.ask.empty()) {
             glm_asr_set_ask(ctx_, params.ask.c_str());
         } else if (!params.language.empty() && params.language != "auto" && !params.translate) {
-            const std::string instr = "Please transcribe in " + params.language + ".";
+            const std::string instr = "Please transcribe in " + crispasr_iso_to_english_lang(params.language) + ".";
             glm_asr_set_ask(ctx_, instr.c_str());
         } else {
             glm_asr_set_ask(ctx_, nullptr);
@@ -208,7 +208,7 @@ public:
                 snprintf(buf, sizeof(buf), "\nPlease translate the speech to %s.\n", tgt_lang_.c_str());
                 instr = buf;
             } else if (!params.language.empty() && params.language != "auto") {
-                instr = "\nPlease transcribe in " + params.language + ".\n";
+                instr = "\nPlease transcribe in " + crispasr_iso_to_english_lang(params.language) + ".\n";
             }
             if (!instr.empty()) {
                 int n_instr = 0;

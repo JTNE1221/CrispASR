@@ -135,7 +135,7 @@ public:
         if (!params.prompt.empty()) {
             prompt = params.prompt.c_str();
         } else if (!params.language.empty() && params.language != "auto") {
-            prompt_buf = "Transcribe this audio in " + params.language + ".";
+            prompt_buf = "Transcribe this audio in " + crispasr_iso_to_english_lang(params.language) + ".";
             prompt = prompt_buf.c_str();
         }
 
@@ -166,7 +166,7 @@ public:
         if (!params.prompt.empty()) {
             prompt = params.prompt.c_str();
         } else if (!params.language.empty() && params.language != "auto") {
-            prompt_buf_s = "Transcribe this audio in " + params.language + ".";
+            prompt_buf_s = "Transcribe this audio in " + crispasr_iso_to_english_lang(params.language) + ".";
             prompt = prompt_buf_s.c_str();
         } else {
             prompt = "Transcribe this audio.";

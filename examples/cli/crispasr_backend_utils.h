@@ -57,3 +57,43 @@ inline void crispasr_lowercase_ascii(std::string& s) {
             c = (char)(u + 32);
     }
 }
+
+// Map an ISO-639-1 code to a plain English language name for prompt
+// injection in instruct-tuned audio-LLM backends. The LLM reads the
+// system/user prompt literally, and a bare two-letter code is unreliable
+// ("de" gets read as the English word "of", steering the model to
+// Spanish). Sending the spelled-out name keeps it on the right language.
+// Unknown codes (or already-spelled-out names) pass through verbatim.
+inline std::string crispasr_iso_to_english_lang(const std::string& code) {
+    if (code == "en")
+        return "English";
+    if (code == "de")
+        return "German";
+    if (code == "fr")
+        return "French";
+    if (code == "es")
+        return "Spanish";
+    if (code == "it")
+        return "Italian";
+    if (code == "pt")
+        return "Portuguese";
+    if (code == "ru")
+        return "Russian";
+    if (code == "ja")
+        return "Japanese";
+    if (code == "ko")
+        return "Korean";
+    if (code == "zh")
+        return "Chinese";
+    if (code == "nl")
+        return "Dutch";
+    if (code == "pl")
+        return "Polish";
+    if (code == "tr")
+        return "Turkish";
+    if (code == "ar")
+        return "Arabic";
+    if (code == "hi")
+        return "Hindi";
+    return code;
+}

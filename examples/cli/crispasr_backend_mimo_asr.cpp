@@ -182,7 +182,8 @@ public:
         if (!params.ask.empty()) {
             mimo_asr_set_ask(ctx_, params.ask.c_str());
         } else if (!params.language.empty() && params.language != "auto") {
-            const std::string instr = "Please transcribe this audio in " + params.language + ".";
+            const std::string instr =
+                "Please transcribe this audio in " + crispasr_iso_to_english_lang(params.language) + ".";
             mimo_asr_set_ask(ctx_, instr.c_str());
         } else {
             mimo_asr_set_ask(ctx_, nullptr);
@@ -208,7 +209,8 @@ public:
         if (!params.ask.empty()) {
             mimo_asr_set_ask(ctx_, params.ask.c_str());
         } else if (!params.language.empty() && params.language != "auto") {
-            const std::string instr = "Please transcribe this audio in " + params.language + ".";
+            const std::string instr =
+                "Please transcribe this audio in " + crispasr_iso_to_english_lang(params.language) + ".";
             mimo_asr_set_ask(ctx_, instr.c_str());
         } else {
             mimo_asr_set_ask(ctx_, nullptr);

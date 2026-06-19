@@ -358,7 +358,7 @@ LANG_TESTS = [
     },
     {
         "name": "qwen3-asr-0.6b",
-        "backend": "qwen3-asr",
+        "backend": "qwen3",
         "gguf_repo": "cstr/qwen3-asr-0.6b-GGUF",
         "gguf_file": "qwen3-asr-0.6b-q4_k.gguf",
         "gguf_rev":  "ad086c22597e",
@@ -493,9 +493,9 @@ LANG_TESTS = [
     {
         "name": "cohere-transcribe",
         "backend": "cohere",
-        "gguf_repo": "cstr/cohere-transcribe-GGUF",
+        "gguf_repo": "cstr/cohere-transcribe-03-2026-GGUF",
         "gguf_file": "cohere-transcribe-q4_k.gguf",
-        "gguf_rev":  "b9bcdb1a4f54",
+        "gguf_rev":  "2242638d5dfecc6f1dbe6c3a8713b97deb2e150f",
         "size_mb": 1500,
         "tests": [
             {"audio": "jfk", "lang_flags": ["-l", "en"],
@@ -562,7 +562,7 @@ LANG_TESTS = [
     },
     {
         "name": "granite-speech-4.1-2b",
-        "backend": "granite-speech",
+        "backend": "granite",
         "gguf_repo": "cstr/granite-speech-4.1-2b-GGUF",
         "gguf_file": "granite-speech-4.1-2b-q4_k.gguf",
         "gguf_rev":  "7ee888f67b68",
