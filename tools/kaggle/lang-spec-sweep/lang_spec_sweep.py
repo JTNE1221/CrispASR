@@ -169,9 +169,19 @@ def heartbeat(label: str, interval_s: float = 30.0):
 # ── HF auth ──────────────────────────────────────────────────────────────────
 def _token_from_dataset() -> str | None:
     candidates = [Path("/kaggle/input/crispasr-hf-token/hf_token.txt")]
-    input_root = Path("/kaggle/input")
-    if input_root.exists():
-        for sub in input_root.iterdir():
+    # Scan multiple roots — newer Kaggle environments mount datasets at
+    # /kaggle/input/datasets/<owner>/<slug>/ instead of /kaggle/input/<slug>/
+    roots = [
+        Path("/kaggle/input"),
+        Path("/kaggle/input/datasets"),
+        Path("/kaggle/input/datasets/chr1str"),
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for sub in root.iterdir():
+            if not sub.is_dir():
+                continue
             if "hf-token" in sub.name or "hf_token" in sub.name:
                 p = sub / "hf_token.txt"
                 if p not in candidates:
@@ -179,9 +189,14 @@ def _token_from_dataset() -> str | None:
     for p in candidates:
         if p.exists():
             tok = p.read_text().strip()
-            if tok:
+            if tok and len(tok) > 8:
                 print(f"HF_TOKEN from {p}", flush=True)
                 return tok
+    # Debug: dump /kaggle/input for diagnosis
+    root = Path("/kaggle/input")
+    if root.exists():
+        dirs = sorted(root.iterdir())
+        print(f"HF auth: /kaggle/input → {[d.name for d in dirs[:10]]}", flush=True)
     return None
 
 
@@ -222,7 +237,30 @@ for candidate in [
 
 os.environ["CCACHE_DIR"] = str(_ccache_dir)
 
-cmake_extra = "-DGGML_CUDA=ON" if BUILD_FLAVOUR == "cuda" else ""
+if BUILD_FLAVOUR == "cuda":
+    # Add CUDA stubs to LIBRARY_PATH so FindCUDAToolkit can find libcuda.so.
+    # Without this, cmake --generate fails with "CUDA::cuda_driver not found".
+    _stubs = "/usr/local/cuda/lib64/stubs"
+    if os.path.isdir(_stubs):
+        os.environ["LIBRARY_PATH"] = f"{_stubs}:{os.environ.get('LIBRARY_PATH', '')}"
+    # Detect CUDA arch; fall back to T4=75 if nvidia-smi is not useful.
+    try:
+        _arch_out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL, text=True).strip().split("\n")[0].replace(".", "")
+        _cuda_arch = _arch_out if _arch_out else "75"
+    except Exception:
+        _cuda_arch = "75"
+    step("cuda_arch", arch=_cuda_arch)
+    _nvcc = "/usr/local/cuda/bin/nvcc"
+    cmake_extra = (
+        f"-DGGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON "
+        f"-DCMAKE_CUDA_ARCHITECTURES={_cuda_arch}"
+        + (f" -DCMAKE_CUDA_COMPILER={_nvcc}" if os.path.isfile(_nvcc) else "")
+    )
+else:
+    cmake_extra = ""
+
 with heartbeat("build.configure"):
     sh_stream(
         f"cmake -G Ninja -B {BUILD} -S {REPO} "
@@ -233,9 +271,10 @@ with heartbeat("build.configure"):
     )
 
 step("build.compile")
-nproc = int(subprocess.check_output(["nproc"]).strip())
+# Cap CUDA builds at -j2 to avoid OOM (nvcc TUs are ~2 GB RAM each on Kaggle).
+_build_j = "2" if BUILD_FLAVOUR == "cuda" else str(int(subprocess.check_output(["nproc"]).strip()))
 with heartbeat("build.compile", interval_s=30.0):
-    sh_stream(f"cmake --build {BUILD} -j{nproc}", cwd=BUILD)
+    sh_stream(f"cmake --build {BUILD} -j{_build_j}", cwd=BUILD)
 
 CRISPASR_BIN = BUILD / "bin" / "crispasr"
 assert CRISPASR_BIN.exists(), "crispasr binary not found after build"
