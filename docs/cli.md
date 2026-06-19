@@ -1088,6 +1088,15 @@ reuse, etc.) see [`tts.md`](tts.md):
 - `QWEN3_TTS_O15` — code-predictor graph reuse (CPU/Metal opt-in)
 - `KOKORO_GEN_GPU` — generator on GPU (CUDA / Vulkan)
 - `VIBEVOICE_VAE_BACKEND={auto,cpu,gpu}` — VAE decoder placement
+- `VIBEVOICE_TTS_FLASH_ATTN={1,0}` — TTS LM attention: `1` (default)
+  uses fused `ggml_flash_attn_ext`; `0` uses an explicit
+  `softmax(QKᵀ)·V` path. Set `0` if VibeVoice TTS garbles, mixes
+  voices, or repeats on a GPU whose fused flash-attention shader is
+  buggy — notably **AMD RDNA4 (RX 9700 XT) on Vulkan**, whose coopmat2
+  FA shader produces wrong hidden states (issue #171). The
+  no-rebuild equivalent is `GGML_VK_DISABLE_COOPMAT2=1`. This knob and
+  `VIBEVOICE_VAE_BACKEND` bisect the TTS GPU graph (LM attention vs.
+  the conv/col2im VAE) to localise a bad kernel.
 
 ### Comparison with llama.cpp
 
