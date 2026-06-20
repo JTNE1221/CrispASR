@@ -1073,7 +1073,12 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
                 ggml_backend_tensor_set(dec_spk_input, &sid, 0, sizeof(int32_t));
             }
 
-            ggml_backend_graph_compute(ctx->backend_cpu, gf3);
+            // Compute through the scheduler (not the raw CPU backend): the graph
+            // was allocated via ggml_backend_sched_alloc_graph and the weights
+            // live on the active backend (GPU buffer when use_gpu). Running it on
+            // ctx->backend_cpu would dereference GPU device pointers — harmless on
+            // unified-memory Metal but an illegal access on CUDA.
+            ggml_backend_sched_graph_compute(ctx->sched, gf3);
 
             // Read mel output: (n_mel, T_frames)
             dec_out_data.resize((size_t)hp.n_mel_channels * T_frames);
@@ -1129,7 +1134,9 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
                 ggml_backend_tensor_set(mel_in, mel_voc.data(), 0, mel_voc.size() * sizeof(float));
             }
 
-            ggml_backend_graph_compute(ctx->backend_cpu, gf4);
+            // Scheduler compute (see decoder note above): keeps GPU-resident
+            // vocoder weights on their owning backend — CUDA-safe.
+            ggml_backend_sched_graph_compute(ctx->sched, gf4);
 
             // Read audio output
             int T_audio = (int)audio->ne[0];
