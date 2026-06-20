@@ -166,6 +166,19 @@ struct orpheus_context {
     ggml_tensor* kv_v = nullptr;
     int kv_max_ctx = 0;
 
+    // §176b: Lk-bucketed single-step AR graph cache.
+    struct OrpheusBucket {
+        int lk = 0;
+        ggml_context* ctx = nullptr;
+        std::vector<uint8_t> meta;
+        ggml_cgraph* gf = nullptr;
+    };
+    static constexpr int kBucketN = 4;
+    static constexpr int kBucketLks[kBucketN] = {512, 1024, 2048, 4096};
+    std::array<OrpheusBucket, kBucketN> ar_buckets{};
+    ggml_backend_sched_t ar_step_sched = nullptr;
+    int ar_active_bucket = -1;
+
     // SNAC codec (lazy-loaded on first orpheus_synthesize call).
     std::string snac_codec_path;
     snac_decoder_ctx* snac_dec = nullptr;
@@ -180,6 +193,11 @@ struct orpheus_context {
         if (snac_dec) {
             snac_decoder_free(snac_dec);
         }
+        if (ar_step_sched)
+            ggml_backend_sched_free(ar_step_sched);
+        for (auto& bk : ar_buckets)
+            if (bk.ctx)
+                ggml_free(bk.ctx);
         if (sched) {
             ggml_backend_sched_free(sched);
         }
@@ -568,8 +586,15 @@ static ggml_cgraph* build_graph_embed(orpheus_context* c, int n_tokens) {
 // Llama-3.2 talker block stack with KV-cached self-attention + SwiGLU.
 //   inputs_embeds (d, T)    → logits (vocab,)
 //   positions     (T,)      I32 absolute positions
-//   causal_mask   (Lk, T)   F16 (only when T > 1)
-static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_tokens) {
+//   causal_mask   (Lk, T)   F16 (only when T > 1 or fixed_kv_len > 0)
+//
+// fixed_kv_len > 0: pin Lk to a constant (bucket mode). kv_indices=positions
+//   makes the KV write position a runtime input (not a graph-build parameter),
+//   keeping the graph topology invariant across decode steps.
+// arena_ctx != nullptr: graph nodes are allocated in the caller's arena; the
+//   caller owns the context and must NOT free it here.
+static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_tokens, int fixed_kv_len = 0,
+                                          ggml_context* arena_ctx = nullptr) {
     const auto& hp = c->hp;
     const int d = (int)hp.d_model;
     const int n_q = (int)hp.n_heads;
@@ -580,12 +605,12 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
     const float theta = hp.rope_theta;
     const float attn_scale = 1.0f / std::sqrt((float)hd);
     const int T = n_tokens;
-    const int Lk = n_past + T;
+    const int Lk = fixed_kv_len > 0 ? fixed_kv_len : (n_past + T);
 
     GGML_ASSERT(c->kv_k && c->kv_v && Lk <= c->kv_max_ctx);
 
     ggml_init_params ip = {c->compute_meta.size(), c->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(ip);
+    ggml_context* ctx0 = arena_ctx ? arena_ctx : ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
     ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
@@ -595,7 +620,7 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
     ggml_set_name(positions, "positions");
     ggml_set_input(positions);
     ggml_tensor* causal_mask = nullptr;
-    if (T > 1) {
+    if (T > 1 || fixed_kv_len > 0) {
         causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
         ggml_set_name(causal_mask, "causal_mask");
         ggml_set_input(causal_mask);
@@ -615,6 +640,8 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
         /*gqa_mode*/ core_attn::GQA_MANUAL_CONT,
     };
 
+    ggml_tensor* eff_kv_indices = fixed_kv_len > 0 ? positions : nullptr;
+
     ggml_tensor* cur = embeds;
     for (uint32_t il = 0; il < hp.n_layers; il++) {
         const auto& b = c->talker.blocks[il];
@@ -623,10 +650,12 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
         x = ggml_mul(ctx0, x, b.attn_norm_w);
 
-        ggml_tensor* attn =
-            core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
-                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
-                                    (T == 1) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past, kvp);
+        ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
+                                                    /*q_norm_w*/ nullptr, /*k_norm_w*/ nullptr, positions,
+                                                    (T == 1 && !fixed_kv_len) ? nullptr : causal_mask, c->kv_k, c->kv_v,
+                                                    (int)il, n_past, kvp,
+                                                    /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv_len,
+                                                    /*kv_indices=*/eff_kv_indices);
         cur = ggml_add(ctx0, residual, attn);
 
         residual = cur;
@@ -644,7 +673,8 @@ static ggml_cgraph* build_graph_talker_kv(orpheus_context* c, int n_past, int n_
     cur = ggml_mul_mat(ctx0, c->talker.output_w, cur);
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
-    ggml_free(ctx0);
+    if (!arena_ctx)
+        ggml_free(ctx0);
     return gf;
 }
 
@@ -685,8 +715,16 @@ static float* embed_tokens(orpheus_context* c, const int32_t* ids, int n) {
     return r;
 }
 
+static float* run_talker_kv_bucket(orpheus_context* c, const float* embeds, int n_past);
+
 // Returns logits at the last position (vocab,), malloc'd. Caller frees.
 static float* run_talker_kv(orpheus_context* c, const float* embeds, int n_tokens, int n_past) {
+    // §176b: Lk-bucketed fast path for single-step decode.
+    if (n_tokens == 1) {
+        if (float* r = run_talker_kv_bucket(c, embeds, n_past))
+            return r;
+    }
+
     if (n_past + n_tokens > c->kv_max_ctx) {
         fprintf(stderr, "orpheus: kv overflow (%d+%d > %d)\n", n_past, n_tokens, c->kv_max_ctx);
         return nullptr;
@@ -730,6 +768,98 @@ static float* run_talker_kv(orpheus_context* c, const float* embeds, int n_token
         fprintf(stderr, "orpheus: talker_kv compute failed\n");
         return nullptr;
     }
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
+    float* r = (float*)malloc((size_t)vocab * sizeof(float));
+    ggml_backend_tensor_get(out, r, 0, (size_t)vocab * sizeof(float));
+    return r;
+}
+
+// §176b: Lk-bucketed single-step AR decode.
+static int orpheus_pick_bucket(orpheus_context* c, int needed_lk) {
+    for (int i = 0; i < orpheus_context::kBucketN; i++) {
+        const int bk_lk = orpheus_context::kBucketLks[i];
+        if (bk_lk >= needed_lk && bk_lk <= c->kv_max_ctx)
+            return i;
+    }
+    return -1;
+}
+
+static ggml_backend_sched_t orpheus_step_sched_lazy(orpheus_context* c) {
+    if (c->ar_step_sched)
+        return c->ar_step_sched;
+    ggml_backend_t backends[2] = {c->backend, c->backend_cpu};
+    int n_be = (c->backend && c->backend != c->backend_cpu) ? 2 : 1;
+    c->ar_step_sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+    return c->ar_step_sched;
+}
+
+static ggml_cgraph* orpheus_get_or_build_bucket(orpheus_context* c, int idx) {
+    auto& bk = c->ar_buckets[idx];
+    if (bk.gf)
+        return bk.gf;
+    bk.lk = orpheus_context::kBucketLks[idx];
+    bk.meta.assign(c->compute_meta.size(), 0);
+    ggml_init_params ip = {bk.meta.size(), bk.meta.data(), true};
+    bk.ctx = ggml_init(ip);
+    if (!bk.ctx) {
+        fprintf(stderr, "orpheus: ar_bucket[%d] arena init failed\n", idx);
+        return nullptr;
+    }
+    bk.gf = build_graph_talker_kv(c, /*n_past=*/0, /*n_tokens=*/1,
+                                  /*fixed_kv_len=*/bk.lk, /*arena_ctx=*/bk.ctx);
+    if (!bk.gf) {
+        ggml_free(bk.ctx);
+        bk.ctx = nullptr;
+        return nullptr;
+    }
+    return bk.gf;
+}
+
+static float* run_talker_kv_bucket(orpheus_context* c, const float* embeds, int n_past) {
+    const int idx = orpheus_pick_bucket(c, n_past + 1);
+    if (idx < 0)
+        return nullptr;
+
+    ggml_cgraph* gf = orpheus_get_or_build_bucket(c, idx);
+    if (!gf)
+        return nullptr;
+
+    const auto& bk = c->ar_buckets[idx];
+    const int d = (int)c->hp.d_model;
+    const int Lk = bk.lk;
+    const int vocab = (int)c->hp.vocab_size;
+
+    ggml_backend_sched_t step_sched = orpheus_step_sched_lazy(c);
+    if (!step_sched)
+        return nullptr;
+
+    if (c->ar_active_bucket != idx) {
+        ggml_backend_sched_reset(step_sched);
+        if (!ggml_backend_sched_alloc_graph(step_sched, gf)) {
+            fprintf(stderr, "orpheus: ar_bucket[%d] alloc failed\n", idx);
+            return nullptr;
+        }
+        c->ar_active_bucket = idx;
+    }
+
+    int32_t pos = n_past;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &pos, 0, sizeof(int32_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "inputs_embeds"), embeds, 0, (size_t)d * sizeof(float));
+
+    {
+        std::vector<ggml_fp16_t> mask(Lk, ggml_fp32_to_fp16(0.0f));
+        const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        for (int k = n_past + 1; k < Lk; k++)
+            mask[k] = neg_inf;
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                                (size_t)Lk * sizeof(ggml_fp16_t));
+    }
+
+    if (ggml_backend_sched_graph_compute(step_sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "orpheus: ar_bucket compute failed\n");
+        return nullptr;
+    }
+
     ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
     float* r = (float*)malloc((size_t)vocab * sizeof(float));
     ggml_backend_tensor_get(out, r, 0, (size_t)vocab * sizeof(float));
