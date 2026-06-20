@@ -866,6 +866,18 @@ const Entry* find_by_backend(const std::string& backend) {
     for (const auto& e : k_registry)
         if (backend == e.backend)
             return &e;
+    // Fallback: the CLI passes the raw `--backend` alias (e.g. the short
+    // `cosyvoice3` / `voxcpm2`) while the registry keys the canonical
+    // `cosyvoice3-tts` / `voxcpm2-tts`. When the exact alias has no entry,
+    // retry with a `-tts` suffix so `-m auto --backend cosyvoice3` resolves
+    // instead of failing with "no default model registered". Exact match is
+    // tried first, so this can never shadow a real non-`-tts` entry.
+    if (backend.size() < 4 || backend.compare(backend.size() - 4, 4, "-tts") != 0) {
+        const std::string with_tts = backend + "-tts";
+        for (const auto& e : k_registry)
+            if (with_tts == e.backend)
+                return &e;
+    }
     return nullptr;
 }
 

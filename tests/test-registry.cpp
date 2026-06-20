@@ -292,6 +292,16 @@ TEST_CASE("registry: cosyvoice3-tts has entry", "[unit][registry]") {
     REQUIRE(crispasr_registry_lookup("cosyvoice3-tts", e));
 }
 
+// The CLI / kaggle benchmark pass the short `--backend cosyvoice3` alias to
+// `-m auto`; the registry must resolve it to the canonical `cosyvoice3-tts`
+// entry via the `-tts`-suffix fallback (else `-m auto` fails instantly with
+// "no default model registered" — full-backend-sweep cosyvoice3 FAIL).
+TEST_CASE("registry: cosyvoice3 short alias resolves via -tts fallback", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("cosyvoice3", e));
+    REQUIRE(e.filename == "cosyvoice3-llm-q4_k.gguf");
+}
+
 TEST_CASE("registry: dia has entry", "[unit][registry]") {
     CrispasrRegistryEntry e;
     REQUIRE(crispasr_registry_lookup("dia", e));
