@@ -5490,7 +5490,7 @@ backends at long output sequences.
 
 #### §176d BLAS/ggml for scalar CPU matmul hotpaths
 
-**Status:** PARTIAL — TitaNet ASP DONE, Silero LID DONE, FireRed VAD DONE (§193), Parakeet DONE (§194), Nemotron DONE (`325432f6`), MeloTTS weight cache DONE (§195), OpenVoice2 WaveNet DONE (`5e7d8704`)
+**Status:** PARTIAL — TitaNet ASP DONE, Silero LID DONE, FireRed VAD DONE (§193), Parakeet DONE (§194), Nemotron DONE (`325432f6`), MeloTTS weight cache DONE (§195), OpenVoice2 WaveNet DONE (`5e7d8704`), Granite Speech cpu_linear DONE (`eaa6dff2`), Piper weight cache DONE (§196)
 **Effort:** Medium-Large (per-backend refactor)
 **Targets (ordered by compute dominance):**
 - TitaNet ASP TDNN: DONE — cblas_sgemm under HAVE_ACCELERATE (prior)
@@ -5688,14 +5688,13 @@ alloc per beam expansion step.
 
 #### §176s Encoder graph caching by shape
 
-**Status:** MOSTLY DONE — 11 backends cached.
+**Status:** MOSTLY DONE — 15 backends cached.
 **Effort:** Small-Medium
 **Backends done:** SenseVoice, Paraformer, FunASR, Nemotron, Canary,
-Canary-CTC, Moonshine, Moonshine-Streaming (`b0e6667b`), Parakeet,
-Qwen3-ASR, GLM-ASR.
+Canary-CTC, Moonshine, Moonshine-Streaming, Parakeet, Qwen3-ASR,
+GLM-ASR, Voxtral, Voxtral4B, MOSS Audio, Granite Speech.
 **Remaining:** OmniASR (encoder+decoder fused in one graph — needs
-refactor to split), MOSS Audio / Voxtral / Voxtral4B / Granite Speech /
-Kyutai STT (all >1.5 GB models, GPU-only benefit).
+refactor to split), Kyutai STT (Mimi encoder built inline).
 **Approach:** Metadata-swap technique: swap `compute_meta` with a
 persistent `cached_enc_meta` before calling the graph builder, swap
 back after. The cached graph arena persists across calls. Invalidate
