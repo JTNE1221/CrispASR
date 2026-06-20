@@ -9356,3 +9356,22 @@ the same input shape. Only OmniASR remains (fused encoder+decoder).
 **§176d Granite Speech cpu_linear** (`eaa6dff2`):
 - Replace scalar triple-nested matmul with cblas_sgemm (Accelerate on
   Apple). Also adds proper per-row dequantization for quantized weights.
+
+## 2026-06-20 §176 round 4 — final mechanical optimizations (Claude Opus session)
+
+**§176s Kyutai STT** (`85a55451`): Mimi encoder (SEANet + transformer +
+downsample + RVQ projection) graph cached by n_samples. 16 of 17 ASR
+encoder backends now cache their graph. Only OmniASR remains (fused
+encoder+decoder — needs function extraction to split).
+
+**§176d Granite Speech** (`eaa6dff2`): cpu_linear scalar matmul replaced
+with cblas_sgemm (Accelerate). Also adds proper per-row dequantization
+for quantized weights via ggml_get_type_traits()->to_float.
+
+**Paraformer debug fprintf** (`f834fc37`): 6 unconditional fprintf(stderr)
+in the transcribe hot path gated behind ctx->verbosity. Eliminates I/O
+overhead on every call.
+
+**Session totals across all 4 rounds:** 19 commits, covering §176
+b/d/e/f/j/m/o/p/q/r/s/t across 45+ backends. 15 of 20 sub-items now
+DONE or MOSTLY DONE.
