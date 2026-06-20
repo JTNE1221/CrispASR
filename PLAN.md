@@ -673,6 +673,35 @@ None of these affect correctness — they're pure throughput pickings.
 
 ---
 
+## §187 Cross-runtime embed fast path sweep (MOSTLY DONE)
+
+Single-token embed fast path for all LLM-based AR decode runtimes.
+Same pattern as funasr §180 item #4: per-step `embed_tokens({next_id})`
+called in the decode loop; fast path dequants one row directly from the
+token embedding weight, skipping graph-build + sched overhead.
+
+| Backend | Env var | Status |
+|---------|---------|--------|
+| funasr | `CRISPASR_FUNASR_EMBED_FAST` | **DONE** §180 |
+| glm_asr | `CRISPASR_GLM_ASR_EMBED_FAST` | **DONE** §187 |
+| moss_audio | `CRISPASR_MOSS_AUDIO_EMBED_FAST` | **DONE** §187 |
+| qwen3_asr | `CRISPASR_QWEN3_ASR_EMBED_FAST` | **DONE** §187 |
+| gemma4_e2b | `CRISPASR_GEMMA4_E2B_EMBED_FAST` | **DONE** §187 (+ sqrt(d) scale) |
+| outetts | — | Already had n==1 fast path at port time |
+| orpheus | — | Already had n==1 fast path at port time |
+| lfm2_audio | — | Already does direct row reads (no graph) |
+| mini_omni2 | — | N/A — never calls embed with n=1 |
+| granite_speech | — | OPEN (model too large for VPS bench) |
+
+### Other perf candidates from bench data
+
+1. **Deepen shallow bench stages.** vibevoice, wav2vec2-ggml, m2m100,
+   t5_translate only have `_total` stages — add finer-grained stages.
+2. **§175 DRY: `src/core/lang_names.h`** — 4 copies → 1 header.
+3. **Encoder graph cache by bucket** — funasr, sensevoice, qwen3_asr.
+
+---
+
 ## CosyVoice3-0.5B-2512 TTS — DONE
 
 Phases 1–5 → HISTORY. **Phase 6** (native arbitrary-WAV cloning:

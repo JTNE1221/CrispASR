@@ -6,6 +6,25 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-20 §187 Embed fast path — 4 more LLM-ASR backends
+
+Extended the funasr single-token embed fast path (§180) to glm_asr,
+moss_audio, qwen3_asr, and gemma4_e2b. Same pattern: AR decode calls
+`embed_tokens({next_id})` per step; fast path dequants one row directly
+from the token embedding weight tensor, skipping graph-build + sched-alloc.
+
+Each gated by `CRISPASR_XXX_EMBED_FAST` (default ON, `=0` to disable).
+gemma4_e2b additionally applies the Gemma `sqrt(hidden_size)` embedding
+scale in the fast path. Transcripts byte-identical on JFK for glm_asr
+(Q4_K 1.3 GB) and qwen3_asr (F16 1.8 GB).
+
+Backends surveyed but already optimized: outetts, orpheus (n==1 fast path
+at port time), lfm2_audio (direct row reads, no graph). mini_omni2 never
+calls embed with n=1 (always batch=8). moss_audio and gemma4_e2b models
+too large for VPS A/B bench (3.9 GB / no Q4_K) but pattern is mechanical.
+
+---
+
 ## 2026-06-20 §186 Chatterbox T3 Lk-bucketed graph caching
 
 Pre-build T3 AR-decode graphs once per KV-bucket {512,1024,2048,4096} and reuse
