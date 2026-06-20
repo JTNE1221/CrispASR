@@ -162,6 +162,12 @@ struct sensevoice_context {
 
     int beam_size = 1;       // CTC beam search (1 = greedy)
     float beam_gamma = 0.0f; // gamma-threshold pruning (0 = off)
+
+    // §176s: cached encoder graph — reused when T_lfr matches previous call.
+    ggml_cgraph* cached_gf = nullptr;
+    ggml_context* cached_gf_ctx = nullptr;
+    std::vector<uint8_t> cached_gf_meta;
+    int cached_gf_T_lfr = 0;
 };
 
 // ===========================================================================
@@ -318,7 +324,8 @@ static ggml_tensor* maybe_snap(ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor*
     return t;
 }
 
-static ggml_cgraph* sensevoice_build_graph(sensevoice_context* ctx, int T_lfr, int T_total) {
+static ggml_cgraph* sensevoice_build_graph(sensevoice_context* ctx, int T_lfr, int T_total,
+                                           ggml_context* arena_ctx = nullptr) {
     // T_total = T_lfr + 4 (the four prepended query embeds).
     const auto& hp = ctx->model.hparams;
     const int D_in = (int)hp.input_size;
@@ -329,7 +336,7 @@ static ggml_cgraph* sensevoice_build_graph(sensevoice_context* ctx, int T_lfr, i
     const int hd = (int)hp.head_dim;
 
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(ip);
+    ggml_context* ctx0 = arena_ctx ? arena_ctx : ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
     // Inputs:
@@ -405,7 +412,8 @@ static ggml_cgraph* sensevoice_build_graph(sensevoice_context* ctx, int T_lfr, i
     ggml_build_forward_expand(gf, logits);
 
     (void)vocab;
-    ggml_free(ctx0);
+    if (!arena_ctx)
+        ggml_free(ctx0);
     return gf;
 }
 
@@ -566,7 +574,27 @@ static std::string sensevoice_transcribe_impl(sensevoice_context* ctx, const flo
     std::vector<float> logits;
     {
         sensevoice_bench_stage s("encoder+ctc");
-        ggml_cgraph* gf = sensevoice_build_graph(ctx, T_lfr, T_total);
+
+        // §176s: reuse cached graph when T_lfr matches previous call.
+        ggml_cgraph* gf;
+        if (ctx->cached_gf && ctx->cached_gf_T_lfr == T_lfr) {
+            gf = ctx->cached_gf;
+        } else {
+            if (ctx->cached_gf_ctx) {
+                ggml_free(ctx->cached_gf_ctx);
+                ctx->cached_gf_ctx = nullptr;
+                ctx->cached_gf = nullptr;
+            }
+            // Allocate a separate arena for the cached graph so it
+            // survives across calls (compute_meta is shared).
+            ctx->cached_gf_meta.assign(ctx->compute_meta.size(), 0);
+            ggml_init_params ip = {ctx->cached_gf_meta.size(), ctx->cached_gf_meta.data(), true};
+            ctx->cached_gf_ctx = ggml_init(ip);
+            gf = sensevoice_build_graph(ctx, T_lfr, T_total, ctx->cached_gf_ctx);
+            ctx->cached_gf = gf;
+            ctx->cached_gf_T_lfr = T_lfr;
+        }
+
         ggml_backend_sched_reset(ctx->sched);
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             std::fprintf(stderr, "sensevoice: failed to alloc encoder graph\n");
@@ -696,6 +724,9 @@ extern "C" void sensevoice_set_beam_size(sensevoice_context* ctx, int beam_size,
 extern "C" void sensevoice_free(sensevoice_context* ctx) {
     if (!ctx)
         return;
+    // §176s: free cached graph arena.
+    if (ctx->cached_gf_ctx)
+        ggml_free(ctx->cached_gf_ctx);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->model.buf)
