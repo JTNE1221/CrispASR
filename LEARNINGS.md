@@ -10262,3 +10262,69 @@ AR decode in LLM-ASR backends (funasr, glm_asr, etc.) called
 single GET_ROWS. Fix: n==1 fast path dequants one row directly. Gated
 by `CRISPASR_XXX_EMBED_FAST`. Lesson: not every ggml op needs a graph —
 single-row lookups are cheaper as direct tensor reads.
+
+## §176 runtime optimization audit methodology (2026-06-20)
+
+### Full code-read survey beats pattern-grep
+
+Dispatching 9 parallel research agents to read every runtime file
+(65+ backends) line-by-line found optimizations that pattern-grep would
+have missed: host-side KV caches masquerading as "caches" but actually
+re-uploading every step (SpeechT5, Dia, Parler), scalar LSTM loops that
+should be BLAS (Parakeet, Nemotron), unconditional debug fprintf in hot
+paths (Paraformer), and recursive FFT with O(N log N) heap allocs
+(core/fft.h). The audit produced 20 actionable items, 15 of which were
+completed in one session.
+
+### Mechanical optimization patterns that scale
+
+Four patterns covered 90% of the work:
+
+1. **arena_ctx pattern for encoder graph caching**: add `arena_ctx`
+   param to `build_graph_*`, cache the ggml_context + cgraph on the
+   runtime context struct, key by the input shape (T_mel, n_samples,
+   etc.). Applied to 16 backends in ~15 min each. The key insight: ggml
+   tensor descriptors survive `ggml_free(ctx0)` if backed by
+   `compute_meta`; for caching, use a **separate** meta buffer so
+   compute_meta stays available for other graphs.
+
+2. **Lk-bucketed AR decode graph cache**: pre-build T=1 decode graphs
+   at fixed KV lengths {512,1024,2048,4096}; pick the smallest bucket
+   >= n_past+1; use `kv_indices=positions` to make KV write position a
+   runtime input. Applied to 8 backends (Orpheus, OuteTTS, Zonos, TADA,
+   Chatterbox, CosyVoice3, VibeVoice, Qwen3-TTS).
+
+3. **Static context cache with mutex**: for support runtimes called
+   per-segment (VAD, LID, aligner, diarization), cache the loaded
+   context in a `static std::mutex + void* + std::string path` triple.
+   Same pattern as Silero VAD #132 fix.
+
+4. **thread_local scratch buffers**: for per-call heap allocs in shared
+   hot paths (FFT scratch, greedy decode probs vector, kaldi_fbank
+   frame buffer). `thread_local static` + lazy resize eliminates the
+   malloc/free per call.
+
+### Backends with host-side KV resist bucketing
+
+SpeechT5, Dia, Parler, Pocket-TTS, VoxCPM2 all use
+`std::vector<float>` KV caches that grow and re-upload every step.
+Bucket caching doesn't help because the KV data size changes every
+step regardless of graph topology. These need the §176c migration
+(device-resident 4D KV with ggml_view_4d + ggml_cpy writes) before
+bucketing is effective.
+
+### Embedding table size gates CPU cache feasibility
+
+Orpheus (vocab 157K × d 4096 = 2.4 GB), TADA (128K × 3072 = 1.5 GB),
+and OuteTTS (57K × 2048 = 449 MB) are too large for a full F32 CPU
+embedding cache on 8 GB machines. The n==1 direct-dequant fast path
+(§176o) is the right approach for large vocabs — one row at a time,
+no full table copy.
+
+### RNNoise/resampler caching isn't worth breaking thread safety
+
+The miniaudio resamplers and RNNoise DenoiseState are per-call by
+design (the code comment says "multiple worker isolates can run
+concurrently"). The init/free overhead is ~microseconds (small
+malloc). Caching them as statics would break concurrent server use
+for negligible gain.
