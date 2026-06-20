@@ -129,6 +129,12 @@ struct paraformer_context {
     int verbosity = 0;
     std::vector<std::string> vocab; // token strings
     std::vector<char> compute_meta;
+
+    // §176s: cached encoder graph — reused when T_lfr matches.
+    ggml_cgraph* cached_enc_gf = nullptr;
+    ggml_context* cached_enc_ctx = nullptr;
+    std::vector<char> cached_enc_meta;
+    int cached_enc_T_lfr = 0;
 };
 
 // ===========================================================================
@@ -564,68 +570,100 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
         return "";
 
     // 2. Build and run encoder graph
+    // §176s: reuse cached encoder graph when T_lfr matches (skip graph build).
+    // Only for normal inference (stage==null); diff-harness calls rebuild.
+    ggml_context* ctx0 = nullptr;
+    ggml_cgraph* gf = nullptr;
+    ggml_tensor* cur = nullptr;
     const size_t meta_sz = 256 * 1024 * 1024; // 256 MB compute buffer
     if (ctx->compute_meta.empty())
         ctx->compute_meta.resize(meta_sz);
 
     ggml_init_params ip = {meta_sz, ctx->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(ip);
-    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
 
-    // Input tensor
-    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, D_lfr_actual, T_lfr);
-    ggml_set_name(inp, "features");
-    ggml_set_input(inp);
-
-    ggml_tensor* cur = inp;
-
-    // Encoder: entry block(s)
-    int enc_layer_idx = 0;
-    for (uint32_t i = 0; i < hp.n_enc_blocks0; i++) {
-        core_sanm::BlockParams p;
-        p.in_size = (i == 0) ? D_lfr_actual : D;
-        p.size = D;
-        p.n_heads = (int)hp.n_heads;
-        p.head_dim = D / (int)hp.n_heads;
-        p.kernel = (int)hp.sanm_kernel;
-        p.ln_eps = hp.ln_eps;
-        p.flash_attn = ctx->flash_attn;
-        cur = core_sanm::build_block(ctx0, cur, T_lfr, ctx->model.enc0[i], p, /*apply_attn_residual=*/false);
-        if (stage) {
-            char nm[64];
-            std::snprintf(nm, sizeof(nm), "encoder_layer_%d", enc_layer_idx);
-            ggml_set_name(cur, nm);
-            ggml_set_output(cur);
+    const bool can_cache = (stage == nullptr);
+    if (can_cache && ctx->cached_enc_gf && ctx->cached_enc_T_lfr == T_lfr) {
+        // Reuse cached graph — same topology, just new input data.
+        gf = ctx->cached_enc_gf;
+    } else {
+        // Free previous cache if any.
+        if (ctx->cached_enc_ctx) {
+            ggml_free(ctx->cached_enc_ctx);
+            ctx->cached_enc_ctx = nullptr;
+            ctx->cached_enc_gf = nullptr;
         }
-        enc_layer_idx++;
-    }
 
-    // Encoder: main blocks
-    for (uint32_t i = 0; i < hp.n_enc_blocks; i++) {
-        core_sanm::BlockParams p;
-        p.in_size = D;
-        p.size = D;
-        p.n_heads = (int)hp.n_heads;
-        p.head_dim = D / (int)hp.n_heads;
-        p.kernel = (int)hp.sanm_kernel;
-        p.ln_eps = hp.ln_eps;
-        p.flash_attn = ctx->flash_attn;
-        cur = core_sanm::build_block(ctx0, cur, T_lfr, ctx->model.enc[i], p, /*apply_attn_residual=*/true);
-        if (stage) {
-            char nm[64];
-            std::snprintf(nm, sizeof(nm), "encoder_layer_%d", enc_layer_idx);
-            ggml_set_name(cur, nm);
-            ggml_set_output(cur);
+        // Build graph in a dedicated arena (survives across calls).
+        if (can_cache) {
+            ctx->cached_enc_meta.assign(meta_sz, 0);
+            ggml_init_params cache_ip = {meta_sz, ctx->cached_enc_meta.data(), true};
+            ctx0 = ggml_init(cache_ip);
+        } else {
+            ctx0 = ggml_init(ip);
         }
-        enc_layer_idx++;
-    }
+        gf = ggml_new_graph_custom(ctx0, 32768, false);
 
-    // Encoder: after_norm
-    cur = ggml_norm_affine(ctx0, cur, ctx->model.enc_after_norm_w, ctx->model.enc_after_norm_b, hp.ln_eps);
-    // Mark the output so the allocator doesn't reuse the buffer.
-    ggml_set_name(cur, "encoder_output");
-    ggml_set_output(cur);
-    ggml_build_forward_expand(gf, cur);
+        // Input tensor
+        ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, D_lfr_actual, T_lfr);
+        ggml_set_name(inp, "features");
+        ggml_set_input(inp);
+
+        ggml_tensor* cur = inp;
+
+        // Encoder: entry block(s)
+        int enc_layer_idx = 0;
+        for (uint32_t i = 0; i < hp.n_enc_blocks0; i++) {
+            core_sanm::BlockParams p;
+            p.in_size = (i == 0) ? D_lfr_actual : D;
+            p.size = D;
+            p.n_heads = (int)hp.n_heads;
+            p.head_dim = D / (int)hp.n_heads;
+            p.kernel = (int)hp.sanm_kernel;
+            p.ln_eps = hp.ln_eps;
+            p.flash_attn = ctx->flash_attn;
+            cur = core_sanm::build_block(ctx0, cur, T_lfr, ctx->model.enc0[i], p, /*apply_attn_residual=*/false);
+            if (stage) {
+                char nm[64];
+                std::snprintf(nm, sizeof(nm), "encoder_layer_%d", enc_layer_idx);
+                ggml_set_name(cur, nm);
+                ggml_set_output(cur);
+            }
+            enc_layer_idx++;
+        }
+
+        // Encoder: main blocks
+        for (uint32_t i = 0; i < hp.n_enc_blocks; i++) {
+            core_sanm::BlockParams p;
+            p.in_size = D;
+            p.size = D;
+            p.n_heads = (int)hp.n_heads;
+            p.head_dim = D / (int)hp.n_heads;
+            p.kernel = (int)hp.sanm_kernel;
+            p.ln_eps = hp.ln_eps;
+            p.flash_attn = ctx->flash_attn;
+            cur = core_sanm::build_block(ctx0, cur, T_lfr, ctx->model.enc[i], p, /*apply_attn_residual=*/true);
+            if (stage) {
+                char nm[64];
+                std::snprintf(nm, sizeof(nm), "encoder_layer_%d", enc_layer_idx);
+                ggml_set_name(cur, nm);
+                ggml_set_output(cur);
+            }
+            enc_layer_idx++;
+        }
+
+        // Encoder: after_norm
+        cur = ggml_norm_affine(ctx0, cur, ctx->model.enc_after_norm_w, ctx->model.enc_after_norm_b, hp.ln_eps);
+        ggml_set_name(cur, "encoder_output");
+        ggml_set_output(cur);
+        ggml_build_forward_expand(gf, cur);
+
+        if (can_cache) {
+            ctx->cached_enc_ctx = ctx0;
+            ctx->cached_enc_gf = gf;
+            ctx->cached_enc_T_lfr = T_lfr;
+            ctx0 = nullptr; // don't free — owned by cache
+        }
+    }
 
     // Allocate and run encoder
     if (!paraformer_ensure_sched(ctx)) {
@@ -639,12 +677,14 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
         return "";
     }
     {
+        ggml_tensor* inp = ggml_graph_get_tensor(gf, "features");
         const size_t inp_bytes = ggml_nbytes(inp);
         const size_t lfr_bytes = lfr.size() * sizeof(float);
         if (lfr_bytes > inp_bytes) {
             fprintf(stderr, "paraformer: input tensor too small: %zu bytes vs %zu lfr bytes (T=%d, D=%d)\n", inp_bytes,
                     lfr_bytes, T_lfr, D_lfr_actual);
-            ggml_free(ctx0);
+            if (ctx0)
+                ggml_free(ctx0);
             return "";
         }
         fprintf(stderr, "paraformer: encoder input OK: T_lfr=%d, D_lfr=%d, bytes=%zu\n", T_lfr, D_lfr_actual,
@@ -707,7 +747,8 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
         }
     }
 
-    ggml_free(ctx0);
+    if (ctx0)
+        ggml_free(ctx0);
 
     // 3. CIF predictor (CPU)
     // enc_out flat storage: ggml tensor ne=(D, T_lfr), element (d,t) at
@@ -923,6 +964,8 @@ paraformer_context* paraformer_init_from_file(const char* path, paraformer_conte
 void paraformer_free(paraformer_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->cached_enc_ctx)
+        ggml_free(ctx->cached_enc_ctx);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     core_gguf::free_weights(ctx->wl);
