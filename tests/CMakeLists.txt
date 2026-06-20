@@ -614,6 +614,41 @@ catch_discover_tests(test-chatterbox-params
     PROPERTIES LABELS "unit;chatterbox"
 )
 
+# ─── test-firered-params — Catch2 unit tests for firered_asr_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-firered-params
+    test-firered-params.cpp
+)
+target_include_directories(test-firered-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-firered-params PRIVATE
+    Catch2::Catch2WithMain
+    firered-asr
+)
+catch_discover_tests(test-firered-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;firered"
+)
+
+# ─── test-cosyvoice3-params — Catch2 unit tests for cosyvoice3_tts_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-cosyvoice3-params
+    test-cosyvoice3-params.cpp
+)
+target_include_directories(test-cosyvoice3-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-cosyvoice3-params PRIVATE
+    Catch2::Catch2WithMain
+    cosyvoice3_tts
+    chatterbox
+)
+catch_discover_tests(test-cosyvoice3-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;cosyvoice3"
+)
+
 # ─── test-funasr-params — Catch2 unit tests for funasr_context_params defaults
 # and null-guard coverage. No GGUF required. ───────────────────────────────────
 add_executable(test-funasr-params
