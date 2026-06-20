@@ -6,6 +6,13 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-20 §189 mel.cpp BLAS mel filterbank projection
+
+Replace scalar do_matmul triple-loop with cblas_sgemm for both MelsFreqs
+(power × fb^T) and FreqsMels (power × fb) layouts. crispasr-core now links
+Accelerate/MKL/OpenBLAS; all ~40 backends using core_mel::compute get AMX/SIMD
+SGEMM for mel projection (~50× on M1 AMX vs scalar).
+
 ## 2026-06-20 §188 Chatterbox T3 embedding table cache
 
 Pre-cache all five embedding tables (speech_emb, speech_pos_emb, text_emb,

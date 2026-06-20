@@ -432,6 +432,25 @@ if(NOT MSVC)
 endif()
 set_target_properties(crispasr-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# §176f: BLAS for mel filterbank SGEMM (cblas_sgemm) — affects all 40+ backends.
+if(APPLE)
+    find_library(ACCELERATE_LIB Accelerate REQUIRED)
+    target_link_libraries     (crispasr-core PRIVATE ${ACCELERATE_LIB})
+    target_compile_definitions(crispasr-core PRIVATE HAVE_BLAS ACCELERATE_NEW_LAPACK)
+elseif(NOT MSVC)
+    find_package(BLAS QUIET)
+    if(BLAS_FOUND)
+        target_link_libraries     (crispasr-core PRIVATE ${BLAS_LIBRARIES})
+        target_compile_definitions(crispasr-core PRIVATE HAVE_BLAS)
+    else()
+        find_library(OPENBLAS_LIB openblas QUIET)
+        if(OPENBLAS_LIB)
+            target_link_libraries     (crispasr-core PRIVATE ${OPENBLAS_LIB})
+            target_compile_definitions(crispasr-core PRIVATE HAVE_BLAS)
+        endif()
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # snac — Standalone SNAC 24 kHz codec decoder (shared by orpheus, mini-omni2)
 # ---------------------------------------------------------------------------

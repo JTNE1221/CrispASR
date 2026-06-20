@@ -8,6 +8,14 @@
 #include <cstring>
 #include <vector>
 
+#if defined(HAVE_BLAS)
+#if defined(__APPLE__)
+#include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
 namespace core_mel {
 
 std::vector<float> compute(const float* samples, int n_samples, const float* window_in, int win_length,
@@ -136,7 +144,6 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
                         s += static_cast<Acc>(pp[k]) * static_cast<Acc>(fb[k]);
                     }
                 } else {
-                    // FreqsMels: fb[k * nmels + m]
                     for (int k = 0; k < n_freqs; k++) {
                         s += static_cast<Acc>(pp[k]) * static_cast<Acc>(mel_fb[(size_t)k * nmels + m]);
                     }
@@ -145,10 +152,24 @@ std::vector<float> compute(const float* samples, int n_samples, const float* win
             }
         }
     };
-    if (p.matmul == MatmulPrecision::Double)
+    if (p.matmul == MatmulPrecision::Double) {
         do_matmul(double{0});
-    else
+    } else {
+#if defined(HAVE_BLAS)
+        if (p.fb_layout == FbLayout::MelsFreqs) {
+            // mel[T, nmels] = power[T, n_freqs] × mel_fb^T[n_freqs, nmels]
+            // mel_fb is row-major (nmels, n_freqs); CblasTrans transposes for the multiply.
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, T, nmels, n_freqs, 1.0f, power.data(), n_freqs, mel_fb,
+                        n_freqs, 0.0f, mel_tn.data(), nmels);
+        } else {
+            // FreqsMels: mel_fb is (n_freqs, nmels); mel = power × mel_fb (no transpose).
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, T, nmels, n_freqs, 1.0f, power.data(), n_freqs,
+                        mel_fb, nmels, 0.0f, mel_tn.data(), nmels);
+        }
+#else
         do_matmul(float{0.0f});
+#endif
+    }
 
     // -----------------------------------------------------------------
     // 5. log with guard (no-op when log_base == None)

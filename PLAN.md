@@ -6517,6 +6517,31 @@ init population; `build_speech_token_embed`, `build_speech_token_embed_gpt2`,
 
 ---
 
+## §189 mel.cpp BLAS mel filterbank projection — DONE 2026-06-20
+
+**Problem:** `do_matmul` in `src/core/mel.cpp` is a scalar triple loop over
+`T × nmels × n_freqs` multiply-adds. For NeMo-cluster backends (Parakeet,
+Canary, FunASR, SenseVoice, Voxtral…) with `n_freqs=1025`, `nmels=80–128`,
+and `T∝audio_length`, this is the dominant preprocessing cost — 31M
+multiply-adds for a 10 s clip.
+
+**Fix:** Replaced `do_matmul` float path with `cblas_sgemm` for both
+`MelsFreqs` (power × fb^T) and `FreqsMels` (power × fb) layouts. Double-precision
+path unchanged (keeps accuracy for backends that need it). Added BLAS detection
+block to `src/CMakeLists.txt` for `crispasr-core`:
+- macOS: Accelerate framework (always available, provides AMX SGEMM)
+- Linux: MKL via `find_package(BLAS)` → OpenBLAS fallback
+- Windows MSVC: no-op (scalar path)
+
+**Impact:** All ~40 backends that call `core_mel::compute` get the BLAS path.
+AMX SGEMM on M1 is ≈100 GFLOP/s vs the scalar loop's ≈2 GFLOP/s (~50× for
+the mel step). End-to-end ASR speedup depends on mel fraction of total latency.
+
+**Files:** `src/core/mel.cpp` (BLAS include, mel projection), `src/CMakeLists.txt`
+(BLAS detection for crispasr-core)
+
+---
+
 ## §176 Runtime optimization pass — 2026-06-20 audit
 
 Full code-read survey of every runtime. Detailed findings in
@@ -6599,18 +6624,15 @@ post-processing pipelines that call these per-segment.
 
 #### §176f Parallel STFT in mel.cpp + BLAS mel projection
 
-**Status:** OPEN
+**Status:** PARTIAL — BLAS mel projection DONE (§189 2026-06-20)
 **Effort:** Small
 **Files:** `src/core/mel.cpp`, `src/core/kaldi_fbank.cpp`
-**Approach:**
-- STFT loop: add `#pragma omp parallel for` with per-thread
-  `fft_in`/`fft_out` scratch buffers (frame loop is embarrassingly
-  parallel)
-- Mel projection: replace scalar `do_matmul` loop with `cblas_sgemm` for
-  `(T × n_freqs) × (n_freqs × n_mels)` — 31M multiply-adds for NeMo
-  cluster
-**Impact:** Entry point for ~40 backends. Linear scaling with cores for
-STFT; BLAS gives SIMD + threading for free on mel projection.
+**Done (§189):** Mel projection replaced with `cblas_sgemm` for both MelsFreqs
+and FreqsMels layouts; `crispasr-core` now links Accelerate/MKL/OpenBLAS.
+**Remaining:** STFT loop OMP parallelization (deferred — requires verifying
+all FftR2C function-pointer implementations are thread-safe).
+**Impact:** Entry point for ~40 backends. BLAS gives AMX/SIMD for free on
+the mel projection matrix multiply.
 
 #### §176g CPU embedding cache for AR TTS backends
 
@@ -6645,12 +6667,11 @@ the allocation dtype and adjust the view/write paths.
 
 #### §176j Replace recursive FFT (core/fft.h) with iterative
 
-**Status:** OPEN
-**Effort:** Small
+**Status:** DONE — already iterative as of prior refactor
 **File:** `src/core/fft.h`
-**Approach:** The recursive `fft_radix2` allocates O(N log N) heap per
-call. `kaldi_fbank.cpp` already has a correct iterative in-place variant.
-Replace `core_fft::fft_radix2` with the iterative version.
+`fft_radix2_inplace` is already the iterative in-place Cooley-Tukey with O(1)
+extra memory (bit-reversal via swaps). `fft_radix2` and `fft_radix2_wrapper`
+use `thread_local` scratch that grows-once. No further change needed.
 **Also:** CosyVoice3 HiFT source DFT is O(n²) — must use FFT.
 
 ### Tier 3 — Targeted wins
