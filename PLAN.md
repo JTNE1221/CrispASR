@@ -5466,7 +5466,7 @@ context_params structs. Wire the flag through and default it ON.
 **Effort:** Medium (template from qwen3-tts)
 **Backends done:** Chatterbox T3 (§186), Orpheus (§190), OuteTTS, Zonos, TADA, CosyVoice3 (step_t1_gf), VibeVoice TTS LM (§201 2026-06-20).
 **Note:** VoxCPM2 TSLM already has Lk-buckets (`get_or_build_tslm_step_graph`). VibeVoice pred head already cached by n_frames (`get_pred_head_graph`). Both can be removed from remaining.
-**Remaining:** Parler (9 codebooks), SpeechT5, Dia, Pocket-TTS,
+**Remaining:** Parler (9 codebooks), SpeechT5 (self-attn only; §202 handled cross-attn), Dia, Pocket-TTS,
 LFM2 (VAE), KugelAudio (VAE + pred).
 **Approach:** Qwen3-TTS demonstrates with 5 pre-built graphs at fixed Lk
 sizes. MIMO has a simpler single-bucket `step_t1_gf`. FunASR has the
@@ -5479,7 +5479,7 @@ steps. Largest single latency win project-wide.
 
 **Status:** OPEN
 **Effort:** Medium per backend
-**Backends:** SpeechT5, Dia, Parler, Pocket-TTS, VoxCPM2 (all use
+**Backends:** SpeechT5 (cross-attn KV DONE §202; self-attn KV still host-side), Dia, Parler, Pocket-TTS, VoxCPM2 (all use
 `std::vector<float>` KV that grows and re-uploads every step)
 **Approach:** Follow IndexTTS/CSM pattern: 4D on-device tensor
 `[head_dim, max_ctx, n_heads, n_layers]` with `ggml_view_4d` +

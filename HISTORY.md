@@ -9319,3 +9319,23 @@ Applied the Chatterbox T3 §186 bucket-caching pattern:
 - Bucket graphs are invalidated when KV buffers are reallocated
   (max_ctx change between synthesis calls).
 All 4 vibevoice unit tests pass.
+
+## 2026-06-20 §202 SpeechT5 — cross-attention K/V pre-computation
+
+`run_decoder_step` in `speecht5_tts.cpp` recomputed cross-attention K/V
+projections (`W_k @ enc_hidden`, `W_v @ enc_hidden`) for all 6 decoder
+layers on every decoder step, despite `enc_hidden` being fixed for the
+entire utterance. With 6 layers × 2 projections × N steps = 12N redundant
+matmuls per synthesis call (≈2400 for a 200-step utterance).
+
+Added `precompute_cross_kv()`: runs a single ggml graph after the encoder
+pass, storing `cross_kv_k[l]` and `cross_kv_v[l]` as permanent device
+tensors (`ggml_backend_alloc_ctx_tensors` into `buf_cross_kv`). Decoder
+steps reference them directly — no per-step matmul, no `enc_hidden`
+host→device upload per step. Buffer is re-allocated only when `T_enc`
+changes between synthesis calls.
+
+Also eliminated per-step `make_sinusoidal_pe()` allocation (now pre-computed
+once to `max_steps+1` before the decode loop, sliced by pointer per step).
+
+All 5 speecht5-params unit tests pass.
