@@ -1262,6 +1262,93 @@ catch_discover_tests(test-t5translate-params
     PROPERTIES LABELS "unit;t5_translate"
 )
 
+# ─── test-gemma4e2b-params — Catch2 unit tests for gemma4_e2b_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-gemma4e2b-params
+    test-gemma4e2b-params.cpp
+)
+target_include_directories(test-gemma4e2b-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-gemma4e2b-params PRIVATE
+    Catch2::Catch2WithMain
+    gemma4_e2b
+    crispasr-core
+)
+catch_discover_tests(test-gemma4e2b-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;gemma4_e2b"
+)
+
+# ─── test-granitenle-params — Catch2 unit tests for granite_nle_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-granitenle-params
+    test-granitenle-params.cpp
+)
+target_include_directories(test-granitenle-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-granitenle-params PRIVATE
+    Catch2::Catch2WithMain
+    granite_nle
+)
+catch_discover_tests(test-granitenle-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;granite_nle"
+)
+
+# ─── test-orpheussnac-params — Catch2 unit tests for snac_decoder_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-orpheussnac-params
+    test-orpheussnac-params.cpp
+)
+target_include_directories(test-orpheussnac-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-orpheussnac-params PRIVATE
+    Catch2::Catch2WithMain
+    snac
+    crispasr-core
+)
+catch_discover_tests(test-orpheussnac-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;orpheus_snac"
+)
+
+# ─── test-voxtral-params — Catch2 unit tests for voxtral_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-voxtral-params
+    test-voxtral-params.cpp
+)
+target_include_directories(test-voxtral-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-voxtral-params PRIVATE
+    Catch2::Catch2WithMain
+    voxtral
+)
+catch_discover_tests(test-voxtral-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;voxtral"
+)
+
+# ─── test-voxtral4b-params — Catch2 unit tests for voxtral4b_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-voxtral4b-params
+    test-voxtral4b-params.cpp
+)
+target_include_directories(test-voxtral4b-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-voxtral4b-params PRIVATE
+    Catch2::Catch2WithMain
+    voxtral4b
+)
+catch_discover_tests(test-voxtral4b-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;voxtral4b"
+)
+
 # ─── test-qwen3-tts-cv-style — Catch2 unit tests for qwen3_tts_set_cv_style_instruct
 # (issue #91: --instruct silently ignored for CustomVoice models).
 # Exercises null-ctx guards and default-params sanity — no GGUF needed. ─────
