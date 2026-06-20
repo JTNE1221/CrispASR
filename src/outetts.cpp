@@ -427,12 +427,11 @@ static ggml_cgraph* build_graph_talker_kv(outetts_context* c, int n_past, int n_
         ggml_tensor* x = ggml_norm(ctx0, cur, eps);
 
         // Self-attention with KV cache
-        ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w,
-                                                    nullptr, nullptr, positions,
-                                                    (T == 1 && !fixed_kv_len) ? nullptr : causal_mask, c->kv_k, c->kv_v,
-                                                    (int)il, n_past, kvp,
-                                                    /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv_len,
-                                                    /*kv_indices=*/eff_kv_indices);
+        ggml_tensor* attn = core_attn::kv_self_attn(
+            ctx0, gf, x, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_output_w, nullptr, nullptr, positions,
+            (T == 1 && !fixed_kv_len) ? nullptr : causal_mask, c->kv_k, c->kv_v, (int)il, n_past, kvp,
+            /*qkv_w=*/nullptr, /*fixed_kv_len=*/fixed_kv_len,
+            /*kv_indices=*/eff_kv_indices);
         cur = ggml_add(ctx0, residual, attn);
 
         // FFN
@@ -559,7 +558,8 @@ static float* run_talker_kv_bucket(outetts_context* c, const float* embeds, int 
     const ggml_fp16_t ninf_h = ggml_fp32_to_fp16(-INFINITY);
     for (int k = 0; k < Lk; k++)
         mask[k] = (k <= n_past) ? zero_h : ninf_h;
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                            mask.size() * sizeof(ggml_fp16_t));
 
     if (ggml_backend_sched_graph_compute(step_sched, gf) != GGML_STATUS_SUCCESS)
         return nullptr;
