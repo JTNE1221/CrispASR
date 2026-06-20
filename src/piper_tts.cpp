@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -46,6 +47,32 @@
 #include <random>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `PIPER_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool piper_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("PIPER_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct piper_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit piper_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~piper_tts_bench_stage() {
+        if (!piper_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  piper_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // espeak-ng phonemizer (shared with kokoro.cpp).
 // Three modes:
@@ -2257,6 +2284,8 @@ int piper_tts_synthesize_phonemes(struct piper_tts_context* ctx, const char* ipa
     if (!ctx || !ipa_phonemes || !pcm_out)
         return 0;
 
+    piper_tts_bench_stage _bs_synth("synthesize");
+
     // 1. Encode phonemes to IDs
     std::vector<int64_t> phoneme_ids = encode_phonemes(ipa_phonemes, ctx->pmap);
     int T = (int)phoneme_ids.size();
@@ -2268,7 +2297,10 @@ int piper_tts_synthesize_phonemes(struct piper_tts_context* ctx, const char* ipa
 
     // 2. Text encoder
     std::vector<float> enc_out, enc_mean, enc_logvar;
-    text_encoder_forward(ctx, phoneme_ids, enc_out, enc_mean, enc_logvar);
+    {
+        piper_tts_bench_stage _bs("text_encoder");
+        text_encoder_forward(ctx, phoneme_ids, enc_out, enc_mean, enc_logvar);
+    }
 
     int C = (int)ctx->hp.inter_channels;
 
@@ -2287,7 +2319,10 @@ int piper_tts_synthesize_phonemes(struct piper_tts_context* ctx, const char* ipa
 
     // 3. Duration prediction — SDP takes raw encoder output, not projected mean
     std::vector<float> log_dur;
-    sdp_forward(ctx, enc_out, T, ctx->noise_w, log_dur);
+    {
+        piper_tts_bench_stage _bs("duration_predict");
+        sdp_forward(ctx, enc_out, T, ctx->noise_w, log_dur);
+    }
 
     // Convert log-durations to integer durations
     std::vector<int> durations(T);
@@ -2332,13 +2367,19 @@ int piper_tts_synthesize_phonemes(struct piper_tts_context* ctx, const char* ipa
     dump_stage(ctx, "z_p", z.data(), z.size());
 
     // 6. Residual coupling flow (inverse)
-    flow_inverse(ctx, z, T_latent);
+    {
+        piper_tts_bench_stage _bs("flow_inverse");
+        flow_inverse(ctx, z, T_latent);
+    }
     dump_stage(ctx, "z_dec", z.data(), z.size());
 
     // 7. HiFi-GAN decode
     std::vector<float> pcm;
-    if (!hifigan_decode(ctx, z, T_latent, pcm)) {
-        return 0;
+    {
+        piper_tts_bench_stage _bs("hifigan_decode");
+        if (!hifigan_decode(ctx, z, T_latent, pcm)) {
+            return 0;
+        }
     }
     dump_stage(ctx, "audio", pcm.data(), pcm.size());
 

@@ -31,6 +31,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,32 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `LID_FASTTEXT_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool lid_fasttext_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("LID_FASTTEXT_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct lid_fasttext_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit lid_fasttext_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~lid_fasttext_bench_stage() {
+        if (!lid_fasttext_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  lid_fasttext_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 namespace {
 
@@ -566,6 +593,7 @@ extern "C" const char* lid_fasttext_predict(struct lid_fasttext_context* ctx, co
                                             float* confidence) {
     if (!ctx || !utf8_text)
         return nullptr;
+    lid_fasttext_bench_stage _bs_total("predict_total");
     int top1 = forward(ctx, std::string(utf8_text));
     if (top1 < 0)
         return nullptr;

@@ -20,6 +20,7 @@
 #include "core/gguf_loader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `SILERO_LID_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool silero_lid_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("SILERO_LID_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct silero_lid_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit silero_lid_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~silero_lid_bench_stage() {
+        if (!silero_lid_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  silero_lid_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model structures
@@ -429,6 +456,7 @@ extern "C" const char* silero_lid_detect(struct silero_lid_context* ctx, const f
                                          float* out_confidence) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
+    silero_lid_bench_stage _bs_total("detect_total");
     const auto& m = ctx->model;
 
     // ---- Front-end: learned Conv1d(1→322, k=320, stride=160) ----

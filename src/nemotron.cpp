@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,32 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `NEMOTRON_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool nemotron_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("NEMOTRON_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct nemotron_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit nemotron_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~nemotron_bench_stage() {
+        if (!nemotron_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  nemotron_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Hyper-parameters
@@ -2095,7 +2122,11 @@ static nemotron_result* nemotron_transcribe_impl(nemotron_context* ctx, const fl
 
     // Compute mel
     int T_mel = 0;
-    auto mel = nemotron_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    std::vector<float> mel;
+    {
+        nemotron_bench_stage _b("mel");
+        mel = nemotron_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    }
     if (mel.empty() || T_mel <= 0)
         return nullptr;
 
@@ -2104,82 +2135,86 @@ static nemotron_result* nemotron_transcribe_impl(nemotron_context* ctx, const fl
     std::vector<float> enc_out;
     int T_enc = 0, d_model = 0;
     const bool use_chunked = getenv("CRISPASR_NEMOTRON_STREAMING");
-    if (!use_chunked) {
-        if (!nemotron_run_encoder(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, enc_out, T_enc, d_model))
-            return nullptr;
-    } else {
-        // Cache-aware streaming encoder: pre-encode → chunked conformer layers.
-        // Step 1: run pre-encode only, step 2: chunked conformer with cache_last_channel.
-        fprintf(stderr, "nemotron: running streaming chunked encoder path\n");
-
-        // Build pre-encode-only graph
-        {
-            const auto& hp2 = ctx->model.hparams;
-            size_t meta_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(1024, false);
-            std::vector<uint8_t> meta(meta_size);
-            ggml_init_params ip = {meta_size, meta.data(), true};
-            ggml_context* ctx0 = ggml_init(ip);
-            ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 1024, false);
-
-            ggml_tensor* mel_t = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp2.n_mels, T_mel);
-            ggml_set_name(mel_t, "mel");
-            ggml_set_input(mel_t);
-
-            int T_pre = 0;
-            ggml_tensor* pre =
-                nemotron_build_pre_encode(ctx0, mel_t, ctx->model.pre_encode, (int)hp2.subsampling_channels, &T_pre);
-            ggml_set_name(pre, "pre_enc");
-            ggml_set_output(pre);
-            ggml_build_forward_expand(gf, pre);
-
-            if (!nemotron_ensure_sched(ctx)) {
-                ggml_free(ctx0);
+    {
+        nemotron_bench_stage _b("encoder");
+        if (!use_chunked) {
+            if (!nemotron_run_encoder(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, enc_out, T_enc, d_model))
                 return nullptr;
-            }
-            ggml_backend_sched_reset(ctx->sched);
-            if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-                fprintf(stderr, "nemotron: sched alloc pre-encode graph failed\n");
-                ggml_free(ctx0);
-                return nullptr;
-            }
+        } else {
+            // Cache-aware streaming encoder: pre-encode → chunked conformer layers.
+            // Step 1: run pre-encode only, step 2: chunked conformer with cache_last_channel.
+            fprintf(stderr, "nemotron: running streaming chunked encoder path\n");
 
-            ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel");
-            ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
-
-            if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-                fprintf(stderr, "nemotron: pre-encode compute failed\n");
-                ggml_free(ctx0);
-                return nullptr;
-            }
-
-            ggml_tensor* pre_out = ggml_graph_get_tensor(gf, "pre_enc");
-            T_enc = (int)pre_out->ne[1];
-            d_model = (int)pre_out->ne[0];
-            std::vector<float> pre_enc((size_t)T_enc * d_model);
-            ggml_backend_tensor_get(pre_out, pre_enc.data(), 0, pre_enc.size() * sizeof(float));
-
+            // Build pre-encode-only graph
             {
-                float pmin = 1e30f, pmax = -1e30f, psum = 0.0f;
-                for (size_t i = 0; i < pre_enc.size(); i++) {
-                    float v = pre_enc[i];
-                    if (v < pmin)
-                        pmin = v;
-                    if (v > pmax)
-                        pmax = v;
-                    psum += v;
+                const auto& hp2 = ctx->model.hparams;
+                size_t meta_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(1024, false);
+                std::vector<uint8_t> meta(meta_size);
+                ggml_init_params ip = {meta_size, meta.data(), true};
+                ggml_context* ctx0 = ggml_init(ip);
+                ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 1024, false);
+
+                ggml_tensor* mel_t = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, (int)hp2.n_mels, T_mel);
+                ggml_set_name(mel_t, "mel");
+                ggml_set_input(mel_t);
+
+                int T_pre = 0;
+                ggml_tensor* pre = nemotron_build_pre_encode(ctx0, mel_t, ctx->model.pre_encode,
+                                                             (int)hp2.subsampling_channels, &T_pre);
+                ggml_set_name(pre, "pre_enc");
+                ggml_set_output(pre);
+                ggml_build_forward_expand(gf, pre);
+
+                if (!nemotron_ensure_sched(ctx)) {
+                    ggml_free(ctx0);
+                    return nullptr;
                 }
-                fprintf(stderr, "nemotron: pre-encode T=%d d=%d min=%.2f max=%.2f mean=%.4f\n", T_enc, d_model, pmin,
-                        pmax, psum / (float)pre_enc.size());
+                ggml_backend_sched_reset(ctx->sched);
+                if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+                    fprintf(stderr, "nemotron: sched alloc pre-encode graph failed\n");
+                    ggml_free(ctx0);
+                    return nullptr;
+                }
+
+                ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel");
+                ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
+
+                if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+                    fprintf(stderr, "nemotron: pre-encode compute failed\n");
+                    ggml_free(ctx0);
+                    return nullptr;
+                }
+
+                ggml_tensor* pre_out = ggml_graph_get_tensor(gf, "pre_enc");
+                T_enc = (int)pre_out->ne[1];
+                d_model = (int)pre_out->ne[0];
+                std::vector<float> pre_enc((size_t)T_enc * d_model);
+                ggml_backend_tensor_get(pre_out, pre_enc.data(), 0, pre_enc.size() * sizeof(float));
+
+                {
+                    float pmin = 1e30f, pmax = -1e30f, psum = 0.0f;
+                    for (size_t i = 0; i < pre_enc.size(); i++) {
+                        float v = pre_enc[i];
+                        if (v < pmin)
+                            pmin = v;
+                        if (v > pmax)
+                            pmax = v;
+                        psum += v;
+                    }
+                    fprintf(stderr, "nemotron: pre-encode T=%d d=%d min=%.2f max=%.2f mean=%.4f\n", T_enc, d_model,
+                            pmin, pmax, psum / (float)pre_enc.size());
+                }
+
+                ggml_free(ctx0);
+
+                // Step 2: run chunked encoder on pre-encode output
+                enc_out.clear();
+                if (!nemotron_run_encoder_chunked(ctx, pre_enc.data(), T_enc, d_model, enc_out))
+                    return nullptr;
             }
-
-            ggml_free(ctx0);
-
-            // Step 2: run chunked encoder on pre-encode output
-            enc_out.clear();
-            if (!nemotron_run_encoder_chunked(ctx, pre_enc.data(), T_enc, d_model, enc_out))
-                return nullptr;
         }
-    }
+
+    } // nemotron_bench_stage encoder
 
     if (T_enc <= 0)
         return nullptr;
@@ -2259,10 +2294,14 @@ static nemotron_result* nemotron_transcribe_impl(nemotron_context* ctx, const fl
     // RNN-T decode
     const int beam_sz = ctx->decode_beam_size;
     const bool use_maes = ctx->decode_maes && beam_sz > 1;
-    auto emitted = use_maes        ? nemotron_rnnt_maes_decode(ctx, enc_out.data(), T_enc, d_model, beam_sz,
-                                                               ctx->maes_num_steps, ctx->maes_gamma, ctx->maes_beta)
-                   : (beam_sz > 1) ? nemotron_rnnt_beam_decode(ctx, enc_out.data(), T_enc, d_model, beam_sz)
-                                   : nemotron_rnnt_decode(ctx, enc_out.data(), T_enc, d_model, on_tok, on_tok_ud);
+    decltype(nemotron_rnnt_decode(ctx, enc_out.data(), T_enc, d_model, on_tok, on_tok_ud)) emitted;
+    {
+        nemotron_bench_stage _b("rnnt_decode");
+        emitted = use_maes        ? nemotron_rnnt_maes_decode(ctx, enc_out.data(), T_enc, d_model, beam_sz,
+                                                              ctx->maes_num_steps, ctx->maes_gamma, ctx->maes_beta)
+                  : (beam_sz > 1) ? nemotron_rnnt_beam_decode(ctx, enc_out.data(), T_enc, d_model, beam_sz)
+                                  : nemotron_rnnt_decode(ctx, enc_out.data(), T_enc, d_model, on_tok, on_tok_ud);
+    }
 
     if (getenv("CRISPASR_NEMOTRON_DEBUG")) {
         fprintf(stderr, "nemotron: RNNT emitted %zu tokens\n", emitted.size());

@@ -18,6 +18,7 @@
 
 #include "truecaser_lstm.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `TRUECASER_LSTM_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool truecaser_lstm_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("TRUECASER_LSTM_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct truecaser_lstm_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit truecaser_lstm_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~truecaser_lstm_bench_stage() {
+        if (!truecaser_lstm_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  truecaser_lstm_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 struct LSTMLayer {
     // weight_ih: [4*H, input], weight_hh: [4*H, H], bias_ih: [4*H], bias_hh: [4*H]
@@ -204,6 +231,7 @@ truecaser_lstm_context* truecaser_lstm_init(const char* model_path) {
 char* truecaser_lstm_process(truecaser_lstm_context* ctx, const char* text) {
     if (!ctx || !text)
         return nullptr;
+    truecaser_lstm_bench_stage _bs_total("process_total");
 
     std::string input(text);
     // Lowercase the input for character lookup

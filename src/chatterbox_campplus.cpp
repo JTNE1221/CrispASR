@@ -14,6 +14,7 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +23,32 @@
 #include <vector>
 
 namespace chatterbox_campplus {
+
+// ===========================================================================
+// Bench instrumentation — `CB_CAMPPLUS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool cb_campplus_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("CB_CAMPPLUS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct cb_campplus_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit cb_campplus_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~cb_campplus_bench_stage() {
+        if (!cb_campplus_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  cb_campplus_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Phase 1 — Kaldi fbank + per-utterance mean subtract
@@ -831,6 +858,7 @@ std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runti
         fprintf(stderr, "chatterbox_campplus: model not bound\n");
         return {};
     }
+    cb_campplus_bench_stage _bs_total("xvector_total");
     auto* state = static_cast<CampplusCache*>(cache.impl);
     if (!state) {
         cache.impl = new CampplusCache();
@@ -844,7 +872,10 @@ std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runti
     // FCM head: (T, 80) → (320, T)
     int C_fcm = 0, T_fcm = 0;
     std::vector<float> fcm;
-    fcm_forward(*state, feat_t_80, T, fcm, C_fcm, T_fcm);
+    {
+        cb_campplus_bench_stage _bs("fcm_head");
+        fcm_forward(*state, feat_t_80, T, fcm, C_fcm, T_fcm);
+    }
     if (dbg)
         fprintf(stderr, "campplus: post-FCM C=%d T=%d\n", C_fcm, T_fcm);
 
@@ -918,6 +949,7 @@ std::vector<float> compute_xvector(const cb_campplus_model& m, cb_campplus_runti
 
 std::vector<float> embed_speaker(const cb_campplus_model& m, cb_campplus_runtime& cache, const float* pcm_16k,
                                  int n_samples) {
+    cb_campplus_bench_stage _bs_total("embed_speaker");
     int T = 0;
     auto fb = compute_fbank(pcm_16k, n_samples, T);
     if (fb.empty() || T <= 0)

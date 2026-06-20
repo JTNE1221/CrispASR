@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `M2M100_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool m2m100_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("M2M100_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct m2m100_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit m2m100_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~m2m100_bench_stage() {
+        if (!m2m100_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  m2m100_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ──────────────────────────────────────────────
 
@@ -955,6 +982,8 @@ extern "C" char* m2m100_translate(struct m2m100_context* ctx, const char* text, 
         max_new_tokens = 200;
 
     const auto& hp = ctx->model.hp;
+
+    m2m100_bench_stage _bs_total("translate_total");
 
     // 1. Tokenize input
     std::vector<int> enc_ids = tokenize(ctx->tokenizer, text, src_lang);

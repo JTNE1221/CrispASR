@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +37,32 @@
 #include <random>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `MELOTTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool melotts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("MELOTTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct melotts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit melotts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~melotts_bench_stage() {
+        if (!melotts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  melotts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── JSON-lite helpers ─────────────────────────────────────────────
 // Parse JSON arrays/objects from GGUF metadata strings.
@@ -2682,10 +2709,15 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
     if (!ctx || !text || !pcm_out)
         return 0;
 
+    melotts_bench_stage _bs_synth("synthesize");
+
     // 1. Text processing (G2P)
     std::vector<int> phone_ids, tone_ids, lang_ids;
     std::vector<int> word2ph;
-    g2p_english(ctx->g2p, text, phone_ids, tone_ids, lang_ids, word2ph);
+    {
+        melotts_bench_stage _bs("g2p");
+        g2p_english(ctx->g2p, text, phone_ids, tone_ids, lang_ids, word2ph);
+    }
     int T = (int)phone_ids.size();
 
     if (ctx->verbosity >= 2) {
@@ -2774,7 +2806,10 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
 
     // 4. Text encoder
     std::vector<float> enc_out, enc_mean, enc_logvar;
-    text_encoder_forward(ctx, phone_ids, tone_ids, lang_ids, ja_bert_features, enc_out, enc_mean, enc_logvar);
+    {
+        melotts_bench_stage _bs("text_encoder");
+        text_encoder_forward(ctx, phone_ids, tone_ids, lang_ids, ja_bert_features, enc_out, enc_mean, enc_logvar);
+    }
 
     int C = (int)ctx->hp.inter_channels;
     if (enc_mean.empty()) {
@@ -2784,8 +2819,11 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
 
     // 4. Duration prediction (SDP + DP blend)
     std::vector<float> sdp_logw, dp_logw;
-    sdp_forward(ctx, enc_out, g_vec, T, ctx->noise_w, sdp_logw);
-    dp_forward(ctx, enc_out, g_vec, T, dp_logw);
+    {
+        melotts_bench_stage _bs("duration_predict");
+        sdp_forward(ctx, enc_out, g_vec, T, ctx->noise_w, sdp_logw);
+        dp_forward(ctx, enc_out, g_vec, T, dp_logw);
+    }
 
     // Blend
     std::vector<float> logw(T);
@@ -2824,13 +2862,19 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
     dump_stage(ctx, "z_p", z.data(), z.size());
 
     // 7. Flow inverse
-    flow_inverse(ctx, z, g_vec, T_latent);
+    {
+        melotts_bench_stage _bs("flow_inverse");
+        flow_inverse(ctx, z, g_vec, T_latent);
+    }
     dump_stage(ctx, "z_dec", z.data(), z.size());
 
     // 8. HiFi-GAN decode
     std::vector<float> pcm;
-    if (!hifigan_decode(ctx, z, g_vec, T_latent, pcm))
-        return 0;
+    {
+        melotts_bench_stage _bs("hifigan_decode");
+        if (!hifigan_decode(ctx, z, g_vec, T_latent, pcm))
+            return 0;
+    }
     dump_stage(ctx, "audio", pcm.data(), pcm.size());
 
     // 9. Return

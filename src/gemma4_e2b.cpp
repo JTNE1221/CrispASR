@@ -23,6 +23,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,32 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `GEMMA4_E2B_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool gemma4_e2b_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("GEMMA4_E2B_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct gemma4_e2b_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit gemma4_e2b_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~gemma4_e2b_bench_stage() {
+        if (!gemma4_e2b_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  gemma4_e2b_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ─────────────────────────────────────────────────────────
 
@@ -1461,7 +1488,11 @@ static char* g4e_run_prompt(gemma4_e2b_context* ctx, const std::vector<int32_t>&
     }
 
     int64_t t_llm0 = ggml_time_us();
-    float* prompt_emb = g4e_embed_tokens(ctx, prompt_ids.data(), total);
+    float* prompt_emb = nullptr;
+    {
+        gemma4_e2b_bench_stage _b("token embed");
+        prompt_emb = g4e_embed_tokens(ctx, prompt_ids.data(), total);
+    }
     if (!prompt_emb) {
         fprintf(stderr, "gemma4_e2b: failed to embed prompt tokens\n");
         return nullptr;
@@ -1506,7 +1537,11 @@ static char* g4e_run_prompt(gemma4_e2b_context* ctx, const std::vector<int32_t>&
         return nullptr;
     }
 
-    float* prefill_logits = g4e_run_llm_kv(ctx, combined.data(), total, 0, nullptr, nullptr);
+    float* prefill_logits = nullptr;
+    {
+        gemma4_e2b_bench_stage _b("prefill");
+        prefill_logits = g4e_run_llm_kv(ctx, combined.data(), total, 0, nullptr, nullptr);
+    }
     if (!prefill_logits) {
         fprintf(stderr, "gemma4_e2b: prefill failed\n");
         return nullptr;
@@ -1524,6 +1559,7 @@ static char* g4e_run_prompt(gemma4_e2b_context* ctx, const std::vector<int32_t>&
     const int eos = ctx->end_of_turn_id >= 0 ? ctx->end_of_turn_id : ctx->eos_id;
     const bool capture_probs = (out_token_ids && out_token_probs);
 
+    gemma4_e2b_bench_stage _b_dec("decode loop");
     std::vector<int32_t> dec_tokens;
     std::vector<float> dec_probs;
     if (ctx->beam_size > 1) {
@@ -2041,6 +2077,7 @@ static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const fl
     auto& lhp = m.llm_hp;
     const bool verbose = ctx->verbosity >= 2 || getenv("GEMMA4_E2B_BENCH");
     const float eps = lhp.rms_norm_eps;
+    gemma4_e2b_bench_stage _b_total("total");
 
     if (ctx->verbosity >= 1)
         fprintf(stderr, "gemma4_e2b: %d samples (%.1fs)\n", n_samples, n_samples / 16000.0f);
@@ -2068,8 +2105,12 @@ static char* gemma4_e2b_transcribe_impl(struct gemma4_e2b_context* ctx, const fl
 
     int T_mel = 0;
     const float mel_floor = 0.001f; // HF default
-    auto mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels, hann_ptr, filt_ptr,
-                                           mel_floor, T_mel);
+    std::vector<float> mel;
+    {
+        gemma4_e2b_bench_stage _b("mel");
+        mel = g4e_compute_mel_hf_faithful(pcm, n_samples, n_fft, win_length, hop, n_mels, hann_ptr, filt_ptr, mel_floor,
+                                          T_mel);
+    }
     if (mel.empty()) {
         fprintf(stderr, "gemma4_e2b: mel computation failed\n");
         return nullptr;

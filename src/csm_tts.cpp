@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +51,32 @@
 // ===================================================================
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `CSM_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool csm_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("CSM_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct csm_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit csm_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~csm_bench_stage() {
+        if (!csm_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  csm_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 struct csm_hparams {
     // Backbone (Llama-3.2 1B)
@@ -1130,7 +1157,11 @@ extern "C" float* csm_tts_synthesize_with_reference(struct csm_tts_context* ctx,
     int topk = ctx->params.topk;
 
     // 1. Tokenize text
-    std::vector<int32_t> text_tokens = tokenize_text(m, std::string(text));
+    std::vector<int32_t> text_tokens;
+    {
+        csm_bench_stage _b("tokenize");
+        text_tokens = tokenize_text(m, std::string(text));
+    }
     if (text_tokens.empty()) {
         fprintf(stderr, "csm_tts: empty text after tokenization\n");
         return nullptr;
@@ -1804,6 +1835,7 @@ mimi_decode:
     }
 
     // 3. Mimi decode: codes -> PCM
+    csm_bench_stage _b_mimi("mimi_decode");
     int T_frames = (int)all_codes.size();
 
     // Flatten codes to [n_codebooks, T_frames] layout

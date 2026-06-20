@@ -13,6 +13,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `PYANNOTE_SEG_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool pyannote_seg_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("PYANNOTE_SEG_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct pyannote_seg_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit pyannote_seg_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~pyannote_seg_bench_stage() {
+        if (!pyannote_seg_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  pyannote_seg_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model
@@ -221,6 +248,7 @@ extern "C" void pyannote_seg_free(struct pyannote_seg_context* ctx) {
 extern "C" float* pyannote_seg_run(struct pyannote_seg_context* ctx, const float* samples, int n_samples, int* out_T) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
+    pyannote_seg_bench_stage _bs_total("run_total");
     const auto& m = ctx->model;
 
     // ---- SincNet front-end ----

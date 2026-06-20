@@ -152,6 +152,16 @@ float* chatterbox_s3gen_dump_encoder_out(struct chatterbox_s3gen_context* ctx, c
 float* chatterbox_s3gen_dump_prompt_feat_24k(struct chatterbox_s3gen_context* ctx, const float* pcm_24k, int n_samples,
                                              int max_samples, int* out_T_mel);
 
+struct chatterbox_s3gen_perf {
+    int64_t t_encoder_us;
+    int64_t t_cfm_us;
+    int64_t t_vocoder_us;
+    int n_cfm_steps;
+    int T_mel;
+};
+
+int chatterbox_s3gen_get_perf(const struct chatterbox_s3gen_context* ctx, struct chatterbox_s3gen_perf* out);
+
 void chatterbox_s3gen_pcm_free(float* pcm);
 void chatterbox_s3gen_free(struct chatterbox_s3gen_context* ctx);
 

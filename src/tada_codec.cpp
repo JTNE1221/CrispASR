@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `TADA_CODEC_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool tada_codec_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("TADA_CODEC_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct tada_codec_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit tada_codec_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~tada_codec_bench_stage() {
+        if (!tada_codec_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  tada_codec_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ─────────────────────────── internal types ─────────────────────────
 
@@ -690,6 +717,7 @@ float* tada_codec_decode(struct tada_codec_context* ctx, const float* features, 
                          const int32_t* token_masks, int* out_n_samples) {
     if (!ctx || !features || n_frames <= 0)
         return nullptr;
+    tada_codec_bench_stage _bs_total("decode_total");
 
     const int ed = ctx->embed_dim;
 

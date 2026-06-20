@@ -38,6 +38,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +55,32 @@
 // -----------------------------------------------------------------------
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `ZONOS_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool zonos_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("ZONOS_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct zonos_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit zonos_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~zonos_tts_bench_stage() {
+        if (!zonos_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  zonos_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 struct zonos_hp {
     uint32_t d_model = 2048;
@@ -2383,6 +2410,8 @@ float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int
         return nullptr;
     *out_n_samples = 0;
 
+    zonos_tts_bench_stage _bs_synth("synthesize");
+
     // Generate codes. Retry up to 3× if EOS is sampled at step 0 — this
     // manifests as zero output frames and is the known failure mode for
     // Q4_K quantization (EOS logit inflated by ~0.9 units at the first
@@ -2391,7 +2420,11 @@ float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int
     // RNG state is restored after the loop.
     int n_codes = 0, n_codebooks = 0;
     const uint64_t orig_rng = ctx->rng_state;
-    int32_t* codes = zonos_tts_synthesize_codes(ctx, text, &n_codes, &n_codebooks);
+    int32_t* codes;
+    {
+        zonos_tts_bench_stage _bs("ar_decode");
+        codes = zonos_tts_synthesize_codes(ctx, text, &n_codes, &n_codebooks);
+    }
     for (int retry = 1; retry <= 3 && (!codes || n_codes <= 0); retry++) {
         if (codes) {
             free(codes);
@@ -2442,7 +2475,11 @@ float* zonos_tts_synthesize(struct zonos_tts_context* ctx, const char* text, int
 
     // DAC decode: codes -> 44.1 kHz PCM
     int n_samples = 0;
-    float* pcm = dac_decode(ctx, codes, n_codes, n_codebooks, &n_samples);
+    float* pcm;
+    {
+        zonos_tts_bench_stage _bs("dac_decode");
+        pcm = dac_decode(ctx, codes, n_codes, n_codebooks, &n_samples);
+    }
     free(codes);
     if (!pcm) {
         return nullptr;

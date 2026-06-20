@@ -21,6 +21,32 @@
 #include <string>
 #include <vector>
 
+// ===========================================================================
+// Bench instrumentation — `MOONSHINE_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool moonshine_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("MOONSHINE_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct moonshine_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit moonshine_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~moonshine_bench_stage() {
+        if (!moonshine_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  moonshine_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 struct moonshine_context {
     moonshine_model model;
     moonshine_tokenizer tokenizer;
@@ -910,7 +936,11 @@ static int moonshine_transcribe_impl(struct moonshine_context* ctx, const float*
     auto t_start = std::chrono::high_resolution_clock::now();
 
     // 1. Run encoder
-    int ret = moonshine_run_encoder(ctx, audio, n_samples);
+    int ret;
+    {
+        moonshine_bench_stage _b("encoder");
+        ret = moonshine_run_encoder(ctx, audio, n_samples);
+    }
     if (ret != 0) {
         return ret;
     }
@@ -922,17 +952,23 @@ static int moonshine_transcribe_impl(struct moonshine_context* ctx, const float*
     }
     int max_len = max_gen + 1; // +1 for BOS
 
-    if (!moonshine_kv_cache_init(ctx->kv_self, hp.dec_n_layers, max_len, hp.n_kv_heads, hp.head_dim)) {
-        return -2;
-    }
+    {
+        moonshine_bench_stage _b("kv_init");
+        if (!moonshine_kv_cache_init(ctx->kv_self, hp.dec_n_layers, max_len, hp.n_kv_heads, hp.head_dim)) {
+            return -2;
+        }
 
-    if (!moonshine_kv_cache_init(ctx->kv_cross, hp.dec_n_layers, ctx->enc_len, hp.n_kv_heads, hp.head_dim)) {
-        ctx->kv_self.reset();
-        return -2;
+        if (!moonshine_kv_cache_init(ctx->kv_cross, hp.dec_n_layers, ctx->enc_len, hp.n_kv_heads, hp.head_dim)) {
+            ctx->kv_self.reset();
+            return -2;
+        }
     }
 
     // 3. Precompute cross-attention KV
-    ret = moonshine_precompute_cross_kv(ctx);
+    {
+        moonshine_bench_stage _b("cross_kv_precompute");
+        ret = moonshine_precompute_cross_kv(ctx);
+    }
     if (ret != 0) {
         ctx->kv_self.reset();
         ctx->kv_cross.reset();
@@ -949,6 +985,7 @@ static int moonshine_transcribe_impl(struct moonshine_context* ctx, const float*
     // softmax(logits/T) + multinomial sample. Beam search (beam_size > 1)
     // takes a separate path below — it ignores temperature and always
     // returns the highest cumulative-log-prob hypothesis.
+    moonshine_bench_stage _b_decode("decode");
     if (ctx->beam_size > 1) {
         // 5a. Prefill BOS to populate slot 0 + capture initial logits.
         std::vector<float> bos_logits;

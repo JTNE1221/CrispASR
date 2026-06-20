@@ -48,6 +48,32 @@ static int g_cpu_n_threads = 4;
 #include <unordered_map>
 #include <vector>
 
+// ===========================================================================
+// Bench instrumentation — `VOXCPM2_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool voxcpm2_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("VOXCPM2_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct voxcpm2_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit voxcpm2_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~voxcpm2_bench_stage() {
+        if (!voxcpm2_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  voxcpm2_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
@@ -5847,8 +5873,14 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     int P_frames = (int)hp.patch_frames;
     int feat_dim_vae = 64;
 
+    voxcpm2_bench_stage _bs_synth("synthesize");
+
     // 1. Build prefill inputs (tokens + masks + combined embeds + ref feats).
-    vox_prefill_inputs pi = build_prefill_inputs(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+    vox_prefill_inputs pi;
+    {
+        voxcpm2_bench_stage _bs("build_prefill");
+        pi = build_prefill_inputs(ctx, std::string(text), ref_samples, ref_n_samples, cpu_be);
+    }
     if (pi.N_pos == 0) {
         fprintf(stderr, "voxcpm2: empty token sequence\n");
         return nullptr;
@@ -6217,7 +6249,11 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
 
     // 7. VAE decode
     double t0_vae = vox_now_ms();
-    std::vector<float> pcm = vae_decode(ctx, patches, cpu_be);
+    std::vector<float> pcm;
+    {
+        voxcpm2_bench_stage _bs("vae_decode");
+        pcm = vae_decode(ctx, patches, cpu_be);
+    }
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "voxcpm2: VAE decode %.1f ms -> %zu samples @48kHz\n", vox_now_ms() - t0_vae, pcm.size());
         fprintf(stderr, "voxcpm2: total %.1f ms\n", vox_now_ms() - t0_total);

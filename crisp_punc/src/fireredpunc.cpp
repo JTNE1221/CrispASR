@@ -17,6 +17,7 @@
 #include "gguf.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `FIREREDPUNC_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool fireredpunc_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("FIREREDPUNC_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct fireredpunc_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit fireredpunc_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~fireredpunc_bench_stage() {
+        if (!fireredpunc_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  fireredpunc_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // WordPiece tokenizer (minimal, matching BERT chinese-bert-wwm-ext)
@@ -557,6 +584,7 @@ fireredpunc_context* fireredpunc_init(const char* model_path) {
 char* fireredpunc_process(fireredpunc_context* ctx, const char* text) {
     if (!ctx || !text)
         return nullptr;
+    fireredpunc_bench_stage _bs_total("process_total");
 
     // Tokenize
     std::string input(text);

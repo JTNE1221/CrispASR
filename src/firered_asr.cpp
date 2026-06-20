@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +33,32 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `FIRERED_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool firered_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("FIRERED_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct firered_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit firered_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~firered_bench_stage() {
+        if (!firered_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  firered_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model structures
@@ -1692,7 +1719,10 @@ static char* firered_asr_transcribe_impl(struct firered_asr_context* ctx, const 
     // Step 1: Fbank features
     std::vector<float> features;
     int n_frames = 0;
-    compute_fbank(samples, n_samples, features, n_frames);
+    {
+        firered_bench_stage _b("fbank");
+        compute_fbank(samples, n_samples, features, n_frames);
+    }
     if (n_frames <= 0)
         return nullptr;
 
@@ -1726,7 +1756,10 @@ static char* firered_asr_transcribe_impl(struct firered_asr_context* ctx, const 
     // Step 2: Conv2d subsampling on CPU (using padded input)
     std::vector<float> subsampled;
     int T_sub = 0;
-    conv2d_subsample_cpu(features_padded.data(), n_frames_padded, hp.idim, m, subsampled, T_sub);
+    {
+        firered_bench_stage _b("conv2d_subsample");
+        conv2d_subsample_cpu(features_padded.data(), n_frames_padded, hp.idim, m, subsampled, T_sub);
+    }
     if (T_sub <= 0)
         return nullptr;
 
@@ -1744,7 +1777,10 @@ static char* firered_asr_transcribe_impl(struct firered_asr_context* ctx, const 
     // Step 3: CPU encoder (Conformer with relative PE attention)
     int flat_dim = 608; // 32 * 19
     std::vector<float> enc_output;
-    hybrid_encoder(subsampled.data(), T_sub, flat_dim, ctx, enc_output);
+    {
+        firered_bench_stage _b("encoder");
+        hybrid_encoder(subsampled.data(), T_sub, flat_dim, ctx, enc_output);
+    }
     // enc_output: [T_sub, d_model] row-major
 
     if (ctx->params.verbosity >= 1) {
@@ -1755,6 +1791,7 @@ static char* firered_asr_transcribe_impl(struct firered_asr_context* ctx, const 
 
     // Step 4: Greedy decoder (Transformer with cross-attention)
     // If decoder weights are loaded, use decoder path; else fall back to CTC
+    firered_bench_stage _b_dec("decoder");
     if (m.dec.emb_w && m.dec.prj_w && !m.dec.blocks.empty()) {
         // Read decoder weights to CPU
         std::vector<float> emb_w, pe_dec, norm_w, norm_b, prj_w;

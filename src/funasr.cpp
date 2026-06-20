@@ -1646,9 +1646,35 @@ static std::vector<float> funasr_run_llm_step(funasr_context* ctx, const float* 
 
 // Get the inputs_embeds for an arbitrary token sequence via the model's
 // token_embd table (shared with output.weight thanks to Qwen3 tied embeddings).
+// For n==1 (the AR decode hot path), skip the graph and dequant one row
+// directly — eliminates graph-build + sched overhead per decode step.
+// Gated by CRISPASR_FUNASR_EMBED_FAST (default ON, set =0 to disable).
 static std::vector<float> funasr_embed_tokens(funasr_context* ctx, const std::vector<int32_t>& ids) {
     const int n = (int)ids.size();
     const int d = (int)ctx->model.hparams.llm_d_model;
+
+    // Fast path: single-token lookup avoids full graph build + sched alloc.
+    static int use_fast = -1;
+    if (use_fast < 0) {
+        const char* e = std::getenv("CRISPASR_FUNASR_EMBED_FAST");
+        use_fast = (!e || *e != '0') ? 1 : 0;
+    }
+    if (n == 1 && use_fast) {
+        const ggml_tensor* w = ctx->model.llm.token_embd_w;
+        if (w) {
+            const size_t row_bytes = ggml_row_size(w->type, d);
+            std::vector<uint8_t> raw(row_bytes);
+            ggml_backend_tensor_get(w, raw.data(), (size_t)ids[0] * row_bytes, row_bytes);
+            std::vector<float> result((size_t)d);
+            if (w->type == GGML_TYPE_F32) {
+                std::memcpy(result.data(), raw.data(), (size_t)d * sizeof(float));
+            } else {
+                ggml_get_type_traits(w->type)->to_float(raw.data(), result.data(), d);
+            }
+            return result;
+        }
+    }
+
     ggml_cgraph* gf = funasr_build_graph_embed(ctx, n);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
@@ -1902,6 +1928,7 @@ static std::string funasr_transcribe_impl(funasr_context* ctx, const float* pcm,
     std::vector<int32_t> generated;
     std::vector<float> generated_probs;
     auto decode_t0 = std::chrono::steady_clock::now();
+    double decode_embed_ms = 0;
 
     if (ctx->beam_size > 1) {
         // Beam search via replay-from-prefix. Each beam step embeds
@@ -1959,7 +1986,17 @@ static std::string funasr_transcribe_impl(funasr_context* ctx, const float* pcm,
             }
             generated.push_back(next_id);
             generated_probs.push_back(next_prob);
+            double t_emb0 =
+                funasr_bench_enabled()
+                    ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch())
+                          .count()
+                    : 0;
             std::vector<float> step_embed = funasr_embed_tokens(ctx, {next_id});
+            if (funasr_bench_enabled())
+                decode_embed_ms +=
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch())
+                        .count() -
+                    t_emb0;
             if (step_embed.empty())
                 break;
             logits = funasr_run_llm_step(ctx, step_embed.data(), 1, n_past);
@@ -1976,6 +2013,8 @@ static std::string funasr_transcribe_impl(funasr_context* ctx, const float* pcm,
         const int n_steps = (int)generated.size();
         std::fprintf(stderr, "  funasr_bench: %-22s %.2f ms  (%d tokens, %.2f ms/tok)\n", "llm_decode_total", ms,
                      n_steps, n_steps > 0 ? ms / n_steps : 0.0);
+        std::fprintf(stderr, "  funasr_bench: %-22s %.2f ms  (%.2f ms/tok)\n", "decode_embed_only", decode_embed_ms,
+                     n_steps > 0 ? decode_embed_ms / n_steps : 0.0);
     }
     (void)d;
 

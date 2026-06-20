@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `SPEECHT5_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool speecht5_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("SPEECHT5_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct speecht5_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit speecht5_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~speecht5_tts_bench_stage() {
+        if (!speecht5_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  speecht5_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -1360,6 +1387,8 @@ float* speecht5_tts_synthesize(struct speecht5_tts_context* ctx, const char* tex
         return nullptr;
     }
 
+    speecht5_tts_bench_stage _bs_synth("synthesize");
+
     // Tokenize
     std::vector<int32_t> token_ids = ctx->tokenizer.encode(text);
     if (token_ids.empty()) {
@@ -1372,7 +1401,11 @@ float* speecht5_tts_synthesize(struct speecht5_tts_context* ctx, const char* tex
 
     // Run encoder
     int T_enc = 0;
-    auto encoder_out = run_encoder(ctx, token_ids, &T_enc);
+    std::vector<float> encoder_out;
+    {
+        speecht5_tts_bench_stage _bs("encoder");
+        encoder_out = run_encoder(ctx, token_ids, &T_enc);
+    }
     if (encoder_out.empty()) {
         fprintf(stderr, "speecht5: encoder failed\n");
         return nullptr;
@@ -1429,14 +1462,22 @@ float* speecht5_tts_synthesize(struct speecht5_tts_context* ctx, const char* tex
     }
 
     // Run post-net
-    auto mel_refined = run_postnet(ctx, all_mel_frames, T_mel);
+    std::vector<float> mel_refined;
+    {
+        speecht5_tts_bench_stage _bs("postnet");
+        mel_refined = run_postnet(ctx, all_mel_frames, T_mel);
+    }
     if (mel_refined.empty()) {
         fprintf(stderr, "speecht5: postnet failed, using unrefined mel\n");
         mel_refined = all_mel_frames;
     }
 
     // Run vocoder
-    auto waveform = run_vocoder(ctx, mel_refined, T_mel);
+    std::vector<float> waveform;
+    {
+        speecht5_tts_bench_stage _bs("vocoder");
+        waveform = run_vocoder(ctx, mel_refined, T_mel);
+    }
     if (waveform.empty()) {
         fprintf(stderr, "speecht5: vocoder failed\n");
         return nullptr;

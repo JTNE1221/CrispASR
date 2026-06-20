@@ -54,6 +54,32 @@
 #include <Accelerate/Accelerate.h> // vDSP_conv, vvsinf, vDSP_vsq — Step C-1
 #endif
 
+// ===========================================================================
+// Bench instrumentation — `INDEXTTS_VOC_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool indextts_voc_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("INDEXTTS_VOC_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct indextts_voc_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit indextts_voc_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~indextts_voc_bench_stage() {
+        if (!indextts_voc_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  indextts_voc_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 namespace {
 
 // ── Hyperparameters ──────────────────────────────────────────────
@@ -1427,8 +1453,14 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
                 (float)T_audio / hp.sampling_rate);
     }
 
+    indextts_voc_bench_stage _bs_total("generate");
+
     // Build graph
-    ggml_cgraph* gf = build_bigvgan_graph(ctx, T_in);
+    ggml_cgraph* gf;
+    {
+        indextts_voc_bench_stage _bs("graph_build");
+        gf = build_bigvgan_graph(ctx, T_in);
+    }
 
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
@@ -1460,6 +1492,7 @@ extern "C" float* indextts_voc_generate(struct indextts_voc_context* ctx, const 
     }
 
     // Compute
+    indextts_voc_bench_stage _bs_compute("compute");
     auto t0 = std::chrono::high_resolution_clock::now();
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "indextts-voc: BigVGAN compute failed\n");

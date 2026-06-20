@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -50,6 +51,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `PARAKEET_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool parakeet_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("PARAKEET_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct parakeet_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit parakeet_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~parakeet_bench_stage() {
+        if (!parakeet_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  parakeet_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // CPU weight caches for the predictor LSTM and joint head
 //
@@ -3080,7 +3108,11 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
 
     // 1. Mel
     int T_mel = 0;
-    auto mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    std::vector<float> mel;
+    {
+        parakeet_bench_stage _b("mel");
+        mel = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    }
     if (mel.empty())
         return nullptr;
     if (getenv("PARAKEET_DEBUG"))
@@ -3088,7 +3120,11 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
 
     // 2. Encoder
     int T_enc = 0;
-    auto enc = parakeet_encode_mel(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, &T_enc);
+    std::vector<float> enc;
+    {
+        parakeet_bench_stage _b("encoder");
+        enc = parakeet_encode_mel(ctx, mel.data(), (int)ctx->model.hparams.n_mels, T_mel, &T_enc);
+    }
     if (enc.empty())
         return nullptr;
     if (getenv("PARAKEET_DEBUG")) {
@@ -3105,6 +3141,7 @@ extern "C" struct parakeet_result* parakeet_transcribe_ex(struct parakeet_contex
     }
 
     // 3. Decode (TDT or CTC, greedy or beam)
+    parakeet_bench_stage _b_dec("decode");
     const bool use_ctc = ctx->decode_ctc && ctx->model.has_ctc;
     const bool use_rnnt = !use_ctc && ctx->model.hparams.n_tdt_durations == 0;
     const bool use_beam = !use_ctc && ctx->decode_beam_size > 1;

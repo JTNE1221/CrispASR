@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,32 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `PARLER_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool parler_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("PARLER_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct parler_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit parler_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~parler_tts_bench_stage() {
+        if (!parler_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  parler_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -1045,9 +1072,15 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
         return nullptr;
     }
 
+    parler_tts_bench_stage _bs_synth("synthesize");
+
     // Get audio codes
     int n_codes = 0;
-    int32_t* codes = parler_tts_synthesize_codes(ctx, text, &n_codes);
+    int32_t* codes;
+    {
+        parler_tts_bench_stage _bs("ar_decode");
+        codes = parler_tts_synthesize_codes(ctx, text, &n_codes);
+    }
     if (!codes || n_codes <= 0)
         return nullptr;
 
@@ -1060,6 +1093,7 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
         fprintf(stderr, "parler_tts: DAC decode %d frames x %d codebooks\n", T_audio, num_codebooks);
 
     // Build DAC decode graph
+    parler_tts_bench_stage _bs_dac("dac_decode");
     // Step 1: RVQ dequantize - lookup embeddings and project
     // Step 2: Decoder conv stack
 

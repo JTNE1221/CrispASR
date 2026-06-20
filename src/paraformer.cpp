@@ -18,12 +18,39 @@
 #include "ggml-cpu.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `PARAFORMER_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool paraformer_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("PARAFORMER_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct paraformer_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit paraformer_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~paraformer_bench_stage() {
+        if (!paraformer_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  paraformer_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model definition
@@ -528,7 +555,11 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
 
     // 1. Feature extraction
     int T_lfr = 0, D_lfr_actual = 0;
-    auto lfr = paraformer_compute_features(ctx, pcm, n_samples, T_lfr, D_lfr_actual);
+    std::vector<float> lfr;
+    {
+        paraformer_bench_stage _b("fbank+lfr");
+        lfr = paraformer_compute_features(ctx, pcm, n_samples, T_lfr, D_lfr_actual);
+    }
     if (lfr.empty())
         return "";
 
@@ -621,10 +652,13 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
         ggml_backend_tensor_set(inp, lfr.data(), 0, lfr_bytes);
     }
     fprintf(stderr, "paraformer: running encoder graph...\n");
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "paraformer: encoder graph compute failed\n");
-        ggml_free(ctx0);
-        return "";
+    {
+        paraformer_bench_stage _b("encoder");
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "paraformer: encoder graph compute failed\n");
+            ggml_free(ctx0);
+            return "";
+        }
     }
     fprintf(stderr, "paraformer: encoder done\n");
 
@@ -681,7 +715,11 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
     std::vector<float> acoustic_embeds;
     int N_tokens = 0;
     std::vector<int> fire_frames_vec;
-    cif_predict(ctx, enc_out.data(), T_lfr, D, acoustic_embeds, N_tokens, out_fire_frames ? &fire_frames_vec : nullptr);
+    {
+        paraformer_bench_stage _b("cif_predict");
+        cif_predict(ctx, enc_out.data(), T_lfr, D, acoustic_embeds, N_tokens,
+                    out_fire_frames ? &fire_frames_vec : nullptr);
+    }
     if (out_fire_frames)
         *out_fire_frames = std::move(fire_frames_vec);
 
@@ -751,10 +789,13 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
     // is the same layout. No transposition needed.
     ggml_backend_tensor_set(dec_inp, acoustic_embeds.data(), 0, (size_t)D * N_tokens * sizeof(float));
     ggml_backend_tensor_set(enc_tensor, enc_out.data(), 0, enc_out.size() * sizeof(float));
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "paraformer: decoder graph compute failed\n");
-        ggml_free(ctx0);
-        return "";
+    {
+        paraformer_bench_stage _b("decoder");
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+            fprintf(stderr, "paraformer: decoder graph compute failed\n");
+            ggml_free(ctx0);
+            return "";
+        }
     }
 
     // Stage capture from decoder graph
@@ -772,6 +813,7 @@ static std::string paraformer_transcribe_impl(paraformer_context* ctx, const flo
     }
 
     // 5. Argmax decoding
+    paraformer_bench_stage _b_argmax("argmax");
     ggml_tensor* logits = ggml_graph_get_tensor(gf, "logits");
     const int V = (int)hp.vocab_size;
     std::vector<float> logits_data((size_t)V * N_tokens);

@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfenv>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -69,6 +70,32 @@ bool env_bool(const char* k) {
     const char* v = std::getenv(k);
     return v && *v && std::strcmp(v, "0") != 0 && std::strcmp(v, "false") != 0;
 }
+
+// ===========================================================================
+// Bench instrumentation — `KOKORO_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+bool kokoro_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("KOKORO_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct kokoro_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit kokoro_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~kokoro_bench_stage() {
+        if (!kokoro_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  kokoro_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // Hyperparameters read from `kokoro.*` and `kokoro.plbert.*` GGUF KV.
 struct kokoro_hp {
@@ -574,6 +601,7 @@ static ggml_cgraph* kokoro_build_graph_text_enc(kokoro_context* c, int L) {
 // Pad-wraps the raw ids before computing.
 static float* kokoro_run_text_enc(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name,
                                   int* out_n) {
+    kokoro_bench_stage _b("text_enc");
     if (out_n)
         *out_n = 0;
     if (n_raw <= 0)
@@ -626,6 +654,7 @@ static float* kokoro_run_text_enc(kokoro_context* c, const int32_t* raw_ids, int
 // computing, so the output corresponds to L+2 tokens.
 static float* kokoro_run_bert(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name,
                               int* out_n) {
+    kokoro_bench_stage _b("bert");
     if (out_n)
         *out_n = 0;
     if (n_raw <= 0) {
@@ -1099,6 +1128,7 @@ static ggml_cgraph* kokoro_build_graph_predictor(kokoro_context* c, int L, int L
 //   "durations"    → (L,) post-round, post-clamp(min=1), cast to float
 static float* kokoro_run_predictor(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name,
                                    int* out_n) {
+    kokoro_bench_stage _b("predictor");
     if (out_n)
         *out_n = 0;
     if (!c->vp_loaded) {
@@ -1405,6 +1435,7 @@ static ggml_cgraph* kokoro_build_graph_f0n(kokoro_context* c, int T_frames, int 
 //   "f0_curve"  → (2*T_frames,)   (already squeezed from (1, 2*T_frames))
 //   "n_curve"   → (2*T_frames,)
 static float* kokoro_run_f0n(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name, int* out_n) {
+    kokoro_bench_stage _b("f0n");
     if (out_n)
         *out_n = 0;
     if (!c->vp_loaded) {
@@ -1650,6 +1681,7 @@ static ggml_cgraph* kokoro_build_graph_decoder_body(kokoro_context* c, int T_fra
 // decoder body, returning the named stage as malloc'd float[].
 static float* kokoro_run_decoder_body(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name,
                                       int* out_n) {
+    kokoro_bench_stage _b("decoder_body");
     if (out_n)
         *out_n = 0;
     if (!c->vp_loaded) {
@@ -2277,6 +2309,7 @@ static ggml_cgraph* kokoro_build_graph_generator(kokoro_context* c, int T_frames
 // same seed on the Python side.
 static float* kokoro_run_generator(kokoro_context* c, const int32_t* raw_ids, int n_raw, const char* stage_name,
                                    int* out_n) {
+    kokoro_bench_stage _b("generator");
     if (out_n)
         *out_n = 0;
     if (!c->vp_loaded) {
@@ -2396,6 +2429,7 @@ static float* kokoro_run_generator(kokoro_context* c, const int32_t* raw_ids, in
 // ---------------------------------------------------------------------------
 
 static float* kokoro_run_istft(const float* mag, const float* phase, int T_har, int* out_T_audio) {
+    kokoro_bench_stage _b("istft");
     const int n_fft = 20;
     const int hop = 5;
     const int n_bins = n_fft / 2 + 1;
@@ -2901,7 +2935,11 @@ extern "C" float* kokoro_synthesize_phonemes(struct kokoro_context* ctx, const c
         return nullptr;
 
     int n_ids = 0;
-    int32_t* ids = kokoro_phonemes_to_ids(ctx, phonemes, &n_ids);
+    int32_t* ids = nullptr;
+    {
+        kokoro_bench_stage _b("phoneme_tokenize");
+        ids = kokoro_phonemes_to_ids(ctx, phonemes, &n_ids);
+    }
     if (!ids || n_ids == 0) {
         std::free(ids);
         fprintf(stderr, "kokoro: empty phoneme tokenisation for '%s'\n", phonemes);
@@ -3271,9 +3309,12 @@ extern "C" float* kokoro_synthesize(struct kokoro_context* ctx, const char* text
     }
 
     std::string phonemes;
-    if (!phonemize_cached(ctx, ctx->espeak_lang, text, phonemes)) {
-        fprintf(stderr, "kokoro: phonemizer produced no output for '%s'\n", text);
-        return nullptr;
+    {
+        kokoro_bench_stage _b("phonemize");
+        if (!phonemize_cached(ctx, ctx->espeak_lang, text, phonemes)) {
+            fprintf(stderr, "kokoro: phonemizer produced no output for '%s'\n", text);
+            return nullptr;
+        }
     }
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "kokoro: phonemes: '%s'\n", phonemes.c_str());

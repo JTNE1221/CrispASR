@@ -40,6 +40,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `VOXTRAL4B_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool voxtral4b_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("VOXTRAL4B_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct voxtral4b_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit voxtral4b_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~voxtral4b_bench_stage() {
+        if (!voxtral4b_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  voxtral4b_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // Hyper-parameters
 // ===========================================================================
@@ -495,6 +522,7 @@ extern "C" float* voxtral4b_compute_mel(voxtral4b_context* ctx, const float* sam
                                         int* out_T_mel) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
+    voxtral4b_bench_stage _b("mel");
     if (!ctx->model.audio.mel_filters || !ctx->model.audio.mel_window)
         return nullptr;
     const int n_fft = 400, hop = 160, n_mels = 128, n_freqs = 201;
@@ -1205,6 +1233,7 @@ extern "C" float* voxtral4b_run_encoder(voxtral4b_context* ctx, const float* mel
                                         int* out_dim) {
     if (!ctx || !mel || n_mels != 128 || T_mel <= 0 || T_mel % 2 != 0)
         return nullptr;
+    voxtral4b_bench_stage _b("encoder");
     const int T_enc = (T_mel + 1) / 2;
     // Truncate to be divisible by 4 (downsample factor)
     const int T_enc_ds = (T_enc / 4) * 4; // round down
@@ -1339,6 +1368,7 @@ extern "C" void voxtral4b_kv_reset(voxtral4b_context* ctx) {
 // LLM forward with KV cache
 extern "C" float* voxtral4b_run_llm_kv(voxtral4b_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
                                        int* out_n_tokens, int* out_vocab_size) {
+    voxtral4b_bench_stage _b("llm_kv");
     if (!ctx || !inputs_embeds || n_tokens <= 0)
         return nullptr;
     const auto& hp = ctx->model.hparams;

@@ -29,6 +29,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `CANARY_CTC_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool canary_ctc_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("CANARY_CTC_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct canary_ctc_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit canary_ctc_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~canary_ctc_bench_stage() {
+        if (!canary_ctc_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  canary_ctc_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // Hyperparameters (mirror canary_ctc.* keys in the GGUF)
 // ===========================================================================
@@ -620,7 +648,11 @@ extern "C" int canary_ctc_compute_logits_from_mel_debug(struct canary_ctc_contex
 extern "C" int canary_ctc_compute_logits(struct canary_ctc_context* ctx, const float* samples, int n_samples,
                                          float** out_logits, int* out_T_enc, int* out_vocab_total) {
     int T_mel = 0;
-    auto mel = cc_compute_mel(ctx, samples, n_samples, T_mel);
+    std::vector<float> mel;
+    {
+        canary_ctc_bench_stage _b("mel");
+        mel = cc_compute_mel(ctx, samples, n_samples, T_mel);
+    }
     if (mel.empty())
         return -1;
 
@@ -637,6 +669,7 @@ extern "C" int canary_ctc_compute_logits(struct canary_ctc_context* ctx, const f
         ctx->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
     }
 
+    canary_ctc_bench_stage _b_enc("encoder+ctc");
     ggml_cgraph* gf = cc_build_graph(ctx, T_mel);
 
     ggml_backend_sched_reset(ctx->sched);

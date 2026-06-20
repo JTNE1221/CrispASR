@@ -26,12 +26,39 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `KYUTAI_STT_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool kyutai_stt_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("KYUTAI_STT_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct kyutai_stt_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit kyutai_stt_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~kyutai_stt_bench_stage() {
+        if (!kyutai_stt_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  kyutai_stt_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // Temperature-aware token selection: argmax when temp<=0, softmax sampling otherwise.
 // When `out_prob` is non-null, also returns the softmax probability of the picked token.
@@ -1097,7 +1124,10 @@ static char* kyutai_stt_transcribe_impl(struct kyutai_stt_context* ctx, const fl
 
     // Step 1: Resample 16 kHz → 24 kHz
     std::vector<float> pcm_24k;
-    resample_16k_to_24k(samples, n_samples, pcm_24k);
+    {
+        kyutai_stt_bench_stage _b("resample");
+        resample_16k_to_24k(samples, n_samples, pcm_24k);
+    }
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "kyutai_stt: resampled %d → %d samples (16k → 24k)\n", n_samples, (int)pcm_24k.size());
@@ -1106,9 +1136,12 @@ static char* kyutai_stt_transcribe_impl(struct kyutai_stt_context* ctx, const fl
     // Step 2: Mimi encode → audio codes
     std::vector<std::vector<int32_t>> codes;
     int T_frames = 0;
-    if (!mimi_encode(ctx, pcm_24k.data(), (int)pcm_24k.size(), codes, T_frames)) {
-        fprintf(stderr, "kyutai_stt: mimi encode failed\n");
-        return nullptr;
+    {
+        kyutai_stt_bench_stage _b("mimi_encode");
+        if (!mimi_encode(ctx, pcm_24k.data(), (int)pcm_24k.size(), codes, T_frames)) {
+            fprintf(stderr, "kyutai_stt: mimi encode failed\n");
+            return nullptr;
+        }
     }
 
     if (ctx->params.verbosity >= 1) {
@@ -1119,12 +1152,16 @@ static char* kyutai_stt_transcribe_impl(struct kyutai_stt_context* ctx, const fl
     // Audio delay in frames
     int delay_frames = (int)(hp.audio_delay_seconds * hp.frame_rate);
     int max_ctx = T_frames + delay_frames + 64; // some extra for text tokens
-    if (!kv_cache_init(ctx, max_ctx)) {
-        fprintf(stderr, "kyutai_stt: KV cache init failed\n");
-        return nullptr;
+    {
+        kyutai_stt_bench_stage _b("kv_init");
+        if (!kv_cache_init(ctx, max_ctx)) {
+            fprintf(stderr, "kyutai_stt: KV cache init failed\n");
+            return nullptr;
+        }
     }
 
     // Step 4: Autoregressive LM decoding
+    kyutai_stt_bench_stage _b_lm("lm_decode");
     // The LM consumes audio codes and generates text tokens.
     // At each step: sum all n_q audio embeddings + text embedding → transformer → logits
     // Start with padding text token.

@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,32 @@
 #include <numeric>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `WAV2VEC2_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool wav2vec2_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("WAV2VEC2_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct wav2vec2_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit wav2vec2_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~wav2vec2_bench_stage() {
+        if (!wav2vec2_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  wav2vec2_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // GGUF loading helpers
@@ -1688,6 +1715,7 @@ static std::vector<float> wav2vec2_compute_logits_graph(const wav2vec2_model& m,
 
 std::vector<float> wav2vec2_compute_logits(const wav2vec2_model& m, const float* raw_audio, int n_samples,
                                            int n_threads) {
+    wav2vec2_bench_stage _bs_total("compute_logits_total");
     // Try graph path (uses compute_with_ctx for correct F16 weight handling)
     auto result = wav2vec2_compute_logits_graph(m, raw_audio, n_samples, n_threads);
     if (!result.empty())

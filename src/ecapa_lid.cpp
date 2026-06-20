@@ -11,6 +11,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `ECAPA_LID_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool ecapa_lid_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("ECAPA_LID_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct ecapa_lid_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit ecapa_lid_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~ecapa_lid_bench_stage() {
+        if (!ecapa_lid_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  ecapa_lid_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model — stores ggml tensor pointers into the weight buffer
@@ -327,10 +354,15 @@ extern "C" const char* ecapa_lid_detect(struct ecapa_lid_context* ctx, const flo
         return it != ts.end() ? it->second : nullptr;
     };
 
+    ecapa_lid_bench_stage _bs_total("detect_total");
+
     // 1. Fbank on CPU
     std::vector<float> fbank;
     int T = 0;
-    compute_fbank(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig, m.n_mels);
+    {
+        ecapa_lid_bench_stage _bs("feature_extraction");
+        compute_fbank(samples, n_samples, fbank, T, m.mel_fb_embedded, m.n_fft_orig, m.n_mels);
+    }
     if (T <= 0)
         return nullptr;
 

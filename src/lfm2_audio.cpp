@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `LFM2_AUDIO_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool lfm2_audio_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("LFM2_AUDIO_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct lfm2_audio_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit lfm2_audio_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~lfm2_audio_bench_stage() {
+        if (!lfm2_audio_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  lfm2_audio_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1227,19 +1254,33 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
     if (max_tokens <= 0)
         max_tokens = 512;
 
+    lfm2_audio_bench_stage _b_total("total");
+
     // Step 1: mel → encoder → adapter
     int T_mel = 0;
-    auto mel = lfm2_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    std::vector<float> mel;
+    {
+        lfm2_audio_bench_stage _b("mel");
+        mel = lfm2_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    }
     if (mel.empty())
         return nullptr;
 
     int T_enc = 0, d_model = 0;
-    float* enc = lfm2_audio_run_encoder(ctx, mel.data(), T_mel, (int)hp.n_mels, &T_enc, &d_model);
+    float* enc = nullptr;
+    {
+        lfm2_audio_bench_stage _b("encoder");
+        enc = lfm2_audio_run_encoder(ctx, mel.data(), T_mel, (int)hp.n_mels, &T_enc, &d_model);
+    }
     if (!enc)
         return nullptr;
 
     int adapter_hidden = 0;
-    float* adapted = lfm2_audio_run_adapter(ctx, enc, T_enc, d_model, &adapter_hidden);
+    float* adapted = nullptr;
+    {
+        lfm2_audio_bench_stage _b("adapter");
+        adapted = lfm2_audio_run_adapter(ctx, enc, T_enc, d_model, &adapter_hidden);
+    }
     free(enc);
     if (!adapted)
         return nullptr;
@@ -1326,6 +1367,7 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
     // return logits from the last position.
 
     // Phase A: Prefill — run full context through backbone
+    lfm2_audio_bench_stage _b_prefill_and_decode("prefill+decode");
     auto step_result = lfm2_backbone_step(ctx, context_emb.data(), T_context);
     auto logits = step_result.logits;
     if (!logits.empty() && ctx->verbosity >= 1) {

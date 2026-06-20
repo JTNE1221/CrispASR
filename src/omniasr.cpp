@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `OMNIASR_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool omniasr_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("OMNIASR_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct omniasr_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit omniasr_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~omniasr_bench_stage() {
+        if (!omniasr_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  omniasr_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model
@@ -640,6 +667,7 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
     // This is a wav2vec2 convention, required for OmniASR.
     std::vector<float> pcm_norm(n_samples);
     {
+        omniasr_bench_stage _b("pcm_normalize");
         const int64_t t0 = ggml_time_us();
         double mean = 0;
         for (int i = 0; i < n_samples; i++)
@@ -782,6 +810,7 @@ extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* sa
     perf.enc_nodes = ggml_graph_n_nodes(gf);
 
     // Allocate and compute
+    omniasr_bench_stage _b_enc("encoder");
     ggml_backend_sched_reset(ctx->sched);
     int64_t t0 = ggml_time_us();
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {

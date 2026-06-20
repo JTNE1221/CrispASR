@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +42,32 @@
 #include <vector>
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `CHATTERBOX_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool chatterbox_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("CHATTERBOX_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct chatterbox_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit chatterbox_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~chatterbox_bench_stage() {
+        if (!chatterbox_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  chatterbox_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ──────────────────────────────────────────────
 
@@ -2855,7 +2882,11 @@ extern "C" float* chatterbox_synthesize(struct chatterbox_context* ctx, const ch
     // Step 1: T3 → speech tokens
     int64_t t_t3_0 = ggml_time_us();
     int n_tokens = 0;
-    int32_t* speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
+    int32_t* speech_tokens;
+    {
+        chatterbox_bench_stage _b("t3_ar_decode");
+        speech_tokens = chatterbox_synthesize_tokens(ctx, text, &n_tokens);
+    }
     int64_t t_t3_us = ggml_time_us() - t_t3_0;
     if (!speech_tokens || n_tokens == 0) {
         fprintf(stderr, "chatterbox: T3 produced no speech tokens\n");
@@ -2908,9 +2939,12 @@ extern "C" float* chatterbox_synthesize(struct chatterbox_context* ctx, const ch
     }
 
     int64_t t_s3_0 = ggml_time_us();
-    float* pcm =
-        chatterbox_s3gen_synthesize(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt, prompt_feat,
-                                    prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_n_samples);
+    float* pcm;
+    {
+        chatterbox_bench_stage _b("s3gen_vocoder");
+        pcm = chatterbox_s3gen_synthesize(ctx->s3gen_ctx, speech_tokens, n_tokens, prompt_tokens, n_prompt, prompt_feat,
+                                          prompt_feat_len, spk_emb, ctx->params.cfm_steps, out_n_samples);
+    }
     int64_t t_s3gen_us = ggml_time_us() - t_s3_0;
 
     chatterbox_tokens_free(speech_tokens);
