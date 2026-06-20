@@ -196,6 +196,9 @@ struct zonos_tts_context {
     // Per-codebook embeddings and heads
     std::vector<ggml_tensor*> emb_w;  // [n_codebooks] each (emb_vocab_size, d_model)
     std::vector<ggml_tensor*> head_w; // [n_codebooks] each (head_vocab_size, d_model)
+    // §176g: CPU F32 cache of emb_w — eliminates per-step quantized tensor_get in AR loop.
+    // Size: n_codebooks × emb_vocab_size × d_model × 4 ≈ 75 MB for the default Zonos-0.1.
+    std::vector<std::vector<float>> emb_w_cache; // [k][tid * d_model + dim]
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
@@ -498,6 +501,25 @@ struct zonos_tts_context* zonos_tts_init_from_file(const char* path_model, struc
         ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 4096, false, false);
     }
     ctx->compute_meta.resize(ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(4096, false));
+
+    // §176g: pre-dequantize all codebook embedding tables into F32 CPU cache.
+    {
+        const int d = (int)hp.d_model;
+        const int v = (int)hp.emb_vocab_size;
+        ctx->emb_w_cache.resize(hp.n_codebooks);
+        for (uint32_t k = 0; k < hp.n_codebooks; k++) {
+            ctx->emb_w_cache[k].resize((size_t)v * d);
+            ggml_tensor* w = ctx->emb_w[k];
+            if (w->type == GGML_TYPE_F32) {
+                ggml_backend_tensor_get(w, ctx->emb_w_cache[k].data(), 0, (size_t)v * d * sizeof(float));
+            } else {
+                const size_t nbytes = ggml_nbytes(w);
+                std::vector<uint8_t> raw(nbytes);
+                ggml_backend_tensor_get(w, raw.data(), 0, nbytes);
+                ggml_get_type_traits(w->type)->to_float(raw.data(), ctx->emb_w_cache[k].data(), v * d);
+            }
+        }
+    }
 
     return ctx;
 }
@@ -952,10 +974,13 @@ static void tensor_get_row_f32(ggml_tensor* t, int row_idx, float* out, int row_
             out[i] = ggml_fp16_to_fp32(raw[i]);
         }
     } else {
-        // For quantized types, read the full tensor and extract the row
-        // (quantized row sizes are block-aligned, so we dequant the whole thing)
-        auto all = tensor_to_float(t);
-        std::memcpy(out, &all[(size_t)row_idx * row_size], (size_t)row_size * sizeof(float));
+        // §176g: single-row quantized fetch — O(row_size) not O(vocab × row_size).
+        const size_t row_bytes = ggml_row_size(t->type, row_size);
+        static thread_local std::vector<uint8_t> raw_buf;
+        if (raw_buf.size() < row_bytes)
+            raw_buf.resize(row_bytes);
+        ggml_backend_tensor_get(t, raw_buf.data(), (size_t)row_idx * row_bytes, row_bytes);
+        ggml_get_type_traits(t->type)->to_float(raw_buf.data(), out, row_size);
     }
 }
 
@@ -1388,13 +1413,12 @@ static void embed_codebook_tokens(zonos_tts_context* ctx, const int32_t* tokens,
     const int d = (int)hp.d_model;
     std::memset(out_embed, 0, (size_t)d * sizeof(float));
 
-    std::vector<float> row(d);
     for (uint32_t k = 0; k < hp.n_codebooks; k++) {
         int tid = tokens[k];
         if (tid < 0 || tid >= (int)hp.emb_vocab_size)
             tid = (int)hp.masked_token_id;
-        // emb_w[k]: ne = [d_model, emb_vocab_size]
-        tensor_get_row_f32(ctx->emb_w[k], tid, row.data(), d);
+        // §176g: direct memcpy from pre-dequantized CPU cache — no GPU round-trip.
+        const float* row = ctx->emb_w_cache[k].data() + (size_t)tid * d;
         for (int i = 0; i < d; i++) {
             out_embed[i] += row[i];
         }
@@ -1556,9 +1580,8 @@ float* zonos_tts_get_prefill_hidden(struct zonos_tts_context* ctx, const char* t
     // Append mask frame
     {
         std::vector<float> mask_emb(d, 0.0f);
-        std::vector<float> row(d);
         for (uint32_t k = 0; k < hp.n_codebooks; k++) {
-            tensor_get_row_f32(ctx->emb_w[k], (int)hp.masked_token_id, row.data(), d);
+            const float* row = ctx->emb_w_cache[k].data() + (size_t)hp.masked_token_id * d;
             for (int i = 0; i < d; i++)
                 mask_emb[i] += row[i];
         }
@@ -1641,9 +1664,8 @@ float* zonos_tts_run_ar_steps_dump(struct zonos_tts_context* ctx, const char* te
     // Append mask frame to each prefix
     {
         std::vector<float> mask_emb(d, 0.0f);
-        std::vector<float> row(d);
         for (uint32_t k = 0; k < hp.n_codebooks; k++) {
-            tensor_get_row_f32(ctx->emb_w[k], mask_id, row.data(), d);
+            const float* row = ctx->emb_w_cache[k].data() + (size_t)mask_id * d;
             for (int i = 0; i < d; i++)
                 mask_emb[i] += row[i];
         }
@@ -1890,9 +1912,8 @@ int32_t* zonos_tts_synthesize_codes(struct zonos_tts_context* ctx, const char* t
     // Without this, the model predicts EOS immediately.
     {
         std::vector<float> mask_frame_embed(d, 0.0f);
-        std::vector<float> row(d);
         for (uint32_t k = 0; k < hp.n_codebooks; k++) {
-            tensor_get_row_f32(ctx->emb_w[k], (int)hp.masked_token_id, row.data(), d);
+            const float* row = ctx->emb_w_cache[k].data() + (size_t)hp.masked_token_id * d;
             for (int i = 0; i < d; i++)
                 mask_frame_embed[i] += row[i];
         }
