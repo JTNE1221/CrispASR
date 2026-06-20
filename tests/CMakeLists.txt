@@ -1091,6 +1091,177 @@ catch_discover_tests(test-voxcpm2-params
     PROPERTIES LABELS "unit;voxcpm2"
 )
 
+# ─── test-cohere-params — Catch2 unit tests for cohere_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-cohere-params
+    test-cohere-params.cpp
+)
+target_include_directories(test-cohere-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-cohere-params PRIVATE
+    Catch2::Catch2WithMain
+    cohere
+)
+catch_discover_tests(test-cohere-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;cohere"
+)
+
+# ─── test-fastpitch-params — Catch2 unit tests for fastpitch_tts_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-fastpitch-params
+    test-fastpitch-params.cpp
+)
+target_include_directories(test-fastpitch-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-fastpitch-params PRIVATE
+    Catch2::Catch2WithMain
+    fastpitch-tts
+)
+catch_discover_tests(test-fastpitch-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;fastpitch"
+)
+
+# ─── test-glmasr-params — Catch2 unit tests for glm_asr_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-glmasr-params
+    test-glmasr-params.cpp
+)
+target_include_directories(test-glmasr-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-glmasr-params PRIVATE
+    Catch2::Catch2WithMain
+    glm-asr
+)
+catch_discover_tests(test-glmasr-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;glm_asr"
+)
+
+# ─── test-granitespeech-params — Catch2 unit tests for granite_speech_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-granitespeech-params
+    test-granitespeech-params.cpp
+)
+target_include_directories(test-granitespeech-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-granitespeech-params PRIVATE
+    Catch2::Catch2WithMain
+    granite_speech
+)
+catch_discover_tests(test-granitespeech-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;granite_speech"
+)
+
+# ─── test-indextts-params — Catch2 unit tests for indextts_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-indextts-params
+    test-indextts-params.cpp
+)
+target_include_directories(test-indextts-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-indextts-params PRIVATE
+    Catch2::Catch2WithMain
+    indextts
+)
+catch_discover_tests(test-indextts-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;indextts"
+)
+
+# ─── test-kyutaistt-params — Catch2 unit tests for kyutai_stt_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-kyutaistt-params
+    test-kyutaistt-params.cpp
+)
+target_include_directories(test-kyutaistt-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-kyutaistt-params PRIVATE
+    Catch2::Catch2WithMain
+    kyutai-stt
+)
+catch_discover_tests(test-kyutaistt-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;kyutai_stt"
+)
+
+# ─── test-m2m100-params — Catch2 unit tests for m2m100_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-m2m100-params
+    test-m2m100-params.cpp
+)
+target_include_directories(test-m2m100-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-m2m100-params PRIVATE
+    Catch2::Catch2WithMain
+    m2m100
+)
+catch_discover_tests(test-m2m100-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;m2m100"
+)
+
+# ─── test-moonshine-stream-params — Catch2 unit tests for moonshine_streaming_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-moonshine-stream-params
+    test-moonshine-stream-params.cpp
+)
+target_include_directories(test-moonshine-stream-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-moonshine-stream-params PRIVATE
+    Catch2::Catch2WithMain
+    moonshine_streaming
+    crispasr-core
+)
+catch_discover_tests(test-moonshine-stream-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;moonshine_streaming"
+)
+
+# ─── test-openvoice2-params — Catch2 unit tests for openvoice2_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-openvoice2-params
+    test-openvoice2-params.cpp
+)
+target_include_directories(test-openvoice2-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-openvoice2-params PRIVATE
+    Catch2::Catch2WithMain
+    openvoice2
+)
+catch_discover_tests(test-openvoice2-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;openvoice2"
+)
+
+# ─── test-t5translate-params — Catch2 unit tests for t5_translate_context_params defaults
+# and null-guard coverage. No GGUF required. ───────────────────────────────────
+add_executable(test-t5translate-params
+    test-t5translate-params.cpp
+)
+target_include_directories(test-t5translate-params PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-t5translate-params PRIVATE
+    Catch2::Catch2WithMain
+    t5_translate
+)
+catch_discover_tests(test-t5translate-params
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;t5_translate"
+)
+
 # ─── test-qwen3-tts-cv-style — Catch2 unit tests for qwen3_tts_set_cv_style_instruct
 # (issue #91: --instruct silently ignored for CustomVoice models).
 # Exercises null-ctx guards and default-params sanity — no GGUF needed. ─────
