@@ -265,6 +265,17 @@ struct f5_tts_context {
 
     // Cached fused DiT graph (rebuilt only when T changes)
     f5_dit_graph_cache dit_cache;
+
+    // Pre-dequantized F32 input-embedding weights.
+    // Avoids 64× read_tensor_f32 per synthesis (conv_pos tensors are 7.7 MB each).
+    struct {
+        std::vector<float> input_proj_w; // (dim, cat_dim)
+        std::vector<float> input_proj_b; // (dim,)
+        std::vector<float> conv_pos_0_w; // (dim, dim/groups, K)
+        std::vector<float> conv_pos_0_b; // (dim,)
+        std::vector<float> conv_pos_1_w;
+        std::vector<float> conv_pos_1_b;
+    } emb_cache;
 };
 
 // ── Diff dump helpers ────────────────────────────────────────────
@@ -1113,7 +1124,6 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
                                       const float* cond_data, const float* text_data, int text_dim,
                                       const float* time_emb_data, bool drop_audio_cond, bool drop_text, int step_idx) {
     const auto& hp = ctx->hp;
-    const auto& w = ctx->w;
     int dim = hp.dim;
 
     // ── InputEmbedding: cat(x, cond, text) → proj → +conv_pos_embed ──
@@ -1134,37 +1144,26 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
 
     if (step_idx == 0 && !drop_audio_cond) {
         dump_stage(ctx, "cat_input", cat_input.data(), cat_input.size());
-        // Dump the weight matrix for verification
-        std::vector<float> proj_w;
-        read_tensor_f32(w.input_proj_weight, proj_w);
-        dump_stage(ctx, "debug_proj_weight", proj_w.data(), proj_w.size());
+        dump_stage(ctx, "debug_proj_weight", ctx->emb_cache.input_proj_w.data(), ctx->emb_cache.input_proj_w.size());
     }
 
-    // Linear projection: (T, 712) → (T, 1024) — on CPU for exact results
-    std::vector<float> proj_w, proj_b;
-    read_tensor_f32(w.input_proj_weight, proj_w); // (1024, 712) row-major
-    read_tensor_f32(w.input_proj_bias, proj_b);
-
+    // Linear projection: (T, 712) → (T, 1024) — use pre-cached F32 weights
     std::vector<float> hidden(T * dim, 0.0f);
-    f5_linear(cat_input.data(), proj_w.data(), proj_b.data(), hidden.data(), T, cat_dim, dim);
+    f5_linear(cat_input.data(), ctx->emb_cache.input_proj_w.data(), ctx->emb_cache.input_proj_b.data(), hidden.data(),
+              T, cat_dim, dim);
 
     if (step_idx == 0 && !drop_audio_cond) {
         dump_stage(ctx, "input_proj_out", hidden.data(), hidden.size());
     }
 
     // ConvPositionEmbedding: 2× (Conv1d(dim, dim, k=31, g=16, p=15) + Mish)
-    // Implemented on CPU as grouped conv (groups=16).
+    // Uses pre-cached weights; avoids 7.7 MB read_tensor_f32 per call.
     {
         int K = 31, pad_k = 15, groups = 16;
-        int ch_per_group = dim / groups; // 1024/16 = 64
 
-        auto grouped_conv_mish = [&](const std::vector<float>& input, ggml_tensor* w_tensor, ggml_tensor* b_tensor) {
-            std::vector<float> wt, bias;
-            read_tensor_f32(w_tensor, wt);
-            read_tensor_f32(b_tensor, bias);
-
+        auto grouped_conv_mish = [&](const std::vector<float>& input, const float* wt, const float* bias) {
             std::vector<float> output(T * dim, 0.0f);
-            f5_grouped_conv1d(input.data(), wt.data(), bias.data(), output.data(), T, dim, K, pad_k, groups);
+            f5_grouped_conv1d(input.data(), wt, bias, output.data(), T, dim, K, pad_k, groups);
             for (auto& v : output) {
                 float sp = logf(1.0f + expf(v));
                 v = v * tanhf(sp);
@@ -1173,8 +1172,8 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
         };
 
         std::vector<float> proj_out = hidden;
-        hidden = grouped_conv_mish(hidden, w.conv_pos_0_weight, w.conv_pos_0_bias);
-        hidden = grouped_conv_mish(hidden, w.conv_pos_1_weight, w.conv_pos_1_bias);
+        hidden = grouped_conv_mish(hidden, ctx->emb_cache.conv_pos_0_w.data(), ctx->emb_cache.conv_pos_0_b.data());
+        hidden = grouped_conv_mish(hidden, ctx->emb_cache.conv_pos_1_w.data(), ctx->emb_cache.conv_pos_1_b.data());
 
         for (size_t i = 0; i < hidden.size(); i++) {
             hidden[i] += proj_out[i];
@@ -1807,6 +1806,18 @@ struct f5_tts_context* f5_tts_init_from_file(const char* path_model, struct f5_t
         fprintf(stderr, "f5_tts: failed to load model: %s\n", path_model);
         f5_tts_free(ctx);
         return nullptr;
+    }
+
+    // Pre-dequantize input-embedding weights once to avoid 64× reads per synthesis
+    {
+        auto& ec = ctx->emb_cache;
+        const auto& w = ctx->w;
+        read_tensor_f32(w.input_proj_weight, ec.input_proj_w);
+        read_tensor_f32(w.input_proj_bias, ec.input_proj_b);
+        read_tensor_f32(w.conv_pos_0_weight, ec.conv_pos_0_w);
+        read_tensor_f32(w.conv_pos_0_bias, ec.conv_pos_0_b);
+        read_tensor_f32(w.conv_pos_1_weight, ec.conv_pos_1_w);
+        read_tensor_f32(w.conv_pos_1_bias, ec.conv_pos_1_b);
     }
 
     // Create backend scheduler

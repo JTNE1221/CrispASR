@@ -6381,3 +6381,25 @@ numerically identical by construction.
 
 **Files:** `src/f5_tts.cpp` (+`f5_dit_graph_cache`, `f5_dit_cache_build`,
 `f5_dit_run`; simplified `dit_forward`)
+
+## §184 F5-TTS input-embedding weight pre-cache — DONE 2026-06-20
+
+**Problem:** `dit_forward` called `read_tensor_f32` for the input projection and
+two ConvPositionEmbedding weights on every invocation. With CFG (default) and 32
+ODE steps, each synthesis triggered 6 reads × 64 calls = 384 `read_tensor_f32`
+operations. The two `conv_pos_0/1_weight` tensors are 7.7 MB each, totalling
+~985 MB of memory reads per synthesis (+ dequant overhead for quantized models).
+
+**Fix:** Added `f5_tts_context::emb_cache` struct (6 `std::vector<float>` fields)
+populated once in `f5_tts_init` after `load_weights`. Updated `dit_forward` to
+use the cached pointers:
+- Removed `read_tensor_f32(w.input_proj_weight, ...)` / `input_proj_bias` per call.
+- Changed `grouped_conv_mish` lambda from `ggml_tensor*` args → `const float*`,
+  removing two `read_tensor_f32` calls inside the lambda.
+- Also removes the spurious `ch_per_group` unused-variable from the lambda.
+
+**Cost:** ~18 MB resident (2×7.7 + 2.9 + biases) per loaded F5-TTS context.
+For quantized models (Q4_K) this avoids repeated dequantization overhead.
+
+**Files:** `src/f5_tts.cpp` (`emb_cache` in `f5_tts_context`; `f5_tts_init`;
+`dit_forward` input-embedding section)

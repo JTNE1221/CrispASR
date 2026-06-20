@@ -6,6 +6,14 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-20 §184 F5-TTS input-embedding weight pre-cache
+
+Pre-dequantize the six input-embedding weights (input_proj + conv_pos_0/1
+weight+bias) once at model load instead of on every `dit_forward` call.
+At cfg_strength=2.0 and 32 ODE steps, saves 384 read_tensor_f32 calls
+(including ~985 MB of memory reads for the two 7.7 MB conv_pos tensors).
+For Q4_K models, also avoids repeated dequantization. Cost: ~18 MB resident.
+
 ## 2026-06-20 §183 F5-TTS DiT — fused single ggml graph
 
 Replaced 23 separate ggml sub-graphs per `dit_forward` call (22 DiT blocks +
