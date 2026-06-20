@@ -18,6 +18,7 @@
 #include "gguf.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `FASTPITCH_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool fastpitch_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("FASTPITCH_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct fastpitch_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit fastpitch_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~fastpitch_bench_stage() {
+        if (!fastpitch_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  fastpitch_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Dump helpers (env-gated: FASTPITCH_DUMP_DIR) ────────────────────
 
@@ -811,6 +838,7 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
 
     // ── Step 2: Build and run encoder + predictors graph ──
     {
+        fastpitch_bench_stage _b("encoder+predictors");
         mini_graph mg;
         auto* gc = mg.ctx;
 
@@ -996,6 +1024,7 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
 
         std::vector<float> dec_out_data;
         {
+            fastpitch_bench_stage _b("decoder");
             mini_graph mg_dec;
             auto* gc3 = mg_dec.ctx;
 
@@ -1058,6 +1087,7 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
 
         int T_mel = T_frames;
         {
+            fastpitch_bench_stage _b("hifigan_vocoder");
             mini_graph mg_voc;
             auto* gc4 = mg_voc.ctx;
 

@@ -37,14 +37,15 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <random>
 #include <string>
-#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -55,6 +56,32 @@
 // core_spm::tokenize Viterbi segmenter.
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `POCKET_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool pocket_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("POCKET_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct pocket_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit pocket_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~pocket_tts_bench_stage() {
+        if (!pocket_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  pocket_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ────────────────────────────────────────────────
 
@@ -2875,6 +2902,8 @@ float* pocket_tts_synthesize(struct pocket_tts_context* ctx, const char* text, i
         return std::string(pocket_dump_dir ? pocket_dump_dir : ".") + "/" + name;
     };
 
+    pocket_tts_bench_stage _bs_synth("synthesize");
+
     // 1. Tokenize text
     std::vector<int32_t> tokens = tokenize_text(ctx, text);
     if (tokens.empty()) {
@@ -3110,11 +3139,14 @@ float* pocket_tts_synthesize(struct pocket_tts_context* ctx, const char* text, i
     // 5. Mimi decode: latent sequence -> PCM
     float* pcm = nullptr;
     int pcm_samples = 0;
-    // use_gpu=false forces the manual CPU Mimi path; env POCKET_MANUAL_MIMI=1 also.
-    if (!ctx->params.use_gpu || getenv("POCKET_MANUAL_MIMI")) {
-        mimi_decode(ctx, latent_sequence.data(), n_gen_frames, &pcm, &pcm_samples);
-    } else {
-        mimi_decode_ggml(ctx, latent_sequence.data(), n_gen_frames, &pcm, &pcm_samples);
+    {
+        pocket_tts_bench_stage _bs("mimi_decode");
+        // use_gpu=false forces the manual CPU Mimi path; env POCKET_MANUAL_MIMI=1 also.
+        if (!ctx->params.use_gpu || getenv("POCKET_MANUAL_MIMI")) {
+            mimi_decode(ctx, latent_sequence.data(), n_gen_frames, &pcm, &pcm_samples);
+        } else {
+            mimi_decode_ggml(ctx, latent_sequence.data(), n_gen_frames, &pcm, &pcm_samples);
+        }
     }
 
     if (!pcm || pcm_samples <= 0) {

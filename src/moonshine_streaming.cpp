@@ -22,6 +22,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `MOONSHINE_STREAM_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool moonshine_stream_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("MOONSHINE_STREAM_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct moonshine_stream_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit moonshine_stream_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~moonshine_stream_bench_stage() {
+        if (!moonshine_stream_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  moonshine_stream_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ─────────────────────────────────────────────────────────
 
@@ -710,7 +737,10 @@ static char* moonshine_streaming_transcribe_impl(struct moonshine_streaming_cont
     // Step 1: Audio frontend
     std::vector<float> frontend_out;
     int T_enc = 0;
-    audio_frontend_cpu(pcm, n_samples, m, frontend_out, T_enc);
+    {
+        moonshine_stream_bench_stage _b("audio_frontend");
+        audio_frontend_cpu(pcm, n_samples, m, frontend_out, T_enc);
+    }
     if (T_enc <= 0)
         return nullptr;
 
@@ -726,8 +756,11 @@ static char* moonshine_streaming_transcribe_impl(struct moonshine_streaming_cont
 
     // Step 2: Encoder
     std::vector<float> enc_output;
-    if (run_encoder(ctx, frontend_out.data(), T_enc, enc_output) != 0) {
-        return nullptr;
+    {
+        moonshine_stream_bench_stage _b("encoder");
+        if (run_encoder(ctx, frontend_out.data(), T_enc, enc_output) != 0) {
+            return nullptr;
+        }
     }
 
     if (ctx->verbosity >= 2) {
@@ -737,6 +770,7 @@ static char* moonshine_streaming_transcribe_impl(struct moonshine_streaming_cont
 
     // Step 3: Decoder — adapted from moonshine.cpp's decoder pattern.
     // Uses ggml tensor KV caches with gallocr per step.
+    moonshine_stream_bench_stage _b_dec("decoder");
     auto& hp = m.hp;
     int enc_h = (int)hp.enc_hidden;
     int dec_h = (int)hp.dec_hidden;

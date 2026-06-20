@@ -558,12 +558,19 @@ session each when somebody wants to push the numbers:
    first call to each bucket pays the build cost; everything after
    reuses it. Expected savings: 10-20 ms per call once warm.
 
-3. **Fused LLM QKV.** Pattern from `qwen3_asr.cpp`: concat the per-block
-   Q/K/V weights along the output axis at load time (byte-concat for
-   F16/Q4_K — no requantization needed) and submit one matmul per
-   layer instead of three. qwen3_asr opts in via
-   `CRISPASR_QWEN3_ASR_FUSED_QKV`; funasr would mirror with
-   `CRISPASR_FUNASR_FUSED_QKV`. Expected savings: 5-10 % on decode.
+3. **Fused LLM QKV — DONE (shipped at initial port time).** Pattern from
+   `qwen3_asr.cpp`: concat Q/K/V weights at load, one matmul per layer.
+   Already implemented in `funasr_init_from_file` (unconditional, no
+   env-var opt-out — fused at load if Q/K/V shapes + types match).
+
+4. **Single-token embed fast path — DONE (2026-06-20, HISTORY §180).**
+   `CRISPASR_FUNASR_EMBED_FAST` (default ON). AR decode hot path called
+   `funasr_embed_tokens({next_id})` once per step, paying full graph-build
+   + sched-alloc overhead for a single GET_ROWS. New path dequants one
+   row directly from `token_embd.weight`, skipping the graph. Transcript
+   byte-identical. VPS A/B: embed step ~1.6× faster (15–26 vs 27–41
+   ms/tok). On M1 Metal (~37 ms/tok total decode), this is the
+   lowest-hanging fruit from item #1 above.
 
 4. **Two-pass: CTC fast pass → Fun-ASR-Nano LLM rescore.**
    RapidAI/RapidSpeech.cpp claims a "CTC fast pass + LLM rescoring" path

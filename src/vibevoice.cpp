@@ -40,6 +40,32 @@
 #include <vector>
 
 // ===========================================================================
+// Bench instrumentation — `VIBEVOICE_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool vibevoice_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("VIBEVOICE_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct vibevoice_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit vibevoice_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~vibevoice_bench_stage() {
+        if (!vibevoice_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  vibevoice_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
+// ===========================================================================
 // Hyperparams
 // ===========================================================================
 
@@ -990,6 +1016,8 @@ static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const floa
             return nullptr;
         }
     }
+
+    vibevoice_bench_stage _bs_total("transcribe_total");
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "vibevoice: %d samples (%.2fs at 24kHz)\n", n_samples, n_samples / 24000.0f);

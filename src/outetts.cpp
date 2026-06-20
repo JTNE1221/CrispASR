@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +42,32 @@
 #include <vector>
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `OUTETTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool outetts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("OUTETTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct outetts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit outetts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~outetts_bench_stage() {
+        if (!outetts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  outetts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 struct outetts_hp {
     uint32_t n_layers = 16;
@@ -404,8 +431,28 @@ static ggml_cgraph* build_graph_talker_kv(outetts_context* c, int n_past, int n_
 // Compute helpers
 // ---------------------------------------------------------------------------
 
+// Direct CPU dequant for a single token — avoids building a full ggml
+// graph + sched cycle just for one ggml_get_rows op (§176o). Falls back
+// to the graph path for batched prefill (n > 1).
 static float* embed_tokens(outetts_context* c, const int32_t* ids, int n) {
     const int d = (int)c->hp.d_model;
+
+    if (n == 1) {
+        const ggml_tensor* w = c->talker.token_embd_w;
+        const size_t row_bytes = ggml_row_size(w->type, d);
+        static thread_local std::vector<uint8_t> raw;
+        if (raw.size() < row_bytes)
+            raw.resize(row_bytes);
+        ggml_backend_tensor_get(w, raw.data(), (size_t)ids[0] * row_bytes, row_bytes);
+        float* r = (float*)malloc((size_t)d * sizeof(float));
+        if (w->type == GGML_TYPE_F32) {
+            std::memcpy(r, raw.data(), (size_t)d * sizeof(float));
+        } else {
+            ggml_get_type_traits(w->type)->to_float(raw.data(), r, d);
+        }
+        return r;
+    }
+
     ggml_cgraph* gf = build_graph_embed(c, n);
     ggml_backend_sched_reset(c->sched);
     if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
@@ -1161,13 +1208,23 @@ extern "C" float* outetts_synthesize(struct outetts_context* ctx, const char* te
         }
     }
 
+    outetts_bench_stage _bs_synth("synthesize");
+
     int n_codes = 0;
-    int32_t* codes = outetts_synthesize_codes(ctx, text, &n_codes);
+    int32_t* codes;
+    {
+        outetts_bench_stage _bs("ar_decode");
+        codes = outetts_synthesize_codes(ctx, text, &n_codes);
+    }
     if (!codes || n_codes <= 0)
         return nullptr;
 
     int n_pcm = 0;
-    float* pcm = wavtok_decoder_decode(ctx->wavtok_dec, codes, n_codes, &n_pcm);
+    float* pcm;
+    {
+        outetts_bench_stage _bs("wavtok_decode");
+        pcm = wavtok_decoder_decode(ctx->wavtok_dec, codes, n_codes, &n_pcm);
+    }
     free(codes);
 
     if (!pcm || n_pcm <= 0)

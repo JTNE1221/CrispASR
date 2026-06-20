@@ -29,11 +29,12 @@
 #endif
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <climits>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -42,6 +43,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `QWEN3_ASR_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool qwen3_asr_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("QWEN3_ASR_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct qwen3_asr_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit qwen3_asr_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~qwen3_asr_bench_stage() {
+        if (!qwen3_asr_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  qwen3_asr_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // Hyper-parameters
 // ===========================================================================
@@ -2038,7 +2066,11 @@ extern "C" int qwen3_asr_align_words(struct qwen3_asr_context* ctx, const float*
 
     // 1. Mel
     int n_mels = 0, T_mel = 0;
-    float* mel = qwen3_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    float* mel;
+    {
+        qwen3_asr_bench_stage _b("mel");
+        mel = qwen3_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    }
     if (!mel) {
         fprintf(stderr, "qwen3_asr[align]: mel failed\n");
         return -2;
@@ -2046,7 +2078,11 @@ extern "C" int qwen3_asr_align_words(struct qwen3_asr_context* ctx, const float*
 
     // 2. Audio encoder
     int N_enc = 0, pdim = 0;
-    float* audio_embeds = qwen3_asr_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
+    float* audio_embeds;
+    {
+        qwen3_asr_bench_stage _b("encoder");
+        audio_embeds = qwen3_asr_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &pdim);
+    }
     free(mel);
     if (!audio_embeds) {
         fprintf(stderr, "qwen3_asr[align]: encoder failed\n");
@@ -2109,13 +2145,20 @@ extern "C" int qwen3_asr_align_words(struct qwen3_asr_context* ctx, const float*
     free(audio_embeds);
 
     // 5. KV cache + aligner forward
-    if (!qwen3_asr_kv_init(ctx, /*max_ctx*/ std::max(4096, T_prompt + 16))) {
-        free(text_embeds);
-        fprintf(stderr, "qwen3_asr[align]: kv_init failed\n");
-        return -5;
+    {
+        qwen3_asr_bench_stage _b("kv_init");
+        if (!qwen3_asr_kv_init(ctx, /*max_ctx*/ std::max(4096, T_prompt + 16))) {
+            free(text_embeds);
+            fprintf(stderr, "qwen3_asr[align]: kv_init failed\n");
+            return -5;
+        }
     }
     int n_t_out = 0, H = 0;
-    float* logits = qwen3_asr_run_aligner(ctx, text_embeds, T_prompt, &n_t_out, &H);
+    float* logits;
+    {
+        qwen3_asr_bench_stage _b("aligner_forward");
+        logits = qwen3_asr_run_aligner(ctx, text_embeds, T_prompt, &n_t_out, &H);
+    }
     free(text_embeds);
     if (!logits) {
         fprintf(stderr, "qwen3_asr[align]: aligner forward failed\n");

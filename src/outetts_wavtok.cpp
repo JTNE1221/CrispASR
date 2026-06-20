@@ -16,6 +16,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `WAVTOK_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool wavtok_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("WAVTOK_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct wavtok_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit wavtok_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~wavtok_bench_stage() {
+        if (!wavtok_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  wavtok_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 namespace {
 
@@ -661,6 +688,8 @@ extern "C" float* wavtok_decoder_decode(struct wavtok_decoder_ctx* ctx, const in
 
     const int T = n_codes;
 
+    wavtok_bench_stage _bs_total("decode");
+
     // Build and compute the backbone graph
     const size_t meta_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
     std::vector<uint8_t> meta(meta_size);
@@ -838,8 +867,11 @@ extern "C" float* wavtok_decoder_decode(struct wavtok_decoder_ctx* ctx, const in
     }
 
     // iSTFT
-    std::vector<float> pcm =
-        istft_cpu(mag.data(), phase.data(), n_freq, T_out, n_fft, hop, window.empty() ? nullptr : window.data());
+    std::vector<float> pcm;
+    {
+        wavtok_bench_stage _bs("istft");
+        pcm = istft_cpu(mag.data(), phase.data(), n_freq, T_out, n_fft, hop, window.empty() ? nullptr : window.data());
+    }
 
     // Dump mag, phase, audio if requested
     if (dumping) {

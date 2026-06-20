@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +46,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `F5_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool f5_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("F5_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct f5_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit f5_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~f5_bench_stage() {
+        if (!f5_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  f5_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ──────────────────────────────────────────────
 
@@ -1818,7 +1845,11 @@ int f5_tts_synthesize(struct f5_tts_context* ctx, const char* text, float** pcm_
     }
 
     // ── Text embedding ──
-    auto text_emb = compute_text_embed(ctx, tokens.data(), (int)tokens.size(), duration);
+    std::vector<float> text_emb;
+    {
+        f5_bench_stage _b("text_embed");
+        text_emb = compute_text_embed(ctx, tokens.data(), (int)tokens.size(), duration);
+    }
     if (text_emb.empty())
         return 0;
     dump_stage(ctx, "text_embed", text_emb.data(), text_emb.size());
@@ -1844,7 +1875,11 @@ int f5_tts_synthesize(struct f5_tts_context* ctx, const char* text, float** pcm_
     }
 
     // ── ODE solve ──
-    auto generated = euler_solve(ctx, step_cond, text_emb, text_emb_uncond, duration, mel_dim, text_dim);
+    std::vector<float> generated;
+    {
+        f5_bench_stage _b("ode_solve");
+        generated = euler_solve(ctx, step_cond, text_emb, text_emb_uncond, duration, mel_dim, text_dim);
+    }
     if (generated.empty())
         return 0;
 
@@ -1861,6 +1896,7 @@ int f5_tts_synthesize(struct f5_tts_context* ctx, const char* text, float** pcm_
     dump_stage(ctx, "vocos_input", gen_mel.data(), gen_mel.size());
 
     // ── Vocos vocoder ──
+    f5_bench_stage _b_voc("vocos_vocoder");
     auto audio = vocos_decode(ctx, gen_mel.data(), gen_T, mel_dim);
     if (audio.empty()) {
         // Fallback: return empty for now, will be filled once vocos is implemented

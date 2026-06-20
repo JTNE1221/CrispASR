@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `T5_TRANSLATE_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool t5_translate_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("T5_TRANSLATE_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct t5_translate_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit t5_translate_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~t5_translate_bench_stage() {
+        if (!t5_translate_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  t5_translate_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ──────────────────────────────────────────────
 
@@ -1029,6 +1056,7 @@ extern "C" char* t5_translate(struct t5_translate_context* ctx, const char* text
         return nullptr;
     if (max_new_tokens <= 0)
         max_new_tokens = 200;
+    t5_translate_bench_stage _bs_total("translate_total");
 
     const auto& hp = ctx->model.hp;
 

@@ -26,6 +26,7 @@
 #endif
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -39,6 +40,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `VOXTRAL_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool voxtral_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("VOXTRAL_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct voxtral_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit voxtral_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~voxtral_bench_stage() {
+        if (!voxtral_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  voxtral_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 // ===========================================================================
 // Hyper-parameters (filled from voxtral.* GGUF kv)
 // ===========================================================================
@@ -484,6 +512,7 @@ extern "C" float* voxtral_compute_mel(voxtral_context* ctx, const float* samples
                                       int* out_T_mel) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
+    voxtral_bench_stage _b("mel");
     if (!ctx->model.audio.mel_filters || !ctx->model.audio.mel_window) {
         fprintf(stderr, "voxtral: GGUF missing audio.mel_filters/mel_window — re-convert\n");
         return nullptr;
@@ -1130,6 +1159,7 @@ extern "C" float* voxtral_run_llm_kv(voxtral_context* ctx, const float* inputs_e
                                      int* out_n_tokens, int* out_vocab_size) {
     if (!ctx || !inputs_embeds || n_tokens <= 0 || !ctx->kv_k)
         return nullptr;
+    voxtral_bench_stage _b("llm_kv");
     const auto& hp = ctx->model.hparams;
     const int d = (int)hp.llm_d_model, vocab = (int)hp.llm_vocab_size, Lk = n_past + n_tokens;
 
@@ -1179,6 +1209,7 @@ extern "C" float* voxtral_run_encoder(voxtral_context* ctx, const float* mel_fea
                                       int* out_N, int* out_dim) {
     if (!ctx || !mel_features)
         return nullptr;
+    voxtral_bench_stage _b("encoder");
     const auto& hp = ctx->model.hparams;
     if (n_mels != (int)hp.n_mels || T_mel != 3000) {
         fprintf(stderr, "voxtral: encoder expects (128, 3000) mel, got (%d, %d)\n", n_mels, T_mel);
@@ -1410,6 +1441,7 @@ extern "C" float* voxtral_run_llm(voxtral_context* ctx, const int32_t* input_ids
                                   int* out_vocab_size) {
     if (!ctx || !input_ids || n_tokens <= 0)
         return nullptr;
+    voxtral_bench_stage _b("llm");
     const auto& hp = ctx->model.hparams;
     const int vocab = (int)hp.llm_vocab_size;
 

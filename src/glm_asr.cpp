@@ -27,12 +27,39 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `GLM_ASR_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool glm_asr_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("GLM_ASR_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct glm_asr_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit glm_asr_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~glm_asr_bench_stage() {
+        if (!glm_asr_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  glm_asr_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model structures
@@ -533,7 +560,11 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
 
     // 1. Compute mel
     int n_mels = 0, T_mel = 0;
-    float* mel = glm_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    float* mel;
+    {
+        glm_asr_bench_stage _b("mel");
+        mel = glm_asr_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
+    }
     if (!mel)
         return nullptr;
 
@@ -558,7 +589,11 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
 
     // 2. Run encoder + projector
     int N_enc = 0, enc_dim = 0;
-    float* audio_embeds = glm_asr_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &enc_dim);
+    float* audio_embeds;
+    {
+        glm_asr_bench_stage _b("encoder");
+        audio_embeds = glm_asr_run_encoder(ctx, mel, n_mels, T_mel, &N_enc, &enc_dim);
+    }
     free(mel);
     if (!audio_embeds)
         return nullptr;
@@ -614,14 +649,21 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
     free(audio_embeds);
 
     // 6. KV cache + prefill + greedy decode
-    if (!ctx->kv_ctx && !glm_asr_kv_init(ctx, 4096)) {
-        free(text_embeds);
-        return nullptr;
+    {
+        glm_asr_bench_stage _b("kv_init");
+        if (!ctx->kv_ctx && !glm_asr_kv_init(ctx, 4096)) {
+            free(text_embeds);
+            return nullptr;
+        }
+        glm_asr_kv_reset(ctx);
     }
-    glm_asr_kv_reset(ctx);
 
     int n_t = 0, vocab = 0;
-    float* logits = glm_asr_run_llm_kv(ctx, text_embeds, (int)ids.size(), 0, &n_t, &vocab);
+    float* logits;
+    {
+        glm_asr_bench_stage _b("prefill");
+        logits = glm_asr_run_llm_kv(ctx, text_embeds, (int)ids.size(), 0, &n_t, &vocab);
+    }
     free(text_embeds);
     if (!logits)
         return nullptr;
@@ -635,6 +677,7 @@ static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* s
 
     // Generated token sequence (post-prompt) and per-token softmax probs,
     // produced by either the greedy or beam-search path below.
+    glm_asr_bench_stage _b_dec("ar_decode");
     std::vector<int32_t> gen_ids;
     std::vector<float> gen_probs;
     const int max_tokens = 512;

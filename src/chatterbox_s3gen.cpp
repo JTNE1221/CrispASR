@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,32 @@
 #include <random>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `CB_S3GEN_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool cb_s3gen_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("CB_S3GEN_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct cb_s3gen_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit cb_s3gen_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~cb_s3gen_bench_stage() {
+        if (!cb_s3gen_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  cb_s3gen_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -3347,6 +3374,7 @@ extern "C" float* chatterbox_s3gen_synthesize(struct chatterbox_s3gen_context* c
                                               int n_cfm_steps, int* out_n_samples) {
     if (!ctx || !speech_tokens || n_speech_tokens <= 0 || !out_n_samples)
         return nullptr;
+    cb_s3gen_bench_stage _bs_total("synthesize_total");
     *out_n_samples = 0;
 
     std::vector<float> gen_mel;

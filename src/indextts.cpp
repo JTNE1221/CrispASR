@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,6 +67,32 @@
 #endif
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `INDEXTTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool indextts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("INDEXTTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct indextts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit indextts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~indextts_bench_stage() {
+        if (!indextts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  indextts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ── Hyperparameters ──────────────────────────────────────────────
 
@@ -2344,6 +2371,8 @@ extern "C" int32_t* indextts_generate_mel_codes(struct indextts_context* ctx, co
     }
     *out_n = 0;
 
+    indextts_bench_stage _bs_total("generate_mel_codes");
+
     // Run conditioning pipeline if reference audio is provided
     if (ref_pcm && ref_n_samples > 0) {
         if (!run_conditioning(ctx, ref_pcm, ref_n_samples)) {
@@ -2802,9 +2831,15 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
     }
     *out_n_samples = 0;
 
+    indextts_bench_stage _bs_synth("synthesize");
+
     // Step 1: Generate mel codes via AR decode
     int n_codes = 0;
-    int32_t* codes = indextts_generate_mel_codes(ctx, text, ref_pcm, ref_n_samples, &n_codes);
+    int32_t* codes;
+    {
+        indextts_bench_stage _bs("ar_decode");
+        codes = indextts_generate_mel_codes(ctx, text, ref_pcm, ref_n_samples, &n_codes);
+    }
     if (!codes || n_codes == 0) {
         return nullptr;
     }
@@ -2853,7 +2888,11 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
 
     // Step 3: Run GPT latent extraction (second forward pass)
     // Latent has (n_codes + 1) positions: [start_mel, m1, ..., mk]
-    float* latent = run_gpt_latent(ctx, text_tokens, mel_codes_vec);
+    float* latent;
+    {
+        indextts_bench_stage _bs("latent_extraction");
+        latent = run_gpt_latent(ctx, text_tokens, mel_codes_vec);
+    }
     int n_latent = n_codes + 1; // matches Python's mel_logits[:, :-2]
     if (!latent) {
         fprintf(stderr, "indextts: latent extraction failed\n");
@@ -2920,7 +2959,11 @@ extern "C" float* indextts_synthesize(struct indextts_context* ctx, const char* 
     // Step 5: Run BigVGAN vocoder
     // latent is [n_latent, 1280] — includes start_mel + all generated mel codes.
     int n_audio = 0;
-    float* pcm = indextts_voc_generate(ctx->voc, latent, n_latent, spk_emb, &n_audio);
+    float* pcm;
+    {
+        indextts_bench_stage _bs("vocoder");
+        pcm = indextts_voc_generate(ctx->voc, latent, n_latent, spk_emb, &n_audio);
+    }
     free(latent);
     free(spk_emb);
 

@@ -19,6 +19,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `TITANET_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool titanet_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("TITANET_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct titanet_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit titanet_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~titanet_bench_stage() {
+        if (!titanet_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  titanet_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ============================================================================
 // Helpers
@@ -600,6 +627,8 @@ extern "C" int titanet_embed(struct titanet_context* ctx, const float* pcm_16k, 
     auto& c = ctx->cache;
     if (!c.initialised)
         return 0;
+
+    titanet_bench_stage _bs_total("embed_total");
 
     // 1. Mel spectrogram
     int T = 0;

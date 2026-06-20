@@ -17,6 +17,7 @@
 #include "truecaser_crf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +26,32 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `TRUECASER_CRF_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool truecaser_crf_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("TRUECASER_CRF_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct truecaser_crf_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit truecaser_crf_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~truecaser_crf_bench_stage() {
+        if (!truecaser_crf_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  truecaser_crf_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // German articles for the "after_article" feature
 static const char* k_articles[] = {"der",    "die",    "das",    "ein",    "eine", "einem", "einen",
@@ -268,6 +295,7 @@ static std::string to_upper(const std::string& s) {
 char* truecaser_crf_process(truecaser_crf_context* ctx, const char* text) {
     if (!ctx || !text)
         return nullptr;
+    truecaser_crf_bench_stage _bs_total("process_total");
 
     std::string input(text);
 

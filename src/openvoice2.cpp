@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,32 @@
 #include <random>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `OPENVOICE2_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool openvoice2_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("OPENVOICE2_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct openvoice2_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit openvoice2_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~openvoice2_bench_stage() {
+        if (!openvoice2_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  openvoice2_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1124,10 +1151,15 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
     const auto& hp = ctx->hp;
     int target_sr = hp.sample_rate; // 22050
 
+    openvoice2_bench_stage _bs_total("convert");
+
     // Resample to target sample rate
     std::vector<float> src_22k, ref_22k;
-    resample_linear(src_pcm, n_src, src_sr, target_sr, src_22k);
-    resample_linear(ref_pcm, n_ref, ref_sr, target_sr, ref_22k);
+    {
+        openvoice2_bench_stage _bs("resample");
+        resample_linear(src_pcm, n_src, src_sr, target_sr, src_22k);
+        resample_linear(ref_pcm, n_ref, ref_sr, target_sr, ref_22k);
+    }
 
     if (ctx->verbosity >= 1)
         fprintf(stderr, "openvoice2: src %d→%d samples, ref %d→%d samples\n", n_src, (int)src_22k.size(), n_ref,
@@ -1136,19 +1168,25 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
     // 1. STFT of source and reference
     int T_src, T_ref;
     std::vector<float> src_spec, ref_spec;
-    stft_magnitude(src_22k.data(), (int)src_22k.size(), hp.filter_length, hp.hop_length, hp.win_length, src_spec,
-                   T_src);
-    stft_magnitude(ref_22k.data(), (int)ref_22k.size(), hp.filter_length, hp.hop_length, hp.win_length, ref_spec,
-                   T_ref);
+    {
+        openvoice2_bench_stage _bs("stft");
+        stft_magnitude(src_22k.data(), (int)src_22k.size(), hp.filter_length, hp.hop_length, hp.win_length, src_spec,
+                       T_src);
+        stft_magnitude(ref_22k.data(), (int)ref_22k.size(), hp.filter_length, hp.hop_length, hp.win_length, ref_spec,
+                       T_ref);
+    }
 
     if (ctx->verbosity >= 1)
         fprintf(stderr, "openvoice2: STFT — src T=%d, ref T=%d (%d bins)\n", T_src, T_ref, hp.spec_channels);
 
     // 2. Extract target speaker embedding from reference
     std::vector<float> target_se;
-    if (!ref_enc_forward(ctx, ref_spec, T_ref, target_se)) {
-        fprintf(stderr, "openvoice2: ref_enc failed\n");
-        return false;
+    {
+        openvoice2_bench_stage _bs("ref_enc");
+        if (!ref_enc_forward(ctx, ref_spec, T_ref, target_se)) {
+            fprintf(stderr, "openvoice2: ref_enc failed\n");
+            return false;
+        }
     }
 
     if (ctx->verbosity >= 1) {
@@ -1179,7 +1217,10 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
     // 3. Posterior encoder: src_spec → z (with g=0 for zero_g)
     std::vector<float> g_zero(hp.gin_channels, 0.0f);
     std::vector<float> z;
-    enc_q_forward(ctx, src_spec, T_src, g_zero, z);
+    {
+        openvoice2_bench_stage _bs("enc_q");
+        enc_q_forward(ctx, src_spec, T_src, g_zero, z);
+    }
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: enc_q → z (%d × %d)\n", hp.inter_channels, T_src);
@@ -1209,7 +1250,10 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
     }
 
     // 5. Flow forward: z → z_p (normalize with source voice)
-    flow_wavenet(ctx, z, T_src, src_se, /*reverse=*/false);
+    {
+        openvoice2_bench_stage _bs("flow_forward");
+        flow_wavenet(ctx, z, T_src, src_se, /*reverse=*/false);
+    }
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: flow forward (source → prior)\n");
@@ -1217,7 +1261,10 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
     }
 
     // 6. Flow reverse: z_p → z_hat (denormalize with target voice)
-    flow_wavenet(ctx, z, T_src, target_se, /*reverse=*/true);
+    {
+        openvoice2_bench_stage _bs("flow_reverse");
+        flow_wavenet(ctx, z, T_src, target_se, /*reverse=*/true);
+    }
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: flow reverse (prior → target)\n");
@@ -1226,9 +1273,12 @@ extern "C" bool openvoice2_convert(struct openvoice2_context* ctx, const float* 
 
     // 7. HiFi-GAN decode: z_hat → audio (with g=0 for zero_g)
     std::vector<float> pcm;
-    if (!hifigan_decode_cpu(ctx, z, g_zero, T_src, pcm)) {
-        fprintf(stderr, "openvoice2: hifigan decode failed\n");
-        return false;
+    {
+        openvoice2_bench_stage _bs("hifigan_decode");
+        if (!hifigan_decode_cpu(ctx, z, g_zero, T_src, pcm)) {
+            fprintf(stderr, "openvoice2: hifigan decode failed\n");
+            return false;
+        }
     }
 
     // Peak-normalize output to fill ±0.95 range.

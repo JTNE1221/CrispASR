@@ -23,6 +23,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +32,32 @@
 #include <map>
 #include <string>
 #include <vector>
+
+// ===========================================================================
+// Bench instrumentation — `AUDIOSEAL_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool audioseal_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("AUDIOSEAL_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct audioseal_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit audioseal_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~audioseal_bench_stage() {
+        if (!audioseal_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  audioseal_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 namespace {
 
@@ -703,6 +730,7 @@ uint32_t audioseal_nbits(const struct audioseal_ctx* ctx) {
 float* audioseal_embed(struct audioseal_ctx* ctx, const float* pcm, int n_samples, const uint8_t* message) {
     if (!ctx || !pcm || n_samples <= 0 || !ctx->has_generator)
         return nullptr;
+    audioseal_bench_stage _bs_total("embed_total");
 
     // Build compute graph
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
@@ -839,6 +867,7 @@ float* audioseal_embed(struct audioseal_ctx* ctx, const float* pcm, int n_sample
 float* audioseal_detect(struct audioseal_ctx* ctx, const float* pcm, int n_samples, int* out_n, uint8_t* out_message) {
     if (!ctx || !pcm || n_samples <= 0 || !ctx->has_detector)
         return nullptr;
+    audioseal_bench_stage _bs_total("detect_total");
 
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);

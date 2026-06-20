@@ -69,6 +69,32 @@
 
 namespace {
 
+// ===========================================================================
+// Bench instrumentation — `COSYVOICE3_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool cosyvoice3_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("COSYVOICE3_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct cosyvoice3_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit cosyvoice3_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~cosyvoice3_bench_stage() {
+        if (!cosyvoice3_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  cosyvoice3_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 struct cv3_hp {
     uint32_t n_layers = 24;
     uint32_t d_model = 896;
@@ -5119,12 +5145,15 @@ float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const
     const int aligned_t_ref_mel = prompt_token_len * mel_ratio;
 
     // ---- 1. Tokenise prompt_text + user_text ----
-    std::vector<int32_t> prompt_ids = cv3_tokenise_prompt(ctx->vocab, voice->prompt_text);
-    std::vector<int32_t> user_ids = cv3_tokenise_prompt(ctx->vocab, std::string(text));
     std::vector<int32_t> text_ids;
-    text_ids.reserve(prompt_ids.size() + user_ids.size());
-    text_ids.insert(text_ids.end(), prompt_ids.begin(), prompt_ids.end());
-    text_ids.insert(text_ids.end(), user_ids.begin(), user_ids.end());
+    {
+        cosyvoice3_bench_stage _b("tokenize");
+        std::vector<int32_t> prompt_ids = cv3_tokenise_prompt(ctx->vocab, voice->prompt_text);
+        std::vector<int32_t> user_ids = cv3_tokenise_prompt(ctx->vocab, std::string(text));
+        text_ids.reserve(prompt_ids.size() + user_ids.size());
+        text_ids.insert(text_ids.end(), prompt_ids.begin(), prompt_ids.end());
+        text_ids.insert(text_ids.end(), user_ids.begin(), user_ids.end());
+    }
     if (text_ids.empty()) {
         fprintf(stderr, "cosyvoice3_tts: synth: empty text after tokenisation\n");
         return nullptr;
@@ -5144,8 +5173,11 @@ float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const
     int max_steps = ctx->params.max_tokens > 0 ? ctx->params.max_tokens : (int)text_ids.size() * 20;
     if (max_steps < 16)
         max_steps = 16;
-    std::vector<int32_t> gen_tokens =
-        cv3_generate_tokens_with_stop_floor(ctx, lm_embeds.data(), n_lm, max_steps, stop_floor);
+    std::vector<int32_t> gen_tokens;
+    {
+        cosyvoice3_bench_stage _b("lm_ar_decode");
+        gen_tokens = cv3_generate_tokens_with_stop_floor(ctx, lm_embeds.data(), n_lm, max_steps, stop_floor);
+    }
     if (gen_tokens.empty()) {
         fprintf(stderr, "cosyvoice3_tts: synth: AR decode produced 0 tokens\n");
         return nullptr;
@@ -5173,15 +5205,20 @@ float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const
     }
 
     // ---- 3. Compose full speech-token sequence + run pre_la + repeat_interleave ----
-    std::vector<int32_t> full_tokens;
-    full_tokens.reserve(prompt_tokens.size() + gen_tokens.size());
-    full_tokens.insert(full_tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
-    full_tokens.insert(full_tokens.end(), gen_tokens.begin(), gen_tokens.end());
-    std::vector<float> mu = cv3_run_pre_la_and_interleave(ctx, full_tokens);
+    const size_t n_full_tokens = prompt_tokens.size() + gen_tokens.size();
+    std::vector<float> mu;
+    {
+        cosyvoice3_bench_stage _b("pre_la+interleave");
+        std::vector<int32_t> full_tokens;
+        full_tokens.reserve(n_full_tokens);
+        full_tokens.insert(full_tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
+        full_tokens.insert(full_tokens.end(), gen_tokens.begin(), gen_tokens.end());
+        mu = cv3_run_pre_la_and_interleave(ctx, full_tokens);
+    }
     if (mu.empty())
         return nullptr;
     const int mel = (int)ctx->flow.hp.mel_dim;
-    const int T_mel_total = (int)(full_tokens.size() * (size_t)ctx->flow.hp.token_mel_ratio);
+    const int T_mel_total = (int)(n_full_tokens * (size_t)ctx->flow.hp.token_mel_ratio);
     const int T_ref_mel = aligned_t_ref_mel;
     if (T_ref_mel > T_mel_total) {
         fprintf(stderr, "cosyvoice3_tts: synth: voice ref_mel (%d) longer than full T_mel (%d) — corrupt voice\n",
@@ -5204,9 +5241,12 @@ float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const
     std::vector<float> x_init = cv3_seeded_gaussian((size_t)T_mel_total * (size_t)mel, /*seed*/ 0);
 
     // ---- 7. Run flow Euler → mel ----
-    float* mel_full =
-        cosyvoice3_tts_solve_flow_euler(ctx, mu.data(), T_mel_total, spks_proj.data(), cond.data(), x_init.data(),
-                                        /*n_steps*/ 10, ctx->flow.hp.cfm_inference_cfg_rate);
+    float* mel_full;
+    {
+        cosyvoice3_bench_stage _b("flow_euler");
+        mel_full = cosyvoice3_tts_solve_flow_euler(ctx, mu.data(), T_mel_total, spks_proj.data(), cond.data(),
+                                                   x_init.data(), /*n_steps*/ 10, ctx->flow.hp.cfm_inference_cfg_rate);
+    }
     if (!mel_full)
         return nullptr;
 
@@ -5218,8 +5258,12 @@ float* cv3_synth_with_voice(cosyvoice3_tts_context* ctx, const char* text, const
     free(mel_full);
 
     // ---- 9. HiFT inference → 24 kHz audio ----
-    std::vector<float> noise_buf = cv3_seeded_uniform_noise((size_t)T_mel_out * 480 * 9, /*seed*/ 0);
-    float* audio = cosyvoice3_tts_run_hift_inference(ctx, mel_out.data(), T_mel_out, noise_buf.data());
+    float* audio;
+    {
+        cosyvoice3_bench_stage _b("hift_vocoder");
+        std::vector<float> noise_buf = cv3_seeded_uniform_noise((size_t)T_mel_out * 480 * 9, /*seed*/ 0);
+        audio = cosyvoice3_tts_run_hift_inference(ctx, mel_out.data(), T_mel_out, noise_buf.data());
+    }
     if (!audio)
         return nullptr;
 

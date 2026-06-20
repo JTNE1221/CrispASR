@@ -10,6 +10,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,32 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ===========================================================================
+// Bench instrumentation — `FIRERED_VAD_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool firered_vad_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("FIRERED_VAD_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct firered_vad_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit firered_vad_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~firered_vad_bench_stage() {
+        if (!firered_vad_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  firered_vad_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 // ===========================================================================
 // Model
@@ -366,10 +393,15 @@ extern "C" int firered_vad_detect(struct firered_vad_context* ctx, const float* 
     auto& m = ctx->model;
     auto& hp = m.hp;
 
+    firered_vad_bench_stage _bs_total("detect_total");
+
     // Compute fbank
     std::vector<float> features;
     int n_frames = 0;
-    compute_fbank_vad(samples, n_samples, features, n_frames);
+    {
+        firered_vad_bench_stage _bs("feature_extraction");
+        compute_fbank_vad(samples, n_samples, features, n_frames);
+    }
     if (n_frames <= 0)
         return -1;
 

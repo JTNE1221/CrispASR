@@ -127,6 +127,33 @@ const char* env_str(const char* k) {
     const char* v = std::getenv(k);
     return (v && *v) ? v : nullptr;
 }
+
+// ===========================================================================
+// Bench instrumentation — `QWEN3_TTS_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool qwen3_tts_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("QWEN3_TTS_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct qwen3_tts_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit qwen3_tts_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~qwen3_tts_bench_stage() {
+        if (!qwen3_tts_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  qwen3_tts_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
 double now_ms() {
     using namespace std::chrono;
     return duration_cast<duration<double, std::milli>>(steady_clock::now().time_since_epoch()).count();
@@ -6344,9 +6371,15 @@ extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char
         fprintf(stderr, "qwen3_tts: synthesize() requires the codec — call qwen3_tts_set_codec_path() first.\n");
         return nullptr;
     }
+    qwen3_tts_bench_stage _bs_synth("synthesize");
+
     const double t_total0 = now_ms();
     int n_codes = 0;
-    int32_t* codes = qwen3_tts_synthesize_codes(ctx, text, &n_codes);
+    int32_t* codes;
+    {
+        qwen3_tts_bench_stage _bs("synthesize_codes");
+        codes = qwen3_tts_synthesize_codes(ctx, text, &n_codes);
+    }
     const double t_codes = now_ms();
     if (!codes || n_codes <= 0) {
         free(codes);
@@ -6392,6 +6425,8 @@ extern "C" float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char
     // rolling state and the equivalence breaks).
     const char* skip_env = std::getenv("QWEN3_TTS_SKIP_REF_DECODE");
     const bool skip_ref = !skip_env || skip_env[0] != '0';
+
+    qwen3_tts_bench_stage _bs_codec("codec_decode");
 
     if (!ref_codes.empty() && !skip_ref) {
         std::vector<int32_t> codes_for_decode;

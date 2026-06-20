@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,32 @@
 // ─────────────────────────── internal types ────────────────────────────
 
 namespace {
+
+// ===========================================================================
+// Bench instrumentation — `TADA_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool tada_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = std::getenv("TADA_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct tada_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit tada_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~tada_bench_stage() {
+        if (!tada_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  tada_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 struct tada_hp {
     // Llama backbone
@@ -1060,6 +1087,8 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     // Reset RNG
     ctx->rng_state = ctx->params.seed ? ctx->params.seed : 42;
 
+    tada_bench_stage _bs_synth("synthesize");
+
     // ── Tokenize ──
     std::vector<int32_t> text_ids = tokenize(ctx, std::string(text));
     if (text_ids.empty()) {
@@ -1449,6 +1478,7 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
 
     // ── Codec decode ──
     if (ctx->codec_ctx && n_expanded > 0) {
+        tada_bench_stage _bs("codec_decode");
         int n_samples = 0;
         float* pcm = tada_codec_decode(ctx->codec_ctx, expanded.data(), n_expanded, token_masks.data(), &n_samples);
         if (pcm && n_samples > 0) {

@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -67,6 +68,23 @@ static bool cohere_bench_enabled(void) {
     }
     return enabled;
 }
+
+// ===========================================================================
+// Bench instrumentation — `COHERE_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+struct cohere_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit cohere_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~cohere_bench_stage() {
+        if (!cohere_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  cohere_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
 
 static void cohere_debug(const char* fmt, ...) {
     if (!cohere_debug_enabled())
@@ -2175,6 +2193,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
     }
 
     // --- Feature extraction (single chunk ≤ 30s) ---
+    cohere_bench_stage _b_total("total");
     auto mel_fb = ct_get_f32(ctx->model.fe_mel_fb);
     auto window = ct_get_f32(ctx->model.fe_window);
 
@@ -2204,6 +2223,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
     bool do_prof = !do_chunked && (getenv("COHERE_PROF") != nullptr);
 
     {
+        cohere_bench_stage _b_enc("encoder (all chunks)");
         int n_chunks = 0;
         for (int sample_offset = 0; sample_offset < n_samples; sample_offset += CHUNK_SAMPLES) {
             int chunk_n = std::min(CHUNK_SAMPLES, n_samples - sample_offset);
@@ -2338,6 +2358,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
 
     // Assemble cross-KV from per-chunk CPU data and upload to backend buffer.
     {
+        cohere_bench_stage _b_ckv("cross-kv assembly");
         t0 = ggml_time_us();
 
         if (ctx->cross_kv_ctx)
@@ -2433,6 +2454,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
     const int T_enc = T_enc_total;
 
     // --- Decoder prompt ---
+    cohere_bench_stage _b_dec("decoder (total)");
     auto tid = [&](const std::string& s) { return voc.token_id(s); };
     const char* lang_tok = lang ? lang : "en";
     char lang_tok_str[32];

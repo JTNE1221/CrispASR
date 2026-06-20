@@ -6,6 +6,40 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-20 §180 Per-runtime bench instrumentation + funasr embed fast path
+
+**Bench instrumentation across all 71 runtime files.** Every runtime
+(ASR, TTS, Audio-LLM, LID, VAD, speaker, translation, punctuation,
+alignment, codec, truecaser) now has `XXX_BENCH=1` env-var-gated
+per-stage RAII timing. Pattern: static cached `getenv` check (~1 ns
+when disabled), RAII `XXX_bench_stage` struct prints
+`"  XXX_bench: %-22s %.2f ms\n"` to stderr on scope exit. Zero
+overhead when the env var is unset. Existing ad-hoc bench code
+(firered_asr, mimo_asr, qwen3_tts, voxcpm2_tts, vibevoice, etc.)
+preserved alongside the new RAII pattern.
+
+Coverage: 13 ASR, 8 Audio-LLM, 22 TTS, 23 LID/VAD/other — plus
+5 files in `crisp_*/src/` mirrors. Full list in commit message.
+468/468 unit tests pass. All files formatted with clang-format v18.
+
+Also in this session:
+- `chatterbox_s3gen.h`: added missing `chatterbox_s3gen_perf` struct
+  and `chatterbox_s3gen_get_perf()` declaration (needed after upstream
+  `3c101c7b` added the impl without the header).
+
+**funasr: single-token embed fast path (`CRISPASR_FUNASR_EMBED_FAST`,
+default ON).** AR decode hot path called `funasr_embed_tokens()` with
+a single token, paying full graph-build + sched-alloc overhead each
+step. New fast path dequants one row directly from `token_embd.weight`,
+skipping the graph entirely. Transcript byte-identical on JFK.
+
+A/B benchmark on VPS (8 GB, swap-bound — noisy but directional):
+`decode_embed_only` fast path 15–26 ms/tok vs graph path 27–41 ms/tok
+(~1.6× on the embed step). On M1 Metal at 37 ms/tok total decode
+(PLAN funasr §1), this saves ~25–40 % of decode time.
+
+---
+
 ## 2026-06-20 §178 VoxCPM2 — disclaimer voice-clone bug fixed
 
 Q4_K synthesis tested end-to-end (`/tmp/voxcpm2/voxcpm2-q4_k.gguf`).
