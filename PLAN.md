@@ -703,39 +703,45 @@ token embedding weight, skipping graph-build + sched overhead.
 ## §201 Kaggle CUDA backend failures — full sweep 2026-06-20 (OPEN)
 
 The first full-coverage Kaggle GPU sweep (`tools/kaggle-benchmark-all-backends.py`,
-results streamed to `cstr/crispasr-kaggle-progress/full-backend-sweep/latest/`,
-see PERFORMANCE.md 2026-06-20) ran 59 backends: **ASR 33/35, TTS 14/22, MT 2/2
-pass**. 10 backends fail **on Kaggle CUDA** — several of these pass on M1 Metal
-locally, so they are CUDA-path-specific, not general breakage. Each is a TODO:
+streamed to `cstr/crispasr-kaggle-progress/full-backend-sweep/`, see PERFORMANCE.md
+2026-06-20) ran 59 backends. The first pass showed 10 "failures", but a follow-up
+audit + a fixed-subset re-test (run tag `voicefix-retest`) found **2 were benchmark
+mistakes, not bugs**, leaving **7 genuine failures** (+1 pending):
 
-**ASR (2):**
-- [ ] **lfm2-audio** — CRASHes mid-run (~9.8 s) on CUDA. (Hybrid conv+attn
-  backbone; direct-row embed path.) Repro: `--backend lfm2-audio -m auto` on a
-  CUDA box; capture the abort. Passes on Metal? — verify.
-- [ ] **vibevoice-1.5b** — runs (~17 s) but emits an **EMPTY** transcript on
-  CUDA (the 1.5B VibeVoice-ASR variant; the 7B `vibevoice` passes). Likely a
-  decoder/EOS or lm_head issue specific to the 1.5B head on CUDA.
+**RESOLVED — were benchmark args/category, fixed in the script (commit on main):**
+- ✅ **vibevoice-1.5b** — is a *TTS* model (`vibevoice-1.5b-tts-q4_k.gguf`), was
+  wrongly run as ASR → empty. Moved to TTS; now PASSES (367 KB).
+- ✅ **vibevoice-tts** — voice-conditioned; the bare `--tts` gave it no voice.
+  With `--voice <ref.wav>` it now PASSES (255 KB).
 
-**TTS (8):** all produce **0-byte** output on CUDA.
-- [ ] **speecht5** — fails fast (~2.2 s). Encoder-decoder + HiFi-GAN.
-- [ ] **fastpitch** — fails fast (~1.7 s). Non-AR parallel TTS.
-- [ ] **f5-tts** — fails (~5 s) on CUDA; passes on M1 Metal. DiT flow-matching —
-  likely a CUDA-specific graph/kernel path (cf. the §183/§200 f5 fusion work).
-- [ ] **orpheus** — fails (~16.8 s) on CUDA. Llama-3.2 + SNAC; greedy-loop prone.
-- [ ] **vibevoice-tts** — fails fast (~7 s). Diffusion TTS.
-- [ ] **chatterbox** — fails (~6.3 s) on CUDA; the #83 S3Gen GPU fix was
-  Metal-validated — re-check the CUDA S3Gen path.
-- [ ] **cosyvoice3** — **dies in 0.1 s** (immediate crash) on CUDA; passes on M1
-  Metal. Flow-matching + HiFT — earliest/cheapest to bisect.
-- [ ] **kugelaudio** — **TIMEOUT at 180 s** (hangs, distinct from the crashes).
-  German TTS; likely an infinite/very-slow AR loop on CUDA.
+**Pending one more confirm:**
+- [ ] **f5-tts** — once given a reference voice it *runs* (was a fast-fail before),
+  but **TIMEOUT at 120 s** in the re-test. Bump the smoke timeout (≥240 s) and
+  re-run to settle pass-vs-stuck; passes on M1 Metal locally.
 
-**Method:** the per-backend JSONs in the dataset have timing context; reproduce
-on a CUDA worker (Kaggle T4/P100 or the A1000) with `CRISPASR_VERBOSE=1` and the
-relevant `CRISPASR_<BACKEND>_DEBUG=1`. Group the fast-crashers (speecht5,
-fastpitch, cosyvoice3) separately from the hangs (kugelaudio) and the
-empty-output cases (vibevoice-1.5b). Cross-check each against M1 Metal to confirm
-it is CUDA-specific before deep-diving.
+**GENUINE bugs — fail on CUDA even with correct args (TODO):**
+- [ ] **lfm2-audio** (ASR) — CRASHes mid-run (~9.8 s). Hybrid conv+attn backbone.
+- [ ] **speecht5** (TTS) — 0-byte (~2.2 s) even with the built-in default
+  zero-speaker embedding, so not a missing-voice issue. Enc-dec + HiFi-GAN.
+- [ ] **fastpitch** (TTS) — 0-byte (~4 s) with an explicit `--voice 0` speaker
+  index; the speaker fix did not help → real bug.
+- [ ] **orpheus** (TTS) — 0-byte (~17 s) with `--voice tara`. Llama-3.2 + SNAC.
+- [ ] **chatterbox** (TTS) — 0-byte (~14 s) with `--voice <wav> --i-have-rights`;
+  the #83 S3Gen GPU fix was Metal-validated — re-check the CUDA S3Gen path.
+- [ ] **cosyvoice3** (TTS) — **dies in 0.1 s** even with a reference voice; passes
+  on M1 Metal. Flow-matching + HiFT — earliest/cheapest to bisect.
+- [ ] **kugelaudio** (TTS) — ran to completion (~322 s, under the bumped 420 s
+  timeout) but produced **0 bytes** → empty-output bug, not just slow. ~5.7 GB
+  Q4_K, so also a big model.
+
+**Method:** per-backend JSONs in the dataset have timing context; reproduce on a
+CUDA worker (Kaggle T4/P100 or the A1000) with `CRISPASR_VERBOSE=1` +
+`CRISPASR_<BACKEND>_DEBUG=1`. Group fast-crashers (speecht5, fastpitch,
+cosyvoice3) vs empty-output finishers (kugelaudio, orpheus, chatterbox). Several
+pass on M1 Metal → CUDA-path-specific; cross-check Metal first. Note: the small
+ones (speecht5 ~300 MB, fastpitch ~120 MB, lfm2-audio ~1.6 GB) also fit the 8 GB
+CPU-only VPS, where the diff harness can drive the fix if the bug reproduces on
+CPU.
 
 ---
 

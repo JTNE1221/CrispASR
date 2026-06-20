@@ -163,11 +163,18 @@ benchmark mis-detected several as ~55 MB — so it is omitted below.)
 **ASR failures (2):** `lfm2-audio` — **CRASH** mid-run (~9.8 s); `vibevoice-1.5b`
 — ran (~17 s) but produced **EMPTY** transcript. Both are newly-covered backends.
 
-### TTS — 14/22 pass
+### TTS — 14/22 first pass → 16/22 after the voicefix re-test
 
-| ✓ pass | ✗ fail (0-byte output) |
-|---|---|
-| piper, kokoro, pocket-tts, bark, csm, parler-tts, dia, qwen3-tts-customvoice, indextts, zonos, melotts, outetts, tada, voxcpm2-tts | speecht5, fastpitch, f5-tts, orpheus, vibevoice-tts, chatterbox, cosyvoice3, **kugelaudio (TIMEOUT 180 s)** |
+First pass marked 8 TTS "fails", but an audit found most were **missing-args, not
+bugs**: f5-tts/chatterbox/cosyvoice3/vibevoice-tts are voice-**cloning** models
+that need a reference voice, and `vibevoice-1.5b` had been mis-listed as ASR. The
+benchmark now passes the right voice per backend (`--voice <ref.wav>
+--i-have-rights`, fastpitch `--voice 0`) and `vibevoice-1.5b` moved to TTS. A
+fixed-subset re-test (run tag `voicefix-retest`) gives:
+
+| ✓ pass (first pass) | ✓ recovered by voicefix | ✗ genuine fail (with correct args) |
+|---|---|---|
+| piper, kokoro, pocket-tts, bark, csm, parler-tts, dia, qwen3-tts-customvoice, indextts, zonos, melotts, outetts, tada, voxcpm2-tts | **vibevoice-1.5b** (was run as ASR), **vibevoice-tts** (was no-voice) | speecht5, fastpitch, orpheus, chatterbox, cosyvoice3, kugelaudio · **f5-tts** = runs-but-timeout (pending ≥240 s confirm) |
 
 ### MT — 2/2 pass
 
@@ -175,15 +182,15 @@ m2m100 (3.7 s), madlad (12.5 s) — en→de translation produced output.
 
 ### Notes
 
-- **Streaming + resume validated end-to-end.** All 59 per-backend JSONs landed in
-  the HF dataset as each backend finished; a re-push skips already-streamed
-  backends. Root cause of the earlier streaming failures (token unresolved on the
-  chr1s4 nested mount path) fixed in `81826457`.
-- **10 backends fail on Kaggle CUDA** (2 ASR + 8 TTS) — tracked as TODOs in
-  PLAN.md (§201). Several pass on M1 Metal locally (e.g. cosyvoice3, chatterbox,
-  f5-tts, zonos), so these are CUDA-path-specific.
-- `cosyvoice3` dies in 0.1 s (immediate); `kugelaudio` hangs to the 180 s timeout
-  — distinct failure modes worth separating.
+- **Streaming + resume validated end-to-end.** All per-backend JSONs landed in the
+  HF dataset as each backend finished; a re-push skips already-streamed backends.
+  Root cause of the earlier streaming failures (token unresolved on the chr1s4
+  nested mount path) fixed in `81826457`.
+- **Genuine CUDA failures: ~7** (was reported as 10) — `lfm2-audio` (ASR CRASH),
+  `speecht5`, `fastpitch`, `orpheus`, `chatterbox`, `cosyvoice3` (dies 0.1 s),
+  `kugelaudio` (empty after 322 s) — tracked in PLAN.md §201. Several pass on M1
+  Metal, so they are CUDA-path-specific. The 2 vibevoice entries were benchmark
+  bugs (now fixed + passing); `f5-tts` needs one more timeout-bumped run.
 
 ## Kaggle T4 GPU — 2026-06-03
 
