@@ -185,6 +185,11 @@ struct moonshine_streaming_context {
     bool use_gpu = false;
     float temperature = 0.0f;
     int beam_size = 1;
+
+    // §176s: cached encoder graph — reused when T_enc matches.
+    ggml_cgraph* cached_enc_gf = nullptr;
+    ggml_context* cached_enc_ctx = nullptr;
+    int cached_enc_T = 0;
 };
 
 // ── GGUF helpers ────────────────────────────────────────────────────────────
@@ -582,6 +587,27 @@ static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_o
     float ln_eps = 1e-5f;
     bool verbose = ctx->verbosity >= 2 || getenv("MOONSHINE_STREAMING_BENCH");
 
+    // §176s: reuse cached encoder graph when T_enc matches.
+    if (ctx->cached_enc_gf && ctx->cached_enc_T == T_enc) {
+        ggml_cgraph* gf = ctx->cached_enc_gf;
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+            return -2;
+        ggml_tensor* inp = ggml_graph_get_tensor(gf, "enc_input");
+        ggml_backend_tensor_set(inp, frontend_out, 0, (size_t)d * T_enc * sizeof(float));
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+            return -3;
+        ggml_tensor* out = ggml_graph_get_tensor(gf, "encoder_output");
+        enc_output.resize((size_t)d * T_enc);
+        ggml_backend_tensor_get(out, enc_output.data(), 0, enc_output.size() * sizeof(float));
+        return 0;
+    }
+    if (ctx->cached_enc_ctx) {
+        ggml_free(ctx->cached_enc_ctx);
+        ctx->cached_enc_ctx = nullptr;
+        ctx->cached_enc_gf = nullptr;
+    }
+
     const size_t n_tensors = hp.enc_n_layers * 30 + 50;
     const size_t mem_size = ggml_tensor_overhead() * n_tensors + ggml_graph_overhead_custom(16384, false);
     struct ggml_init_params gp = {mem_size, nullptr, true};
@@ -707,7 +733,10 @@ static int run_encoder(moonshine_streaming_context* ctx, const float* frontend_o
                 enc_output[2], enc_output[3], enc_output[4], enc_output[5], enc_output[6], enc_output[7]);
     }
 
-    ggml_free(ctx0);
+    // §176s: save graph for reuse on next call with same T_enc.
+    ctx->cached_enc_ctx = ctx0;
+    ctx->cached_enc_gf = gf;
+    ctx->cached_enc_T = T_enc;
     return 0;
 }
 
@@ -1130,6 +1159,8 @@ static char* moonshine_streaming_transcribe_impl(struct moonshine_streaming_cont
 extern "C" void moonshine_streaming_free(struct moonshine_streaming_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->cached_enc_ctx)
+        ggml_free(ctx->cached_enc_ctx);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->model.buf_w)
