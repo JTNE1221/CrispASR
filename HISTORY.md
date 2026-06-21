@@ -212,10 +212,14 @@ Three Metal gotchas, each cost a debugging round (see LEARNINGS):
    graphs on call N+1 leaves dangling tensor→buffer pointers (the next
    `ggml_backend_tensor_set` memmoves into freed memory → crash).
 
-Perf is backend-dependent and the reason it's opt-in: a win where
-host↔device KV transfer is costly (discrete GPU / CUDA), but neutral-to-
-negative on M1 unified memory (transfer ≈ memcpy; the fixed-Lk over-read
-makes long utterances slower). Validate + flip to default on CUDA.
+Perf (M1 Metal, F16, 600 steps, back-to-back best-of-3): ~1.2–1.9× faster
+than legacy (legacy absolute time swings with load; bucket consistently
+faster). The first cut was actually *slower* than legacy at long sequences
+on M1; two follow-ups fixed that: (a) dropping the per-step `ggml_cont` of
+the Lk KV window — a D×Lk copy that grew with the bucket size and dominated
+the long-utterance cost (1.86× at 600 steps on its own), and (b) reusing
+the dedicated sched allocation across steps instead of reset+alloc per step.
+Still opt-in (default path stays byte-identical; CUDA unvalidated).
 
 **Validation (crispasr-diff vs F32 PyTorch ground truth).** Generated a
 parler reference (`tools/dump_reference.py --backend parler-tts`, greedy,

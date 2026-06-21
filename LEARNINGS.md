@@ -219,9 +219,21 @@ over the gen_codes_20 window; the divergence only appears at **Q4_K**, where
 quantization noise (Q4_K is below parler's quality bar — legacy Q4_K greedy
 also degenerates to non-speech) gets amplified by greedy argmax. So validate
 such opts with the diff harness at F16, not ASR-roundtrip on a low quant.
-And on **unified memory (M1)** the device-KV migration wins nothing
-(host↔device is a memcpy) while the over-read costs — the payoff is a
-discrete-GPU/CUDA phenomenon. Ship opt-in until CUDA-validated.
+
+On **unified memory (M1)** the device-KV migration itself wins little
+(host↔device is a memcpy), so the first cut was *slower* than legacy at long
+sequences — the fixed-Lk path's overhead outweighed the (nil) transfer
+saving. What made it a clear win (~1.2–1.9× at 600 steps) was eliminating
+that overhead: (a) **don't `ggml_cont` the Lk KV window** — it's the
+contiguous leading block of the layer slice, so feed the view straight into
+reshape; the cont is a D×Lk copy *per layer per step* that grows with the
+bucket and dominates long utterances. (b) **reuse the sched allocation**
+across steps (reset+alloc only on a bucket switch). So the lesson isn't
+"device-KV is CUDA-only" — it's "the bucket's per-step *copies and
+re-planning* are the real cost on any backend; kill those and it wins even
+on unified memory." Reuse across `graph_compute` is fine once reads carry an
+explicit write→read edge (read the `set_rows` result) and cached graphs are
+rebuilt per utterance.
 
 ## Backend-name guards must match the *registered* name, by prefix when aliased (#171, #174)
 

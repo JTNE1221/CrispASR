@@ -5549,12 +5549,17 @@ device-resident self-attn + cross-attn KV (`ggml_set_rows` write, fixed-Lk read)
 legacy host-KV path but NOT bit-exact — the fixed-Lk padded reduction shifts FP rounding
 (step-1 bit-identical, later steps ~1e-4), so greedy decoding produces a different *valid*
 generation. Gotchas found: (1) read from the `set_rows` *result*, not the bare KV tensor,
-or Metal races the in-place write; (2) reset+alloc the sched each step — reusing a sched
-allocation across `graph_compute` faults on Metal; (3) rebuild bucket graphs per utterance
-or repeated synthesize calls fault on stale tensor→buffer pointers. Perf is backend-
-dependent: a win where host↔device KV transfer is costly (discrete GPU / CUDA), but
-neutral-to-negative on M1 unified memory (transfer ≈ memcpy; fixed-Lk over-read makes long
-utterances slower) — hence opt-in, not default. Validate + flip default on CUDA.
+or Metal races the in-place write; (2) rebuild bucket graphs per utterance or repeated
+synthesize calls fault on stale tensor→buffer pointers. With those fixed, the sched
+allocation is reused across steps (only re-allocated on a bucket switch) — the earlier
+"reuse faults on Metal" was a symptom of (1)/(2), not a real limitation.
+**Perf (M1 Metal, F16, 600 steps, back-to-back best-of-3):** ~1.2–1.9× faster than legacy
+(legacy absolute swings with machine load; bucket is consistently faster). The two wins
+that flipped it from an early M1 *regression* to a clear win: (a) dropping the per-step
+`ggml_cont` of the Lk KV window (a D×Lk copy that grew with the bucket), (b) reusing the
+sched allocation across steps. Still opt-in (`CRISPASR_PARLER_BUCKET=1`) because the
+default path must stay byte-identical and CUDA is unvalidated; consider flip-to-default
+after a CUDA run.
 **crispasr-diff validation:** vs F32 PyTorch ground truth — F16 legacy 108/108 (100%)
 PASS, F16 bucket 108/108 (100%) PASS (bucket bit-identical to legacy); Q8_0 bucket
 byte-identical to legacy (both 23% vs F32 = pure quant gap). Reference at
