@@ -6,6 +6,32 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-21 #181 Chatterbox-turbo — vocab-mismatch load regression, directional fix
+
+External report (niksedk, via Subtitle Edit): `chatterbox-turbo-t3-*.gguf` failed
+to load on v0.8.0 — `tokenizer has 50257 tokens, T3 text_vocab_size=50276`. The
+turbo GGUF ships the stock 50257-token GPT-2 tokenizer but the T3 checkpoint
+declares `text_vocab_size=50276` (19 reserved/special rows). v0.7.x loaded it
+fine; v0.8.0 added a strict `tokenizer.size() != text_vocab_size` check that
+wrongly rejected it.
+
+The mismatch is **benign in this direction**: the text *embedding* table has
+`text_vocab_size` rows, while the tokenizer table only governs text→id BPE (which
+emits ids < tokenizer size); special text tokens are added by id and bounds-checked
+against `text_vocab_size` at the embed site. So a 50257-token tokenizer against a
+50276-row embedding can never index out of range — the 19 extra rows are simply
+unused. Made the check **directional** (`chatterbox.cpp` ~2881): hard-error only
+when `tokenizer.size() > text_vocab_size` (BPE could emit an id past the embedding
+→ OOB), warn-and-load when `tokenizer.size() < text_vocab_size` (benign superset).
+No re-download needed — the files already on every user's disk now load again.
+Verified: `chatterbox-turbo-t3-q4_k.gguf` loads, synthesizes (63 tokens, clean
+EOS), ASR-roundtrips near-verbatim ("Hello world this is the … model"). Base
+chatterbox (704==704) is unaffected. (A cleaner data fix — re-converting the turbo
+GGUFs with the paired 50276-token tokenizer — is optional and unnecessary for
+correctness; it would need the source turbo tokenizer + HF re-upload.)
+
+---
+
 ## 2026-06-21 §215 Orpheus — Lk-bucket GPU decode SIGSEGV fixed (run on the warm prefill sched; stays opt-in)
 
 Resolves the §201/§213 orpheus "0-byte on GPU/CUDA": the §176b/c Lk-bucketed
@@ -96,6 +122,7 @@ CLI escape hatches unchanged: `--chunk-seconds N`, `--vad`.
 vs NeMo; `--vad` 5 min = 98.7 % (706=706 w); Q4_K = 97 %; longform stress
 cap=30 s on 120 s = 97 % with zero boundary dups; old dispatcher path
 (env-gated) = 86 %. 28-min full file not re-run on the dev M1 (memory).
+---
 
 ## 2026-06-21 §214 Chatterbox — batched classifier-free-guidance (B=2) T3 decode (gated; the real T3 win)
 

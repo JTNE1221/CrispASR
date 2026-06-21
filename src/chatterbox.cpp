@@ -2878,13 +2878,33 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
 
     const bool is_gpt2 = (c->hp.arch == "chatterbox_turbo" || c->hp.arch == "kartoffelbox");
 
-    if (!c->tokenizer.id_to_token.empty() && c->tokenizer.id_to_token.size() != c->hp.text_vocab_size) {
+    // Tokenizer ↔ text-embedding consistency. The check is DIRECTIONAL (#181):
+    // the text embedding table has text_vocab_size rows, while the tokenizer
+    // table only governs text→id BPE (which emits ids < tokenizer size); special
+    // text tokens are added by id and bounds-checked against text_vocab_size at
+    // the embed site. So:
+    //   - tokenizer size  >  text_vocab_size  → HARD ERROR: BPE can emit an id
+    //     past the embedding table → out-of-bounds lookup. Genuinely broken.
+    //   - tokenizer size  <  text_vocab_size  → BENIGN: the embedding is a
+    //     superset; the extra rows (reserved / special slots) are simply never
+    //     indexed out of range. chatterbox-turbo ships a stock 50257-token GPT-2
+    //     tokenizer with text_vocab_size=50276 (19 reserved rows); it loaded and
+    //     worked on v0.7.x. v0.8.0's strict `!=` check wrongly rejected it — warn
+    //     and load instead of failing (no re-download needed for users).
+    if (!c->tokenizer.id_to_token.empty() && c->tokenizer.id_to_token.size() > c->hp.text_vocab_size) {
         fprintf(stderr,
-                "chatterbox: tokenizer/model vocab mismatch: tokenizer has %zu tokens, "
-                "T3 text_vocab_size=%u. Re-convert with the tokenizer paired to this T3 checkpoint.\n",
+                "chatterbox: tokenizer/model vocab mismatch: tokenizer has %zu tokens > "
+                "T3 text_vocab_size=%u — the tokenizer can emit ids past the text embedding. "
+                "Re-convert with the tokenizer paired to this T3 checkpoint.\n",
                 c->tokenizer.id_to_token.size(), c->hp.text_vocab_size);
         delete c;
         return nullptr;
+    }
+    if (!c->tokenizer.id_to_token.empty() && c->tokenizer.id_to_token.size() < c->hp.text_vocab_size) {
+        fprintf(stderr,
+                "chatterbox: note: tokenizer has %zu tokens, T3 text_vocab_size=%u "
+                "(embedding superset — extra rows reserved/unused; loading normally). #181\n",
+                c->tokenizer.id_to_token.size(), c->hp.text_vocab_size);
     }
 
     // Issue #94 follow-up: chatterbox-turbo's Python tts_turbo.generate()
