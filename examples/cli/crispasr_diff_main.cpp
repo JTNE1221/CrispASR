@@ -4780,6 +4780,12 @@ int main(int argc, char** argv) {
         cp.verbosity = 0;
         cp.temperature = 0.0f; // greedy for deterministic comparison
         cp.seed = 42;
+        // gen_codes_20 only needs the first 20 frames; cap generation so the diff
+        // doesn't run the full ~2580-step default (override via PARLER_DIFF_MAXGEN).
+        {
+            const char* mg = std::getenv("PARLER_DIFF_MAXGEN");
+            cp.max_audio_tokens = mg && mg[0] ? std::atoi(mg) : 40;
+        }
 
         parler_tts_context* ctx = parler_tts_init_from_file(model_path.c_str(), cp);
         if (!ctx) {

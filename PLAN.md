@@ -5549,6 +5549,11 @@ or repeated synthesize calls fault on stale tensor→buffer pointers. Perf is ba
 dependent: a win where host↔device KV transfer is costly (discrete GPU / CUDA), but
 neutral-to-negative on M1 unified memory (transfer ≈ memcpy; fixed-Lk over-read makes long
 utterances slower) — hence opt-in, not default. Validate + flip default on CUDA.
+**crispasr-diff validation:** vs F32 PyTorch ground truth — F16 legacy 108/108 (100%)
+PASS, F16 bucket 108/108 (100%) PASS (bucket bit-identical to legacy); Q8_0 bucket
+byte-identical to legacy (both 23% vs F32 = pure quant gap). Reference at
+`hf.co/datasets/cstr/crispasr-diff-refs/parler-tts-ref.gguf`. Diff capped to 40 decode
+steps for parler via `PARLER_DIFF_MAXGEN` (else it runs the full ~2580-step default).
 **Approach:** Qwen3-TTS demonstrates with 5 pre-built graphs at fixed Lk
 sizes. MIMO has a simpler single-bucket `step_t1_gf`. FunASR has the
 infrastructure but disabled due to full-window attend; needs Lk-bucketing

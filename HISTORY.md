@@ -152,8 +152,23 @@ Perf is backend-dependent and the reason it's opt-in: a win where
 host↔device KV transfer is costly (discrete GPU / CUDA), but neutral-to-
 negative on M1 unified memory (transfer ≈ memcpy; the fixed-Lk over-read
 makes long utterances slower). Validate + flip to default on CUDA.
-Validated bit-identical-to-legacy *when greedy doesn't flip an argmax*
-and crash-free across repeated synthesize calls on M1 Metal (Q4_K).
+
+**Validation (crispasr-diff vs F32 PyTorch ground truth).** Generated a
+parler reference (`tools/dump_reference.py --backend parler-tts`, greedy,
+seed 42) and ran `crispasr-diff parler-tts` with the bucket path off and on
+(reference at `hf.co/datasets/cstr/crispasr-diff-refs/parler-tts-ref.gguf`):
+- **F16: legacy 108/108 (100%) PASS, bucket 108/108 (100%) PASS** — the port
+  matches PyTorch exactly and the bucket is bit-identical to both legacy and
+  ground truth over the gen_codes_20 window.
+- **Q8_0: bucket byte-identical to legacy** (both 25/108 vs the F32 reference
+  — the gap is Q8_0 quantization error, identical for both paths, not the
+  bucket; F16 closes it to 100%).
+- Crash-free across repeated synthesize calls on M1 Metal.
+The Q4_K greedy bucket-vs-legacy drift noted above is quantization noise
+amplified by greedy argmax (Q4_K is below the parler quality bar regardless
+of path — legacy Q4_K greedy also produces non-speech); it does not occur at
+F16. The diff harness was capped to 40 decode steps for parler
+(`PARLER_DIFF_MAXGEN`) so it doesn't run the full ~2580-step default.
 
 ---
 

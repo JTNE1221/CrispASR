@@ -175,12 +175,17 @@ sometimes pass," which makes them nasty — they each cost a debugging round.
    *second* synthesize. Invalidate (free + rebuild) at the start of each
    call; within a call the per-step reuse is preserved.
 
-Also: fixed-Lk bucketing is **not bit-exact** vs a dynamic-length path —
-the padded reduction shifts FP rounding, so greedy decoding diverges into a
-different *valid* sequence. Gate such opts on ASR-roundtrip quality, not
-token equality. And on **unified memory (M1)** the device-KV migration wins
-nothing (host↔device is a memcpy) while the over-read costs — the payoff is
-a discrete-GPU/CUDA phenomenon. Ship opt-in until CUDA-validated.
+Also: fixed-Lk bucketing shifts FP rounding (the padded reduction), so it is
+not *guaranteed* bit-exact vs a dynamic-length path — but in practice the
+shift is tiny. Validated with `crispasr-diff` against the F32 PyTorch ground
+truth: at **F16 the bucket matched legacy AND ground truth 108/108 (100%)**
+over the gen_codes_20 window; the divergence only appears at **Q4_K**, where
+quantization noise (Q4_K is below parler's quality bar — legacy Q4_K greedy
+also degenerates to non-speech) gets amplified by greedy argmax. So validate
+such opts with the diff harness at F16, not ASR-roundtrip on a low quant.
+And on **unified memory (M1)** the device-KV migration wins nothing
+(host↔device is a memcpy) while the over-read costs — the payoff is a
+discrete-GPU/CUDA phenomenon. Ship opt-in until CUDA-validated.
 
 ## Backend-name guards must match the *registered* name, by prefix when aliased (#171, #174)
 
