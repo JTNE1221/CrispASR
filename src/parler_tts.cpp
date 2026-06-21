@@ -1406,8 +1406,12 @@ static ggml_cgraph* build_decoder_step_graph(parler_tts_context* c, int T_dec, i
             ggml_tensor* sr_v = ggml_set_rows(ctx0, v_layer, V_new, kv_pos);
             ggml_build_forward_expand(gf, sr_k);
             ggml_build_forward_expand(gf, sr_v);
-            K_full = ggml_cont(ctx0, ggml_view_2d(ctx0, sr_k, D, kv_len, sr_k->nb[1], 0));
-            V_full = ggml_cont(ctx0, ggml_view_2d(ctx0, sr_v, D, kv_len, sr_v->nb[1], 0));
+            // The Lk window is the contiguous leading block of the layer's KV slice,
+            // so feed the view straight into reshape (the later permute+mul_mat read
+            // it strided, same as before) — skip the per-step D×Lk cont copy, which
+            // grows with the bucket size and dominates the long-utterance cost.
+            K_full = ggml_view_2d(ctx0, sr_k, D, kv_len, sr_k->nb[1], 0);
+            V_full = ggml_view_2d(ctx0, sr_v, D, kv_len, sr_v->nb[1], 0);
         } else {
             // Output new K/V for cache update — mark as output to prevent
             // the scheduler from reusing their memory before we read them post-compute
