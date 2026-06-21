@@ -6,6 +6,23 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-21 §175 item 2 — GPT-2 BPE decoder DRY (6 copies → core_bpe)
+
+Removed 6 copy-pasted `byte_decoder()` + `decode_token()` / `gpt2_byte_decode()`
+implementations (~440 lines) across `crispasr_c_api.cpp`, `lfm2_audio.cpp`,
+`vibevoice.cpp`, `crispasr_backend_{qwen3,moss_audio,mimo_asr}.cpp`. All now
+delegate to `core_bpe::token_bytes_to_utf8()` in `src/core/bpe.h` (which already
+existed with a unit test in `tests/test-core-bpe.cpp`).
+
+The simpler variant (b) — inline `Ġ→space, Ċ→newline` in glm_asr + c_api — is
+only 2 call sites and not worth extracting.
+
+Combined with item 1 (lang_names.h, already done prior to this session), §175
+is now MOSTLY DONE (only item 3 — prompt templates — remains, deferred as
+low-value).
+
+---
+
 ## 2026-06-21 §207 Chatterbox CFM default 10→6 Euler steps (perf, perceptual parity)
 
 Profiling the F16-dequant chatterbox path (§205) on M1 Metal: the S3Gen CFM

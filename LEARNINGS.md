@@ -10,6 +10,18 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## DRY shared headers can exist for months before callers migrate (§175)
+
+Both `src/core/lang_names.h` (§175 item 1) and `src/core/bpe.h` (§175 item 2)
+were already written, tested, and merged — but the 10+ call sites still used
+local copies. The shared header *existing* is not the same as the migration
+*happening*. When creating a shared helper, migrate at least one caller in the
+same commit to establish the pattern. Otherwise the old copies persist
+indefinitely and the DRY benefit is zero until someone does the mechanical
+search-and-replace pass later.
+
+---
+
 ## Cross-attention KV is a free F16 win — encoder-decoder backends (§176i)
 
 Cross-attention K/V in encoder-decoder models is projected once from the
