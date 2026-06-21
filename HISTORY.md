@@ -45,6 +45,30 @@ the result class (graph-cache helps only overhead-bound graphs) is the finding.
 Worktree: `/Volumes/backups/code/chatterbox-gallocr-stash`.
 
 ---
+## 2026-06-21 §209 KugelAudio — GPU empty-output fixed (same §206 sched root cause)
+
+The §201 CUDA sweep produced 0 bytes after ~322 s. Same root cause as
+lfm2-audio §206: KugelAudio's Qwen2.5-7B LM graph leads with a weight-less
+RMSNorm, so `ggml_backend_sched` (op_offload=false) put that op + the leaf input
+on the CPU backend and fed the GPU a miscomputed cross-backend copy → garbage LM
+logits → the constrained decode never emitted the speech-diffusion token → no
+audio (empty output).
+
+**Fix (`bdb3f42f`).** Compute every backbone graph (LM prefill/decode, embed
+lookup, DiT diffusion pred-head, connector) **directly on `ctx->backend` via
+`ggml_gallocr` + `ggml_backend_graph_compute`** instead of the scheduler. The VAE
+decoder is the lone exception: it uses `ggml_pad` (causal-conv left-pad) which the
+Metal backend rejects, so that one graph stays on `ggml_backend_sched` (falls back
+to CPU for PAD on Metal; on CUDA `PAD` is supported so it runs fully on GPU). The
+VAE has no weight-less-first-op issue (first op is a conv), so its mid-graph
+cross-backend copies are the safe kind. (An attempt to make the pad Metal-native
+with `ggml_concat`-of-zeros failed for short latents where pad>T — `OW<=0`
+"b too small" — so the original `ggml_pad_ext` math was kept.)
+
+Validated on M1 Metal (q4_k, the largest quant per the OOM budget): GPU generates
+83200 samples and the audio ASR-roundtrips to the input ("Hello there.") — was
+empty before. Works on CUDA too (PAD supported there). This closes 4 of the §201
+CUDA failures via the §206 pattern; orpheus + cosyvoice3 remain.
 
 ## 2026-06-21 §175 item 2 — GPT-2 BPE decoder DRY (6 copies → core_bpe)
 

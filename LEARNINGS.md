@@ -109,6 +109,21 @@ did NOT help — the copy persisted; only avoiding the split entirely worked.) U
 the published PyTorch ref (`cstr/crispasr-regression-fixtures`
 `lfm2-audio-1.5b/jfk_11s/ref.gguf`) + `CRISPASR_DIFF_USE_GPU=1` to re-validate.
 
+**The same root cause hit KugelAudio (§209)** — its Qwen2.5-7B LM also leads with
+a weight-less RMSNorm, so the sweep's "0 bytes after 322 s" was garbage logits →
+the constrained decode never emitting the speech-diffusion token. Same gallocr
+fix. **Per-graph decision when one graph has a Metal-unsupported op:** KugelAudio's
+VAE decoder uses `ggml_pad` (causal left-pad), which Metal rejects and a
+single-backend gallocr graph can't fall back for. So mix: run the
+weight-less-first-op graphs (LM/diffusion) on gallocr (the §206 fix) but keep the
+VAE on `ggml_backend_sched` (which falls back to CPU for PAD on Metal; CUDA
+supports PAD so it runs fully on GPU). That's safe because the VAE's first op is a
+conv (input lands on GPU) — only the *leaf-input + weight-less-first-op* combo
+triggers the broken copy; mid-graph CPU splits are fine. (Trying to make the pad
+Metal-native via `ggml_concat`-of-a-scaled-view fails when pad>T — you can't build
+zeros wider than the source view — so keep `ggml_pad_ext` and let the sched handle
+it.)
+
 **When you can't crack it: default to CPU.** If the GPU path is broken end-to-end
 and CPU is correct + fast enough, force the backend to CPU
 (`params.use_gpu = false`) behind an env opt-in (`CRISPASR_<X>_GPU=1`) rather than

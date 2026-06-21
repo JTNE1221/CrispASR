@@ -190,9 +190,8 @@ m2m100 (3.7 s), madlad (12.5 s) — en→de translation produced output.
   Root cause of the earlier streaming failures (token unresolved on the chr1s4
   nested mount path) fixed in `81826457`.
 - **Genuine CUDA failures: ~7** (was reported as 10), of which `fastpitch` +
-  `speecht5` (§204), `chatterbox` (§205), and `lfm2-audio` (§206) are now FIXED;
-  `orpheus`, `cosyvoice3` (dies 0.1 s), `kugelaudio` (empty after 322 s) remain —
-  tracked in PLAN.md §201. Several pass on M1
+  `speecht5` (§204), `chatterbox` (§205), `lfm2-audio` (§206), and `kugelaudio` (§209) are now FIXED; `orpheus` and `cosyvoice3` (dies 0.1 s) remain — tracked
+  in PLAN.md §201. Several pass on M1
   Metal, so they are CUDA-path-specific. The 2 vibevoice entries were benchmark
   bugs (now fixed + passing); `f5-tts` needs one more timeout-bumped run.
 

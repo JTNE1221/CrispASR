@@ -739,6 +739,16 @@ mistakes, not bugs**, leaving **7 genuine failures** (+1 pending). Of those 7,
   GPU diff (`CRISPASR_DIFF_USE_GPU=1`) shipped. Follow-up: GPU-decode graph caching
   (AR decode is currently dispatch-bound, GPU ~slower than CPU on JFK).
 
+**RESOLVED — kugelaudio GPU empty-output (HISTORY §209):**
+- ✅ **kugelaudio** (TTS) — fixed by `bdb3f42f`. Same §206 root cause: the
+  Qwen2.5-7B LM's weight-less leading RMSNorm made `ggml_backend_sched` put the
+  input + first op on CPU and feed the GPU a miscomputed copy → garbage LM → no
+  speech-diffusion token → empty output. Fix: backbone graphs compute directly on
+  ctx->backend via gallocr; only the VAE decoder stays on the sched (its `ggml_pad`
+  is Metal-unsupported → CPU fallback; CUDA supports PAD so it runs on GPU there).
+  Validated on M1 Metal (q4_k): GPU generates 83200 samples, ASR-roundtrips to
+  "Hello there.".
+
 **GENUINE bugs — fail on CUDA even with correct args (TODO):**
 - [ ] **orpheus** (TTS) — 0-byte (~17 s) with `--voice tara`. Llama-3.2 + SNAC.
 - [ ] **chatterbox** (TTS) — 0-byte (~14 s) with `--voice <wav> --i-have-rights`;
@@ -748,14 +758,12 @@ mistakes, not bugs**, leaving **7 genuine failures** (+1 pending). Of those 7,
   (2026-06-21):** §205's mixed-radix FFT fix explicitly covers CosyVoice3's
   `n_fft=400` mel (same heap overflow as chatterbox). Likely resolved — needs
   Kaggle CUDA re-test to confirm.
-- [ ] **kugelaudio** (TTS) — ran to completion (~322 s, under the bumped 420 s
-  timeout) but produced **0 bytes** → empty-output bug, not just slow. ~5.7 GB
-  Q4_K, so also a big model.
 
 **Method:** per-backend JSONs in the dataset have timing context; reproduce on a
 CUDA worker (Kaggle T4/P100 or the A1000) with `CRISPASR_VERBOSE=1` +
-`CRISPASR_<BACKEND>_DEBUG=1`. Remaining open: orpheus, cosyvoice3, kugelaudio
-(empty-output finishers) — chatterbox fixed in §205, lfm2-audio in §206. Several
+`CRISPASR_<BACKEND>_DEBUG=1`. Remaining open: orpheus, cosyvoice3 — chatterbox
+fixed in §205, lfm2-audio in §206, kugelaudio in §209 (lfm2 + kugelaudio shared
+the §206 sched weight-less-first-op root cause). Several
 pass on M1 Metal → CUDA-path-specific; cross-check Metal first. Small models also
 fit the 8 GB CPU-only VPS, where the diff harness can drive the fix if the bug
 reproduces on CPU. The fastpitch+speecht5 fix (§204) came exactly this way — the
