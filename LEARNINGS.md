@@ -28,10 +28,29 @@ localize a "works on CPU, garbage on GPU" backend, entirely on an M1 (no CUDA):
    whole subgraph is one Metal split, yet wrong). lfm2's backbone was entirely on
    Metal with no splits → a real ggml-Metal op bug, not a copy issue.
 
-**Caveat on the dump itself:** marking intermediates `set_output` can perturb the
-sched's allocation; when a graph splits across backends, a `set_output`
-intermediate may read a stale split-buffer. Cross-check with `GGML_SCHED_DEBUG`
-that the region is single-backend before trusting a per-stage cos.
+**Caveat on the dump itself — `set_output` snapshots LIE under the Metal sched.**
+This cost the most time. Marking intermediate tensors `ggml_set_output` +
+`tensor_get` for a per-stage dump is *unreliable* on GPU: the snapshots read
+cos≈1.0 vs the reference (looking perfect) even when the real forward is garbage,
+and they flip between values when you change the sched (shared vs fresh-per-call
+→ all-zeros). Do **not** trust per-intermediate snapshots to localize a GPU bug.
+
+**Reliable bisection: truncate the graph and diff the genuine OUTPUT.** Add an
+env (`LFM2_AO_MAX_LAYERS=N`) that stops the backbone after N layers and returns
+that as the real graph output (the thing the harness already reads), then compare
+CPU-vs-GPU of *that output* for N=1,2,4,…. The first N that diverges is the
+buggy layer — and within a layer, add probe env-gates that `return` early at each
+sub-step (after-norm, after-operator, after-residual) so the early-return value
+*is* the output, not a snapshot. This pinned lfm2's divergence to the very first
+layer and showed it tracks **weight-reading ops** (the norm-weight broadcast
+`ggml_mul` and Q5_K `mul_mat`s) while weightless `ggml_rms_norm` matches exactly.
+What this *ruled out* (each a real experiment, not a guess): the im2col depthwise
+conv (an explicit shift-add reimplementation gave identical divergence), the
+shared scheduler (a fresh per-call sched was worse — all zeros), and weight
+placement (`load_weights` puts everything on one GPU buffer). The root cause is a
+deep ggml-Metal issue, still open. Use the published PyTorch ref
+(`cstr/crispasr-regression-fixtures` `lfm2-audio-1.5b/jfk_11s/ref.gguf`) +
+`CRISPASR_DIFF_USE_GPU=1` to continue.
 
 **When you can't crack it: default to CPU.** If the GPU path is broken end-to-end
 and CPU is correct + fast enough, force the backend to CPU

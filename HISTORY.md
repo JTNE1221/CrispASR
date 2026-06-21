@@ -34,6 +34,26 @@ sweep passes. Also fixed the CLI adapter, which hardcoded the transcribe prompt
 to `nullptr` (always Japanese) — it now forwards `-l en`/`params.language`.
 **Open:** the proper GPU-backbone miscompute fix (would restore GPU accel).
 
+**Diff-harness follow-up (`fb5b186c`).** To debug the GPU backbone with
+crispasr-diff properly: built + published the PyTorch reference dump
+(LiquidAI/LFM2.5-Audio-1.5B audio-only backbone stages) to
+`cstr/crispasr-regression-fixtures` (`lfm2-audio-1.5b/jfk_11s/ref.gguf`), made
+`run_lfm` GPU-capable (sched instead of CPU-only `ggml_graph_compute_with_ctx`;
+positions/mask are now graph inputs — also fixes `lfm2_gqa_attention` writing
+`->data` under a no_alloc graph), and wired `CRISPASR_DIFF_USE_GPU=1` into the
+lfm2 diff. The CPU diff matches the ref at cos_mean≈0.999 (cos_min≈0.93 = Q5_K
+quant drift). **Findings:** mel/encoder/adapter are GPU-correct; the backbone
+diverges from layer 0 on Metal. *Ruled out:* the depthwise conv (an explicit
+shift-add reimplementation gave identical divergence), scheduler sharing (a
+fresh per-call sched produced all-zeros — worse), and weight placement (all
+weights on one GPU buffer). The divergence tracks **weight-reading ops** (the
+norm-weight broadcast `ggml_mul` and the Q5_K `mul_mat`s) while weightless
+`rms_norm` matches CPU exactly — pointing at a deep ggml-Metal issue, still not
+isolated. Caveat that cost time: per-intermediate `ggml_set_output` snapshots are
+**unreliable under the Metal sched** (they read cos=1.0 even when the real
+forward is garbage); only the graph's final output is trustworthy — bisect with
+layer truncation on the *output*, not snapshots.
+
 ## 2026-06-21 §205 Chatterbox CUDA crash — non-power-of-two FFT heap overflow + q8/Metal CFM NaN
 
 Kaggle full-backend-sweep (Tesla P100, sm_60) crashed chatterbox TTS with
