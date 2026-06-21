@@ -1,5 +1,7 @@
 #pragma once
 
+#include "chatterbox_nfkd.h"
+
 #include <cctype>
 #include <string>
 #include <string_view>
@@ -92,6 +94,16 @@ inline std::string normalize(std::string text, bool multilingual = false) {
         text[0] = (char)(text[0] - 'a' + 'A');
     }
     if (multilingual) {
+        // Match upstream MTLTokenizer.preprocess_text: lowercase + NFKD
+        // (issue #170). NFKD must run first so accented Latin uppercase
+        // decomposes to an ASCII base letter that lowercase_ascii then
+        // folds (e.g. "É" -> "E" + combining acute -> "e" + combining
+        // acute), and so precomposed Arabic graphemes (e.g. U+0623
+        // ALEF-WITH-HAMZA) split into base + combining mark exactly as the
+        // tokenizer was trained on. Non-Latin uppercase casefolding (Greek,
+        // Cyrillic) is out of scope — those languages route through their
+        // own normalizers upstream.
+        text = nfkd(text);
         lowercase_ascii_inplace(text);
     }
 
