@@ -102,8 +102,16 @@ GPU+F16; GPU+quant fixed via the F16 dequant above (ASR-roundtrips verbatim).
 Also the **first working T3-on-GPU path on Metal** — it rebuilds the step graph
 each step, so it sidesteps the §186 Lk-bucket `buffer is nil` crash that breaks
 legacy T3-GPU. CPU floor speedup **~34 % ms/tok** (75→50) measured on a contended
-M1 (load 8–12, absolute numbers unreliable); a clean GPU number and a bucketed
-B=2 graph (to amortize the per-step Metal re-alloc) are open — see PLAN §214.
+M1 (load 8–12, absolute numbers unreliable).
+
+**Per-step build+alloc is negligible — bucketing the B2 graph is a confirmed DUD**
+(`CHATTERBOX_BENCH_B2=1`, 2026-06-21): CPU 0.41 ms/step = **0.8 %** of step time
+(compute 53 ms/step); GPU+F16 1.55 ms = **0.7 %** (compute 232 ms/step). Per
+§208, a cached graph only helps overhead-bound work — it doesn't here, and a
+cached B2 graph would risk the §186 GPU bucket crash. Note GPU compute (232
+ms/step) ≫ CPU (53 ms/step): **B2 on GPU is not a speed win over the CPU default**
+— its value is enabling T3-on-GPU (sidestepping the bucket crash) + the GPU+quant
+F16-dequant path. T3 stays CPU-default. See PLAN §214.
 
 ### Where the gaps are
 

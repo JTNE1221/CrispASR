@@ -118,19 +118,24 @@ PERFORMANCE §214.
    flipping the default ON for the CFG path (keep the env + legacy path forever
    for bisection). ~1 h on a quiet box.
 
-2. **Cached / bucketed B=2 step graph (MED — only if alloc-bound).** B2 currently
-   rebuilds + `sched_alloc_graph`s every step. §208/§212 say rebuild is negligible
-   on compute-bound CPU, but the per-step **Metal** sched re-alloc is unmeasured
-   and likely caps the GPU win. First *measure* (instrument build+alloc with
-   `ggml_time_us()` around `build_graph_t3_kv_b2`/`alloc_graph`, per the §208
-   methodology) — only bucket it if alloc is a real fraction. CAUTION: a cached
-   B2 graph may reintroduce the §186 Lk-bucket `buffer is nil` Metal crash (the
-   reason per-step rebuild is what makes B2-on-GPU work today); a CPU-only bucket
-   or the proper per-tensor backend-assignment fix may be required.
+2. **Cached / bucketed B=2 step graph — CLOSED, confirmed DUD (measured 2026-06-21).**
+   `CHATTERBOX_BENCH_B2=1` split each step into build+alloc vs compute: **CPU
+   0.41 ms/step build+alloc = 0.8 %** (compute 53 ms/step); **GPU+F16 1.55 ms =
+   0.7 %** (compute 232 ms/step). Per-step rebuild+alloc is <1 % on both backends
+   — bucketing it could save at most ~1 %, exactly the §208 lesson. NOT worth it,
+   and a cached B2 graph would risk reintroducing the §186 Lk-bucket `buffer is
+   nil` Metal crash that per-step rebuild currently sidesteps. Don't pursue. (Side
+   datum: GPU per-step compute 232 ms ≫ CPU 53 ms, so B2 on GPU is *not* a speed
+   win over the CPU default — its value is enabling T3-on-GPU at all + the
+   GPU+quant F16-dequant path, not beating CPU.)
 
-3. **GPU speedup number (MED).** Couldn't get a clean GPU ms/tok under load.
-   Measure GPU+F16 and GPU+q4k (post-dequant) B2 vs the non-bucket GPU-legacy
-   baseline on a quiet box; report whether GPU B2 finally beats the CPU default.
+3. **GPU speedup (LOW — first data says GPU loses to CPU).** First measurement
+   (2026-06-21, residual load): GPU+F16 B2 compute **232 ms/step** vs CPU **53
+   ms/step** — GPU stays ~4× slower per step (the long-standing Metal
+   kernel-launch-overhead × 30L × steps story; B2 doesn't change it). So GPU B2's
+   value is *enabling* T3-on-GPU (sidesteps the §186 bucket crash) + the GPU+quant
+   F16-dequant path, NOT speed. A quiet-box re-measure could refine the 4× but is
+   unlikely to flip it; the production T3 default stays CPU.
 
 4. **Generalize B=2 to the other CFG backends — see §215.**
 
