@@ -27,6 +27,22 @@
 #include <string>
 #include <thread>
 
+// ── Portable env helpers (Windows has no POSIX setenv/unsetenv) ────────────
+static void test_setenv(const char* k, const char* v) {
+#if defined(_WIN32)
+    _putenv_s(k, v);
+#else
+    ::setenv(k, v, 1);
+#endif
+}
+static void test_unsetenv(const char* k) {
+#if defined(_WIN32)
+    _putenv_s(k, "");
+#else
+    ::unsetenv(k);
+#endif
+}
+
 // ── Reproduce the exact bench_enabled pattern from src/*.cpp ───────────────
 // We use a non-static version with an explicit `int* cached` parameter so
 // each TEST_CASE can reset the memoized value independently.
@@ -61,50 +77,50 @@ struct bench_stage {
 TEST_CASE("bench_enabled — unset env var returns false", "[unit][bench]") {
     // Use a unique env var name that is guaranteed unset
     const char* var = "CRISPASR_TEST_BENCH_UNSET_12345";
-    ::unsetenv(var);
+    test_unsetenv(var);
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == false);
 }
 
 TEST_CASE("bench_enabled — env '1' returns true", "[unit][bench]") {
     const char* var = "CRISPASR_TEST_BENCH_ONE";
-    ::setenv(var, "1", 1);
+    test_setenv(var, "1");
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == true);
-    ::unsetenv(var);
+    test_unsetenv(var);
 }
 
 TEST_CASE("bench_enabled — env '0' returns false", "[unit][bench]") {
     const char* var = "CRISPASR_TEST_BENCH_ZERO";
-    ::setenv(var, "0", 1);
+    test_setenv(var, "0");
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == false);
-    ::unsetenv(var);
+    test_unsetenv(var);
 }
 
 TEST_CASE("bench_enabled — env '' (empty) returns false", "[unit][bench]") {
     const char* var = "CRISPASR_TEST_BENCH_EMPTY";
-    ::setenv(var, "", 1);
+    test_setenv(var, "");
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == false);
-    ::unsetenv(var);
+    test_unsetenv(var);
 }
 
 TEST_CASE("bench_enabled — env '42' returns true", "[unit][bench]") {
     const char* var = "CRISPASR_TEST_BENCH_42";
-    ::setenv(var, "42", 1);
+    test_setenv(var, "42");
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == true);
-    ::unsetenv(var);
+    test_unsetenv(var);
 }
 
 TEST_CASE("bench_enabled — cached value is sticky", "[unit][bench]") {
     const char* var = "CRISPASR_TEST_BENCH_STICKY";
-    ::setenv(var, "1", 1);
+    test_setenv(var, "1");
     int cached = -1;
     REQUIRE(bench_enabled_with(var, &cached) == true);
     // Now unset the env var — cached should still return true
-    ::unsetenv(var);
+    test_unsetenv(var);
     REQUIRE(bench_enabled_with(var, &cached) == true);
     REQUIRE(cached == 1);
 }
