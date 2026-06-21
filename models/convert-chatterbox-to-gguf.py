@@ -645,12 +645,30 @@ def write_turbo_t3_gguf(
         import json as _json
         with open(vocab_path, encoding="utf-8") as f:
             vocab = _json.load(f)
-        max_id = max(vocab.values())
+        # #181: the turbo tokenizer's special tokens (e.g. [laugh], [whispering],
+        # [angry] — the 19 emotion/style controls) live in added_tokens.json at
+        # ids past the base BPE vocab (50257..50275), NOT in vocab.json. The old
+        # path read only vocab.json (50257) while the T3 text embedding is 50276,
+        # so the embedded tokenizer was 19 short — a baked-in vocab mismatch that
+        # v0.8.0's loader rejected. Merge added_tokens.json so the tokens array
+        # covers the full text_vocab_size.
+        added = {}
+        added_path = model_dir / "added_tokens.json"
+        if added_path.exists():
+            with open(added_path, encoding="utf-8") as f:
+                added = _json.load(f)  # {token_str: id}
+        max_id = max([max(vocab.values())] + list(added.values()))
         tokens = [""] * (max_id + 1)
         for tok_str, tok_id in vocab.items():
             tokens[tok_id] = tok_str
+        for tok_str, tok_id in added.items():
+            if 0 <= tok_id < len(tokens):
+                tokens[tok_id] = tok_str
         writer.add_array("tokenizer.ggml.tokens", tokens)
-        print(f"  Tokenizer: {len(tokens)} tokens from vocab.json")
+        if added:
+            print(f"  Tokenizer: {len(tokens)} tokens from vocab.json + {len(added)} added_tokens.json")
+        else:
+            print(f"  Tokenizer: {len(tokens)} tokens from vocab.json")
 
         if merges_path.exists():
             merges = []
