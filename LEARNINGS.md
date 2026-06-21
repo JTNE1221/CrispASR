@@ -21,11 +21,17 @@ not dispatch Metal's PREC_F32 `mul_mv_q*_K` exact-dot kernel that the
 greedy speech-token sampler (chatterbox T3: divergence at step ~2 → repetition
 collapse). Same failure class as the §211 native-batched-quant-CFM garbage.
 **Rule:** B=2 batching of quantized matmuls is safe on the CPU backend (all
-quants) and on Metal only with F16 weights; guard quant+GPU off. (CrispASR's T3
-defaults to CPU on Metal anyway, so this only bites the explicit T3-GPU + quant
-opt-in.) Corollary win: a per-step-rebuilt B=2 graph **sidesteps the §186
-Lk-bucket `buffer is nil` Metal crash**, making B=2+F16 the first working
-T3-on-GPU path.
+quants) and on Metal only with F16 weights. **Fix for Metal+quant:** dequantize
+the matmul weights q*→F16 GPU-resident once at first use (host `to_float` →
+`ggml_fp32_to_fp16_row` → upload to the GPU backend; `chatterbox.cpp
+ensure_t3_b2_f16_weights`, `chatterbox_s3gen.cpp dequant_cfm_f16`) and batch
+against the F16 copies — the `mul_mm_f16` path is correct batched on Metal. This
+is the **only** other-backend solution in the tree: every non-batched TTS backend
+(dia/zonos/tada/cosyvoice3/f5/voxcpm2) instead runs two sequential B=1 passes and
+blends post-hoc, sidestepping the issue at a latency cost; s3gen's CFM and (now)
+chatterbox T3 are the only two that batch CFG, and both dequant-to-F16 on GPU.
+Corollary win: a per-step-rebuilt B=2 graph **sidesteps the §186 Lk-bucket
+`buffer is nil` Metal crash**, making B=2 the first working T3-on-GPU path.
 
 ## TTS WAV md5 is only a valid parity gate with a pinned seed
 

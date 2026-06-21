@@ -800,6 +800,17 @@ struct chatterbox_context {
     // without disturbing the cond/uncond bucket allocations.
     ggml_backend_sched_t t3_sched_b2 = nullptr;
 
+    // §214: F16 GPU-resident copies of the T3 matmul weights, built lazily for
+    // the B=2 decode when T3 is on GPU with quantized weights. Metal's batched
+    // (ne[2]=2) quantized mat-vec misses the PREC_F32 mul_mv_q*_K exact-dot
+    // kernel and degenerates; dequantizing the weights to F16 once (same trick
+    // as s3gen's dequant_cfm_f16) routes the batched matmul through the correct
+    // mul_mm_f16 path. Empty on CPU / F16 models (B=2 uses the native weights).
+    ggml_context* t3_ctx_f16 = nullptr;
+    ggml_backend_buffer_t t3_buf_f16 = nullptr;
+    std::vector<cb_t3_layer> t3_blocks_f16;
+    ggml_tensor* t3_speech_head_f16 = nullptr;
+
     // §188: CPU-side F32 copies of embedding tables.
     // Populated once at init; eliminates tensor_get_f32 on every decode step.
     std::vector<float> speech_emb_cache;     // (speech_vocab_size × hidden)
@@ -837,6 +848,10 @@ struct chatterbox_context {
             ggml_backend_sched_free(t3_step_sched_cfg);
         if (t3_sched_b2)
             ggml_backend_sched_free(t3_sched_b2);
+        if (t3_buf_f16)
+            ggml_backend_buffer_free(t3_buf_f16);
+        if (t3_ctx_f16)
+            ggml_free(t3_ctx_f16);
         for (auto& bk : t3_buckets)
             if (bk.ctx)
                 ggml_free(bk.ctx);
@@ -1438,6 +1453,115 @@ static ggml_cgraph* build_graph_t3_kv(chatterbox_context* c, int n_past, int n_t
     return gf;
 }
 
+// §214: lazily build F16 GPU-resident copies of the T3 matmul weights for the
+// B=2 decode (only needed when T3 is on GPU with quantized weights — see the
+// t3_blocks_f16 field comment + LEARNINGS §214). Dequantizes each matmul weight
+// q*→F32→F16 on the host and uploads to c->backend, mirroring s3gen's
+// dequant_cfm_f16. Norms (used in ggml_mul, not matmul) keep their originals.
+// Returns true on success (or if no dequant is needed). Built once; reused.
+static bool ensure_t3_b2_f16_weights(chatterbox_context* c) {
+    if (!c->t3_blocks_f16.empty())
+        return true; // already built
+    const size_t nl = c->t3.blocks.size();
+    if (nl == 0)
+        return false;
+
+    // Collect the matmul weights that are quantized and need an F16 copy.
+    std::vector<ggml_tensor*> qsrc;
+    auto want = [&](ggml_tensor* w) {
+        if (w && ggml_is_quantized(w->type))
+            qsrc.push_back(w);
+    };
+    for (auto& b : c->t3.blocks) {
+        want(b.attn_q_w);
+        want(b.attn_k_w);
+        want(b.attn_v_w);
+        want(b.attn_output_w);
+        want(b.ffn_gate_w);
+        want(b.ffn_up_w);
+        want(b.ffn_down_w);
+    }
+    want(c->t3.speech_head_w);
+    if (qsrc.empty())
+        return false; // nothing quantized — caller should use native weights
+
+    const size_t meta = ggml_tensor_overhead() * (qsrc.size() + 8) + 4096;
+    struct ggml_init_params fp = {meta, nullptr, true};
+    c->t3_ctx_f16 = ggml_init(fp);
+    if (!c->t3_ctx_f16)
+        return false;
+
+    std::map<ggml_tensor*, ggml_tensor*> q2f16;
+    for (ggml_tensor* s : qsrc) {
+        if (q2f16.count(s))
+            continue; // shared weight — dequant once
+        ggml_tensor* d = ggml_new_tensor(c->t3_ctx_f16, GGML_TYPE_F16, ggml_n_dims(s), s->ne);
+        if (!d) {
+            ggml_free(c->t3_ctx_f16);
+            c->t3_ctx_f16 = nullptr;
+            return false;
+        }
+        ggml_set_name(d, ggml_get_name(s));
+        q2f16[s] = d;
+    }
+    c->t3_buf_f16 = ggml_backend_alloc_ctx_tensors(c->t3_ctx_f16, c->backend);
+    if (!c->t3_buf_f16) {
+        ggml_free(c->t3_ctx_f16);
+        c->t3_ctx_f16 = nullptr;
+        return false;
+    }
+
+    size_t bytes_q = 0, bytes_f16 = 0;
+    std::vector<char> raw;
+    std::vector<float> f32;
+    std::vector<ggml_fp16_t> f16;
+    for (auto& kv : q2f16) {
+        ggml_tensor* s = kv.first;
+        ggml_tensor* d = kv.second;
+        const auto* tt = ggml_get_type_traits(s->type);
+        if (!tt || !tt->to_float)
+            return false;
+        const int64_t n = ggml_nelements(s);
+        raw.resize(ggml_nbytes(s));
+        ggml_backend_tensor_get(s, raw.data(), 0, ggml_nbytes(s));
+        f32.resize((size_t)n);
+        tt->to_float(raw.data(), f32.data(), n);
+        f16.resize((size_t)n);
+        ggml_fp32_to_fp16_row(f32.data(), f16.data(), n);
+        ggml_backend_tensor_set(d, f16.data(), 0, (size_t)n * sizeof(ggml_fp16_t));
+        bytes_q += ggml_nbytes(s);
+        bytes_f16 += ggml_nbytes(d);
+    }
+
+    // Build the parallel F16 block table: copy each layer, swap matmul weights
+    // to their F16 copy (norms keep the original F32 tensors).
+    auto repl = [&](ggml_tensor* w) -> ggml_tensor* {
+        auto it = q2f16.find(w);
+        return it != q2f16.end() ? it->second : w;
+    };
+    c->t3_blocks_f16.resize(nl);
+    for (size_t i = 0; i < nl; i++) {
+        cb_t3_layer f = c->t3.blocks[i];
+        f.attn_q_w = repl(f.attn_q_w);
+        f.attn_k_w = repl(f.attn_k_w);
+        f.attn_v_w = repl(f.attn_v_w);
+        f.attn_output_w = repl(f.attn_output_w);
+        f.ffn_gate_w = repl(f.ffn_gate_w);
+        f.ffn_up_w = repl(f.ffn_up_w);
+        f.ffn_down_w = repl(f.ffn_down_w);
+        c->t3_blocks_f16[i] = f;
+    }
+    c->t3_speech_head_f16 = repl(c->t3.speech_head_w);
+
+    if (c->params.verbosity >= 1) {
+        fprintf(stderr,
+                "chatterbox: T3 CFG B2 on GPU — dequantized %zu T3 matmul weights →F16 GPU-resident "
+                "(%.0f→%.0f MiB; correct mul_mm_f16 batched path)\n",
+                q2f16.size(), bytes_q / 1048576.0, bytes_f16 / 1048576.0);
+    }
+    return true;
+}
+
 // §214: batched classifier-free-guidance (B=2) T3 decode step.
 //
 // Runs the conditioned and unconditioned CFG passes as ONE batch-2 forward so
@@ -1504,9 +1628,15 @@ static ggml_cgraph* build_graph_t3_kv_b2(chatterbox_context* c, int n_past) {
     }();
     const bool need_dequant = quant_kv || (s_kv_read_f32 && c->kv_k->type != GGML_TYPE_F32);
 
+    // §214: on GPU + quantized weights, the matmuls run against F16 GPU-resident
+    // copies (ensure_t3_b2_f16_weights) so the batched ne[2]=2 path hits the
+    // correct mul_mm_f16 kernel; otherwise the native (CPU / F16-model) weights.
+    const bool use_f16w = !c->t3_blocks_f16.empty();
+    ggml_tensor* speech_head_w = use_f16w ? c->t3_speech_head_f16 : c->t3.speech_head_w;
+
     ggml_tensor* cur = embeds; // (D, 1, 2)
     for (uint32_t il = 0; il < hp.n_layers; il++) {
-        const auto& b = c->t3.blocks[il];
+        const auto& b = use_f16w ? c->t3_blocks_f16[il] : c->t3.blocks[il];
         ggml_tensor* residual = cur;
 
         ggml_tensor* x = ggml_rms_norm(ctx0, cur, eps);
@@ -1600,7 +1730,7 @@ static ggml_cgraph* build_graph_t3_kv_b2(chatterbox_context* c, int n_past) {
 
     cur = ggml_rms_norm(ctx0, cur, eps);
     cur = ggml_mul(ctx0, cur, c->t3.output_norm_w);
-    cur = ggml_mul_mat(ctx0, c->t3.speech_head_w, cur); // (speech_vocab, 1, 2)
+    cur = ggml_mul_mat(ctx0, speech_head_w, cur); // (speech_vocab, 1, 2)
     ggml_set_name(cur, "logits");
     ggml_build_forward_expand(gf, cur);
 
@@ -3132,14 +3262,17 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
     // hit the PREC_F32 mul_mv_q*_K exact-dot kernel that the single-token legacy
     // decode uses, so the batched quant matmul drifts and the speech-token loop
     // collapses into repetition. (Same class as the §211 batched-quant-CFM
-    // garbage.) Restrict B2 to the known-safe configs. T3 defaults to CPU on
-    // Metal/Vulkan, so this only bites the explicit T3_GPU + quant + B2 combo.
+    // garbage.) Fix it the way s3gen's CFM does: dequantize the T3 matmul weights
+    // to F16 GPU-resident once, so the batched matmuls hit the correct mul_mm_f16
+    // path. If the dequant fails, fall back to the legacy sequential path.
     if (use_b2 && ctx->backend != ctx->backend_cpu && !ctx->t3.blocks.empty() &&
         ggml_is_quantized(ctx->t3.blocks[0].attn_q_w->type)) {
-        use_b2 = false;
-        if (ctx->params.verbosity >= 1)
-            fprintf(stderr, "chatterbox: T3 CFG B2 disabled — GPU + quantized T3 weights "
-                            "(Metal batched quant matmul unsupported); use F16 T3 or run T3 on CPU.\n");
+        if (!ensure_t3_b2_f16_weights(ctx)) {
+            use_b2 = false;
+            if (ctx->params.verbosity >= 1)
+                fprintf(stderr, "chatterbox: T3 CFG B2 disabled — GPU + quantized T3 weights and F16 "
+                                "dequant failed; use F16 T3 or run T3 on CPU.\n");
+        }
     }
     if (use_b2 && ctx->params.verbosity >= 1)
         fprintf(stderr, "chatterbox: T3 CFG B2 (batched cond+uncond decode) ENABLED\n");

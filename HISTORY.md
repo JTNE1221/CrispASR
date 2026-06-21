@@ -43,12 +43,16 @@ tokens ⇒ byte-identical WAV. Results:
   on Metal step ≥1 (`buffer is nil`, the tightened cross-backend resolution); B2
   rebuilds each step so it sidesteps the bucket entirely. So B2 is the first
   working T3-GPU path on Metal.
-- **GPU + quantized weights**: B2 **degenerates** (token divergence at step 2 →
-  repetition loop). Metal's batched (`ne[2]=2`) quantized mat-vec does NOT hit
-  the PREC_F32 `mul_mv_q*_K` exact-dot kernel the single-token legacy uses (same
-  class as the §211 batched-quant-CFM garbage). **Guarded off**: B2 auto-disables
-  (with a warning) when T3 is on GPU and the weights are quantized; allowed on
-  CPU (any quant) and GPU+F16.
+- **GPU + quantized weights**: raw batched quant degenerates (token divergence at
+  step 2 → repetition loop) because Metal's batched (`ne[2]=2`) quantized mat-vec
+  does NOT hit the PREC_F32 `mul_mv_q*_K` exact-dot kernel the single-token legacy
+  uses (same class as the §211 batched-quant-CFM garbage). **Fixed the way s3gen's
+  CFM does** (`ensure_t3_b2_f16_weights`): on GPU + quantized T3, dequantize the T3
+  matmul weights q*→F16 GPU-resident once (q4_k 275→976 MiB, 211 weights), so the
+  batched matmuls hit the correct `mul_mm_f16` path. Result: clean non-degenerate
+  decode, **ASR-roundtrips verbatim** ("…test of batched classifier free guidance.").
+  Falls back to the legacy sequential path only if the dequant itself fails. So
+  B2 now works on CPU (any quant), GPU+F16, AND GPU+quant.
 
 **Speedup.** CPU min-of-N floor on this contended M1 (load 8–12, absolute numbers
 unreliable — the [[project_chatterbox_t3_decode_perf]] noise trap): legacy
