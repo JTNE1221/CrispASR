@@ -31,6 +31,7 @@
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -2501,6 +2502,26 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         fprintf(stderr, "chatterbox: failed to init CPU backend\n");
         delete c;
         return nullptr;
+    }
+    // Wire the CPU backend thread count. Without this, ggml_backend_cpu_init
+    // leaves it at GGML_DEFAULT_N_THREADS (4), so the compute-bound T3 AR
+    // decode ran at 4 threads on every machine regardless of -t. Use up to 8
+    // cores by default (output is bit-identical — ggml matmul splits output
+    // rows per-thread, no cross-thread reduction, so the result is
+    // thread-count-independent). Never drop below the caller's -t. Override
+    // with CRISPASR_CHATTERBOX_THREADS=<n>.
+    {
+        int cb_threads;
+        if (const char* e = std::getenv("CRISPASR_CHATTERBOX_THREADS")) {
+            cb_threads = std::max(1, atoi(e));
+        } else {
+            const int hw = (int)std::thread::hardware_concurrency();
+            cb_threads = std::max(c->n_threads, std::min(8, hw > 0 ? hw : 4));
+        }
+        c->n_threads = cb_threads;
+        ggml_backend_cpu_set_n_threads(c->backend_cpu, cb_threads);
+        if (params.verbosity >= 1)
+            fprintf(stderr, "chatterbox: CPU backend threads=%d\n", cb_threads);
     }
     // Env knobs (all override the default):
     //   CRISPASR_CHATTERBOX_FORCE_GPU=1       — both T3 and S3Gen on GPU
