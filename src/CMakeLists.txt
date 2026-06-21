@@ -1953,6 +1953,25 @@ endif()
 if (TARGET pcs AND NOT TARGET crisp_punc)
     target_link_libraries(crispasr-lib PUBLIC pcs)
 endif()
+
+# crisp_punc / crisp_truecase / crisp_lid are pulled in via add_subdirectory
+# from sibling dirs, so under the Xcode generator they land in separate
+# sub-projects. Apple's ld-prime (Xcode 15/16) with -dead_strip then drops
+# their archive members from the libcrispasr shared-lib link even though
+# crispasr_c_api.cpp references them (fireredpunc_*/pcs_*/truecaser_lstm_*/
+# text_lid_*) — the ios-xcode-build job failed with exactly those 12 undefined
+# symbols. force_load guarantees the members are kept. Apple-only; the GNU/MSVC
+# linkers resolve these fine, and the normal target_link_libraries above still
+# provides the build-order dependency + include dirs.
+if(APPLE)
+    foreach(_force_lib crisp_punc crisp_truecase crisp_lid)
+        if(TARGET ${_force_lib})
+            target_link_options(crispasr-lib PRIVATE
+                "LINKER:-force_load,$<TARGET_FILE:${_force_lib}>")
+        endif()
+    endforeach()
+endif()
+
 # Pyannote segmentation is not a backend; it's consumed by
 # crispasr_diarize.cpp for the "pyannote" method. Still needs linking in
 # so the native diarizer's symbols resolve at libcrispasr load time.
