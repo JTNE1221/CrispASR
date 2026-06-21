@@ -2384,7 +2384,7 @@ core infrastructure.
 | **kokoro** | — (NAR) | Gap | — | Gap | — | — | — |
 | **bark** | Has | Has | Has | Gap | — | — | — |
 | **melotts** | — | Gap | — | Gap | — | — | — |
-| **parler** | Has (host) | Gap | — | Gap | — | — | — |
+| **parler** | Has (host; device opt-in §176c) | Gap | — | Has (Lk-bucket, opt-in §176b) | — | — | — |
 | **speecht5** | Has (host) | Gap | — | Gap | — | — | — |
 | **dia** | Has (host) | Gap | — | Gap | — | — | — |
 | **csm** | Has (device) | Has (Mimi) | Has | — | — | — | — |
@@ -2657,10 +2657,14 @@ core infrastructure.
 - Has: T5 encoder cached after set_description, cross-KV pre-projected
   once (24 layers), pre-permuted DAC ConvT weights, prefill in single
   step, delay pattern, top-k+temperature, all_eos early exit
-- Gap: decoder graph rebuilt per step (past KV re-uploaded growing),
-  cross-KV re-uploaded per step (same data), ggml_concat materializes
-  full KV copy (quadratic memory), read_embed_row per codebook per step,
-  flash_attn unused
+- §176b+c (opt-in `CRISPASR_PARLER_BUCKET=1`): Lk-bucketed decode graph
+  cache (no per-step rebuild), device-resident self-attn + cross-attn KV
+  (`ggml_set_rows` write, no per-step re-upload, no growing `ggml_concat`),
+  dedicated sched reused across steps. ~1.2–1.9× faster than the legacy
+  default on M1 Metal (F16); crispasr-diff parity 108/108 vs F32 ground
+  truth. Default stays the legacy path (byte-identical); CUDA unvalidated.
+- Gap: legacy default path still rebuilds the graph per step / re-uploads
+  growing KV; flash_attn unused; read_embed_row per codebook per step.
 
 **SpeechT5** (`speecht5_tts.cpp`):
 - Has: host-side KV cache for decoder, cross-attn encoder output reuse,
