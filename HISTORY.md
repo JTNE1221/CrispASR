@@ -6,6 +6,51 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-21 §215 Parakeet long-form — single-pass = NeMo-exact for non-JA (fixes boundary dups + VAD speech-drop)
+
+Reported symptom: parakeet on a 5-min German clip (and the 28-min ARD
+"Fünf Säulen des Islam") produced a duplicated phrase at every chunk
+boundary; `--vad` dropped >half the speech (306 of 704 words).
+
+**Diagnosis (vs NeMo `nvidia/parakeet-tdt-0.6b-v3`).** A length sweep showed
+the forced backend `streamed` path (chunked-encode + concat + single TDT
+decode) *collapses* on the v3/multilingual model — 60 s→31 w, 120 s→46 w,
+5 min→75 w — while a single full-attention pass (`parakeet_transcribe_ex`) is
+**word-for-word identical to NeMo at every length** (30 s→5 min, 706/706 w,
+100.00 %). The dispatcher's chunk-30 + overlap-save + LCS-merge fallback was
+complete but duped every 30 s boundary: the token-id-exact LCS can't cancel
+the *divergent* re-transcription of the overlap region. A prior option matrix
+(2026-05-26, §104/§114) compared only "dispatcher chunk+merge" vs "backend
+streamed" — both inferior — and never tried whole-clip single-pass.
+
+**Fix (`examples/cli/crispasr_backend_parakeet.cpp`, one TU).** Non-JA models
+(vocab>4096: v3 / multilingual / EN) now advertise `CAP_INTERNAL_CHUNKING` so
+the dispatcher hands the whole clip to the backend, which runs:
+- ≤ cap (default 300 s): one full-attention pass — NeMo-exact. Full attention
+  is O(T²): ~5 min is memory-safe on 16 GB, 28 min OOMs, hence the cap.
+- > cap: silence-split into ≤cap single-pass pieces, each transcribed with
+  ±2 s acoustic context and committed by word timestamp at a single shared
+  cut → no overlap, no gap, no boundary duplicates, memory bounded by the cap.
+
+The same routing fixes `--vad` for free: each VAD slice now decodes
+single-pass instead of streamed (5 min `--vad` 306 w/50 % → 706 w/98.7 %,
+identical word count to NeMo — no content dropped). JA (vocab≤4096) collapses
+on single-pass (#89) and is unchanged: no `CAP_INTERNAL_CHUNKING`, dispatcher
+keeps driving it via VAD / 30 s chunking.
+
+**Env gates** (dev-guide convention; old paths preserved for A/B, none removed):
+- `CRISPASR_PARAKEET_STREAM_THRESHOLD` — single-pass cap seconds; 0 = always
+  streamed. Default JA=0, non-JA=300.
+- `CRISPASR_PARAKEET_LONGFORM` — 1 = silence-split single-pass above the cap,
+  0 = streamed fallback. Default non-JA=1, JA=0.
+- `CRISPASR_PARAKEET_INTERNAL_CHUNKING` — 0 = revert to dispatcher chunk+merge.
+CLI escape hatches unchanged: `--chunk-seconds N`, `--vad`.
+
+**Validated** (parakeet-tdt-0.6b-v3, German): default 120 s/5 min = 100.00 %
+vs NeMo; `--vad` 5 min = 98.7 % (706=706 w); Q4_K = 97 %; longform stress
+cap=30 s on 120 s = 97 % with zero boundary dups; old dispatcher path
+(env-gated) = 86 %. 28-min full file not re-run on the dev M1 (memory).
+
 ## 2026-06-21 §214 Chatterbox — batched classifier-free-guidance (B=2) T3 decode (gated; the real T3 win)
 
 The §212 follow-up: run the CFG **cond + uncond passes as one batch-2 forward**
