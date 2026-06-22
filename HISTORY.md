@@ -6,6 +6,29 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-22 #182 Chatterbox — segfault on very long text (text-position OOB)
+
+External report (BergmannAtmet): a very long `--tts` prompt segfaulted in
+`build_prefill_embeds` at `text_pos_table[i * D + j]` — an out-of-bounds read.
+The text positions index a fixed learned table (`text_pos_emb`, 2050 rows for
+base T3; the shared WPE, 8196, for turbo/GPT-2), but `i` ran unbounded to
+`text_len - 1`. The base tokenizer is char-level, so a ~4.5 KB paragraph
+tokenizes to ~2800 tokens ≫ 2050 — and multibyte scripts trip it with far less
+text. The same pattern lived at five sites (cond + uncond prefill, both base and
+GPT-2 paths).
+
+Fix: `cap_text_tokens()` truncates the token sequence to the model's positional
+capacity (with a one-time warning) at every synth/diff entry, after all token
+insertions — so the cond prefill, the uncond CFG prefill, and the GPT-2 path are
+all bounded. Plus a defensive clamp at the exact OOB site the reporter cited, so
+the builder can never index past the table even if a caller bypasses the cap.
+Verified: 2849-token prompt now warns `text too long (2849 > 2050) — truncating`
+and synthesises a valid WAV, exit 0 (was SIGSEGV). Short text is bit-unchanged
+(the cap only fires past the limit). Full long-form synthesis (vs truncation)
+wants sentence chunking on the CLI `--tts` path — PLAN §218.
+
+---
+
 ## 2026-06-21 §217 Chatterbox-turbo — emotion/style tags now work at runtime
 
 Follow-up to the #181 data fix: the turbo GGUFs now carry the 19 emotion/style

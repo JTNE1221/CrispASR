@@ -935,6 +935,28 @@ static void prepend_language_token(chatterbox_context* ctx, std::vector<int32_t>
     text_tokens.insert(text_tokens.begin(), it->second);
 }
 
+// #182: cap the text token sequence to the model's positional-embedding
+// capacity. The text positions index a fixed learned table — text_pos_emb
+// (text_pos_emb_size, base T3) or the shared WPE (wpe_max_positions, turbo/GPT-2)
+// — so a prompt longer than the table read past it and segfaulted. Real
+// long-form input should be sentence-chunked by the caller (the CLI/server
+// chunk helpers); this is the library-level guard that keeps any single
+// prefill within the table. Truncates with a one-time warning. Call AFTER all
+// token insertions (lang / SOT / EOT) so the cap bounds the final length.
+static void cap_text_tokens(chatterbox_context* c, std::vector<int32_t>& text_tokens, bool is_gpt2) {
+    // GPT-2/turbo: text shares the WPE table with the conditioning prefix
+    // (speaker + speech-prompt tokens), so leave generous headroom for cond.
+    const int limit =
+        is_gpt2 ? std::max(1, (int)c->hp.wpe_max_positions - 1024) : std::max(1, (int)c->hp.text_pos_emb_size);
+    if ((int)text_tokens.size() > limit) {
+        fprintf(stderr,
+                "chatterbox: text too long (%zu tokens > %d positional limit) — truncating. Chunk long "
+                "input on sentence boundaries for full synthesis (#182).\n",
+                text_tokens.size(), limit);
+        text_tokens.resize(limit);
+    }
+}
+
 namespace {
 
 // ── Metadata loading ────────────────────────────────────────────
@@ -2407,12 +2429,16 @@ static std::vector<float> build_prefill_embeds(chatterbox_context* c, const std:
     {
         const auto& text_emb_table = c->text_emb_cache;
         const auto& text_pos_table = c->text_pos_emb_cache;
+        const int pos_max = (int)c->hp.text_pos_emb_size; // #182: positional table rows
         for (int i = 0; i < text_len; i++) {
             int tok = text_tokens[i];
             if (tok < 0 || tok >= (int)c->hp.text_vocab_size)
                 tok = 0;
+            // Defensive: callers cap text length to the table (cap_text_tokens),
+            // but never index the learned position table past its last row.
+            const int pi = i < pos_max ? i : pos_max - 1;
             for (int j = 0; j < D; j++) {
-                embeds[(pos + i) * D + j] = text_emb_table[tok * D + j] + text_pos_table[i * D + j];
+                embeds[(pos + i) * D + j] = text_emb_table[tok * D + j] + text_pos_table[pi * D + j];
             }
         }
         pos += text_len;
@@ -3283,6 +3309,7 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
         text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
         text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
     }
+    cap_text_tokens(ctx, text_tokens, is_gpt2); // #182: bound to positional table
 
     if (ctx->params.verbosity >= 2 || std::getenv("CHATTERBOX_DEBUG")) {
         fprintf(stderr, "chatterbox: text_tokens(%zu) %s = [", text_tokens.size(),
@@ -4703,6 +4730,7 @@ extern "C" float* chatterbox_dump_t3_prefill_emb(struct chatterbox_context* ctx,
     prepend_language_token(ctx, text_tokens);
     text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
     text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
+    cap_text_tokens(ctx, text_tokens, /*is_gpt2=*/false); // #182
 
     std::vector<float> emb = build_prefill_embeds(ctx, text_tokens);
     if (emb.empty())
@@ -4755,6 +4783,7 @@ extern "C" int chatterbox_dump_t3_next_logits(struct chatterbox_context* ctx, co
     prepend_language_token(ctx, text_tokens);
     text_tokens.insert(text_tokens.begin(), (int32_t)ctx->hp.start_text_token);
     text_tokens.push_back((int32_t)ctx->hp.stop_text_token);
+    cap_text_tokens(ctx, text_tokens, /*is_gpt2=*/false); // #182
 
     std::vector<float> prefill_embeds = build_prefill_embeds(ctx, text_tokens);
     if (prefill_embeds.empty()) {
