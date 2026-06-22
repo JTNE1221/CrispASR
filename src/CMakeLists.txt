@@ -370,6 +370,8 @@ if (CRISPASR_AMR)
         add_library(crispasr_amrnb STATIC
             ${crispasr_opencore_amr_SOURCE_DIR}/amrnb/wrapper.cpp
             ${_amrnb_srcs} ${_amrnb_common})
+        # We only need the decoder; skip encoder to avoid pulling in enc/ sources.
+        target_compile_definitions(crispasr_amrnb PRIVATE DISABLE_AMRNB_ENCODER)
         target_include_directories(crispasr_amrnb PUBLIC
             ${crispasr_opencore_amr_SOURCE_DIR}
             ${crispasr_opencore_amr_SOURCE_DIR}/amrnb
