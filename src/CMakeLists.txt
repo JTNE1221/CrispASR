@@ -373,6 +373,7 @@ if (CRISPASR_AMR)
         target_include_directories(crispasr_amrnb PUBLIC
             ${crispasr_opencore_amr_SOURCE_DIR}
             ${crispasr_opencore_amr_SOURCE_DIR}/amrnb
+            ${crispasr_opencore_amr_SOURCE_DIR}/oscl
             ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/src
             ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/include
             ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/common/include
@@ -387,6 +388,7 @@ if (CRISPASR_AMR)
         target_include_directories(crispasr_amrwb PUBLIC
             ${crispasr_opencore_amr_SOURCE_DIR}
             ${crispasr_opencore_amr_SOURCE_DIR}/amrwb
+            ${crispasr_opencore_amr_SOURCE_DIR}/oscl
             ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/src
             ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/include)
         set_target_properties(crispasr_amrwb PROPERTIES POSITION_INDEPENDENT_CODE ON)
