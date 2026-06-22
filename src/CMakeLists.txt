@@ -335,71 +335,12 @@ if (CRISPASR_AMR)
     endif()
 
     if (NOT _crispasr_amr_ok)
-        # Static fallback. opencore-amr has autotools upstream; we compile the
-        # sources directly with add_library since there's no upstream CMakeLists.
-        include(FetchContent)
-        FetchContent_Declare(crispasr_opencore_amr
-            GIT_REPOSITORY https://github.com/CrispStrobe/opencore-amr.git
-            GIT_TAG        v0.1.6
-            GIT_SHALLOW    TRUE)
-        FetchContent_GetProperties(crispasr_opencore_amr)
-        if (NOT crispasr_opencore_amr_POPULATED)
-            FetchContent_Populate(crispasr_opencore_amr)
-        endif()
-
-        # System packages install headers as <opencore-amrnb/interf_dec.h> and
-        # <opencore-amrwb/dec_if.h>. The upstream source tree uses amrnb/ and
-        # amrwb/. Create compatibility symlinks so the same #include works for
-        # both system and FetchContent paths.
-        if (NOT EXISTS "${crispasr_opencore_amr_SOURCE_DIR}/opencore-amrnb")
-            file(CREATE_LINK
-                "${crispasr_opencore_amr_SOURCE_DIR}/amrnb"
-                "${crispasr_opencore_amr_SOURCE_DIR}/opencore-amrnb"
-                SYMBOLIC)
-        endif()
-        if (NOT EXISTS "${crispasr_opencore_amr_SOURCE_DIR}/opencore-amrwb")
-            file(CREATE_LINK
-                "${crispasr_opencore_amr_SOURCE_DIR}/amrwb"
-                "${crispasr_opencore_amr_SOURCE_DIR}/opencore-amrwb"
-                SYMBOLIC)
-        endif()
-
-        # AMR-NB decoder
-        file(GLOB _amrnb_srcs "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/src/*.cpp")
-        file(GLOB _amrnb_common "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/common/dec/src/*.cpp")
-        add_library(crispasr_amrnb STATIC
-            ${crispasr_opencore_amr_SOURCE_DIR}/amrnb/wrapper.cpp
-            ${_amrnb_srcs} ${_amrnb_common})
-        # We only need the decoder; skip encoder to avoid pulling in enc/ sources.
-        target_compile_definitions(crispasr_amrnb PRIVATE DISABLE_AMRNB_ENCODER)
-        target_include_directories(crispasr_amrnb PUBLIC
-            ${crispasr_opencore_amr_SOURCE_DIR}
-            ${crispasr_opencore_amr_SOURCE_DIR}/amrnb
-            ${crispasr_opencore_amr_SOURCE_DIR}/oscl
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/src
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/include
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/enc/src
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/enc/include
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/common/include
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/common/dec/include)
-        set_target_properties(crispasr_amrnb PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-        # AMR-WB decoder
-        file(GLOB _amrwb_srcs "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/src/*.cpp")
-        add_library(crispasr_amrwb STATIC
-            ${crispasr_opencore_amr_SOURCE_DIR}/amrwb/wrapper.cpp
-            ${_amrwb_srcs})
-        target_include_directories(crispasr_amrwb PUBLIC
-            ${crispasr_opencore_amr_SOURCE_DIR}
-            ${crispasr_opencore_amr_SOURCE_DIR}/amrwb
-            ${crispasr_opencore_amr_SOURCE_DIR}/oscl
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/src
-            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/include)
-        set_target_properties(crispasr_amrwb PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-        target_link_libraries(crispasr-lib PRIVATE crispasr_amrnb crispasr_amrwb)
-        set(_crispasr_amr_ok ON)
-        message(STATUS "CrispASR: AMR via FetchContent static opencore-amr")
+        # FetchContent static build requires a patched opencore-amr with complete
+        # OSCL shim headers. The upstream feuvan/opencore-amr-iOS repo is missing
+        # oscl_dll.h et al. so standalone compilation fails. AMR support requires
+        # system packages (apt install libopencore-amrnb-dev libopencore-amrwb-dev).
+        message(STATUS "CrispASR: AMR disabled (system libopencore-amr not found; "
+                       "install libopencore-amrnb-dev libopencore-amrwb-dev for AMR support)")
     endif()
 
     if (_crispasr_amr_ok)
