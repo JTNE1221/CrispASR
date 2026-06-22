@@ -6,6 +6,26 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-22 audio — .opus decode in crispasr_audio_load (no ffmpeg)
+
+`crispasr_audio_load` / `_stereo` now decode `.opus` (Ogg/Opus) alongside
+WAV/MP3/FLAC/OGG-Vorbis. Implemented as a miniaudio **custom decoding backend**
+(vendored `src/miniaudio_libopus.{h,c}` from mackron/miniaudio, MIT-0) wrapping
+**libopus + opusfile + libogg** (BSD-3-Clause) — so `.opus` flows through the
+same `ma_decoder` resample-to-16k + downmix + chunked-read path as the existing
+formats. No ffmpeg on the decode path.
+
+CMake `CRISPASR_OPUS` (default ON): primary path links system `opusfile` via
+pkg-config (macOS/Linux); fallback `CRISPASR_OPUS_FETCH` builds ogg/opus/opusfile
+statically via FetchContent for platforms without system libs (Windows / iOS /
+Android / WASM) — opusfile is autotools-only upstream, so its HTTP-free core
+sources are compiled directly. Verified on macOS: pkg-config path decodes a 3 s
+`.opus` to 16 kHz mono+stereo (WAV unaffected); forced-FetchContent static build
+compiles ogg+opus+opusfile clean. ffmpeg remains available only as an optional
+dynamic fallback for formats no permissive native decoder covers (e.g. AAC).
+
+---
+
 ## 2026-06-22 §218 Chatterbox CLI long-form — sentence-chunk `--tts` (+ KV-realloc UAF fix)
 
 Follow-up to the #182 cap: instead of truncating long input, chunk it. The CLI

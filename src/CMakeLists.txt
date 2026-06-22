@@ -227,6 +227,74 @@ if (GGML_CUDA AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
 endif()
 target_compile_features   (crispasr-lib PUBLIC ${CRISPASR_LIB_CXX_STANDARD}) # don't bump
 
+# ── Optional .opus (Ogg/Opus) decode in crispasr_audio.cpp ──────────────────
+# Adds Opus to the miniaudio decoder path (custom backend in
+# src/miniaudio_libopus.c) so crispasr_audio_load handles .opus alongside
+# WAV/MP3/FLAC/OGG — no ffmpeg. libopus + opusfile + libogg are BSD-3-Clause.
+# Primary: system libs via pkg-config (macOS/Linux). Fallback for platforms
+# without system libs (Windows/iOS/Android/WASM): build them statically via
+# FetchContent. Disable entirely with -DCRISPASR_OPUS=OFF; force the static
+# build (also used to validate the fallback locally) with -DCRISPASR_OPUS_FETCH=ON.
+option(CRISPASR_OPUS       "Decode .opus (Ogg/Opus) via libopus + opusfile" ON)
+option(CRISPASR_OPUS_FETCH "Skip system pkg-config; build opus/ogg/opusfile statically via FetchContent" OFF)
+
+if (CRISPASR_OPUS)
+    set(_crispasr_opus_ok OFF)
+
+    if (NOT CRISPASR_OPUS_FETCH)
+        find_package(PkgConfig QUIET)
+        if (PkgConfig_FOUND)
+            pkg_check_modules(OPUSFILE QUIET IMPORTED_TARGET opusfile)
+            if (OPUSFILE_FOUND)
+                target_link_libraries(crispasr-lib PRIVATE PkgConfig::OPUSFILE)
+                set(_crispasr_opus_ok ON)
+                message(STATUS "CrispASR: .opus via system opusfile ${OPUSFILE_VERSION} (pkg-config)")
+            endif()
+        endif()
+    endif()
+
+    if (NOT _crispasr_opus_ok)
+        # Static fallback. libogg + libopus ship upstream CMake; opusfile is
+        # autotools-only, so compile its (HTTP-free) core sources directly.
+        include(FetchContent)
+        set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_TESTING  OFF CACHE BOOL "" FORCE)
+        # libogg/opus ship pre-3.5 cmake_minimum_required, which CMake >= 4.0
+        # rejects outright; loosen the floor just for these vendored subbuilds.
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+        FetchContent_Declare(crispasr_ogg  GIT_REPOSITORY https://github.com/xiph/ogg.git  GIT_TAG v1.3.5  GIT_SHALLOW TRUE)
+        FetchContent_Declare(crispasr_opus GIT_REPOSITORY https://github.com/xiph/opus.git GIT_TAG v1.5.2 GIT_SHALLOW TRUE)
+        FetchContent_Declare(crispasr_opusfile GIT_REPOSITORY https://github.com/xiph/opusfile.git GIT_TAG v0.12 GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(crispasr_ogg crispasr_opus)
+        FetchContent_GetProperties(crispasr_opusfile)
+        if (NOT crispasr_opusfile_POPULATED)
+            FetchContent_Populate(crispasr_opusfile)
+        endif()
+        add_library(crispasr_opusfile STATIC
+            ${crispasr_opusfile_SOURCE_DIR}/src/info.c
+            ${crispasr_opusfile_SOURCE_DIR}/src/internal.c
+            ${crispasr_opusfile_SOURCE_DIR}/src/opusfile.c
+            ${crispasr_opusfile_SOURCE_DIR}/src/stream.c)
+        target_include_directories(crispasr_opusfile PUBLIC ${crispasr_opusfile_SOURCE_DIR}/include)
+        target_compile_definitions(crispasr_opusfile PRIVATE OP_DISABLE_HTTP)      # no openssl
+        target_link_libraries(crispasr_opusfile PUBLIC Ogg::ogg Opus::opus)
+        set_target_properties(crispasr_opusfile PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_link_libraries(crispasr-lib PRIVATE crispasr_opusfile)
+        set(_crispasr_opus_ok ON)
+        message(STATUS "CrispASR: .opus via FetchContent static opus/ogg/opusfile")
+    endif()
+
+    if (_crispasr_opus_ok)
+        # The custom miniaudio backend, compiled as a separate C TU and linked
+        # against this lib's MINIAUDIO_IMPLEMENTATION. opusfile.h comes from the
+        # linked opusfile target; miniaudio.h is the src/ sibling.
+        target_sources(crispasr-lib PRIVATE miniaudio_libopus.c)
+        target_compile_definitions(crispasr-lib PRIVATE CRISPASR_HAVE_OPUS=1)
+    elseif (NOT CRISPASR_OPUS_FETCH)
+        message(STATUS "CrispASR: .opus disabled — opusfile not found (set -DCRISPASR_OPUS_FETCH=ON to build it)")
+    endif()
+endif()
+
 if (CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN")
     target_compile_definitions(crispasr-lib PRIVATE CRISPASR_BIG_ENDIAN)
 endif()

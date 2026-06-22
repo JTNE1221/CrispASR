@@ -47,6 +47,32 @@
 #include <cstdlib>
 #include <cstring>
 
+// Optional .opus (Ogg/Opus) support via libopus + opusfile (BSD-3-Clause),
+// wired in as a miniaudio custom decoding backend so .opus flows through the
+// same ma_decoder resample-to-16k + downmix + chunked-read path as WAV / MP3 /
+// FLAC / OGG-Vorbis — no separate decode path, and no ffmpeg. The backend
+// vtable (`ma_decoding_backend_libopus`) is defined in the vendored
+// examples/miniaudio_libopus.c, compiled as a separate C TU and linked against
+// this TU's MINIAUDIO_IMPLEMENTATION (see src/CMakeLists.txt). Gated on
+// CRISPASR_HAVE_OPUS, which CMake sets when opusfile is found (pkg-config) or
+// built statically (FetchContent fallback for platforms without system libs).
+#if defined(CRISPASR_HAVE_OPUS)
+#include "miniaudio_libopus.h"
+namespace {
+// ma_decoding_backend_libopus is already a `ma_decoding_backend_vtable*`.
+ma_decoding_backend_vtable* g_crispasr_opus_backends[] = {ma_decoding_backend_libopus};
+} // namespace
+#define CRISPASR_OPUS_DECODER_CONFIG(cfg)                                                                              \
+    do {                                                                                                               \
+        (cfg).ppCustomBackendVTables = g_crispasr_opus_backends;                                                       \
+        (cfg).customBackendCount = 1;                                                                                  \
+    } while (0)
+#else
+#define CRISPASR_OPUS_DECODER_CONFIG(cfg)                                                                              \
+    do {                                                                                                               \
+    } while (0)
+#endif
+
 #ifdef _WIN32
 #define CA_EXPORT extern "C" __declspec(dllexport)
 #else
@@ -88,6 +114,7 @@ CA_EXPORT int crispasr_audio_load(const char* path, float** out_pcm, int* out_sa
         *out_sample_rate = 0;
 
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, kTargetChannels, kTargetSampleRate);
+    CRISPASR_OPUS_DECODER_CONFIG(cfg);
     ma_decoder decoder;
     if (ma_decoder_init_file(path, &cfg, &decoder) != MA_SUCCESS) {
         return -2;
@@ -166,6 +193,7 @@ CA_EXPORT int crispasr_audio_load_stereo(const char* path, float** out_left, flo
 
     // Detect native channel count (channels = 0 → native).
     ma_decoder_config probe_cfg = ma_decoder_config_init(ma_format_f32, 0, kTargetSampleRate);
+    CRISPASR_OPUS_DECODER_CONFIG(probe_cfg);
     ma_decoder probe;
     if (ma_decoder_init_file(path, &probe_cfg, &probe) != MA_SUCCESS)
         return -2;
@@ -175,6 +203,7 @@ CA_EXPORT int crispasr_audio_load_stereo(const char* path, float** out_left, flo
     // Re-open with the target channel count (1 or 2) and 16 kHz.
     const int decode_channels = (native_channels >= 2) ? 2 : 1;
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, (ma_uint32)decode_channels, kTargetSampleRate);
+    CRISPASR_OPUS_DECODER_CONFIG(cfg);
     ma_decoder decoder;
     if (ma_decoder_init_file(path, &cfg, &decoder) != MA_SUCCESS)
         return -2;
