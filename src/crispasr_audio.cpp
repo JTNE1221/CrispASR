@@ -91,6 +91,106 @@ constexpr int kTargetSampleRate = 16000;
 constexpr int kTargetChannels = 1;
 } // namespace
 
+// Apple-platform fallback for formats the permissive miniaudio path can't
+// decode — notably AAC / M4A / ALAC / CAF. AudioToolbox's ExtAudioFile is a
+// system framework (no ffmpeg, no GPL) that decodes + resamples + remixes to a
+// requested client format in one pass. On non-Apple platforms the equivalent
+// is Media Foundation (Windows) / MediaCodec (Android), wired separately; Linux
+// has no system AAC decoder (fdk-aac or the optional ffmpeg fallback). Decodes
+// to interleaved f32 @ 16 kHz with `want_channels` channels (1..2; 0 = native,
+// capped at 2). malloc-owned buffer; 0 on success.
+#if defined(__APPLE__)
+#include <AudioToolbox/AudioToolbox.h>
+#include <CoreFoundation/CoreFoundation.h>
+namespace {
+int crispasr_at_decode(const char* path, int want_channels, float** out_interleaved, int* out_frames,
+                       int* out_channels) {
+    CFStringRef cfpath = CFStringCreateWithCString(nullptr, path, kCFStringEncodingUTF8);
+    if (!cfpath)
+        return -2;
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfpath, kCFURLPOSIXPathStyle, false);
+    CFRelease(cfpath);
+    if (!url)
+        return -2;
+    ExtAudioFileRef af = nullptr;
+    OSStatus st = ExtAudioFileOpenURL(url, &af);
+    CFRelease(url);
+    if (st != noErr || !af)
+        return -2;
+
+    AudioStreamBasicDescription fileFmt;
+    UInt32 sz = sizeof(fileFmt);
+    if (ExtAudioFileGetProperty(af, kExtAudioFileProperty_FileDataFormat, &sz, &fileFmt) != noErr) {
+        ExtAudioFileDispose(af);
+        return -2;
+    }
+    int native_ch = (int)fileFmt.mChannelsPerFrame;
+    if (native_ch < 1)
+        native_ch = 1;
+    int ch = want_channels > 0 ? want_channels : (native_ch >= 2 ? 2 : 1);
+    if (ch < 1)
+        ch = 1;
+    if (ch > 2)
+        ch = 2;
+
+    AudioStreamBasicDescription cli;
+    std::memset(&cli, 0, sizeof(cli));
+    cli.mSampleRate = kTargetSampleRate;
+    cli.mFormatID = kAudioFormatLinearPCM;
+    cli.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked; // interleaved f32
+    cli.mBitsPerChannel = 32;
+    cli.mChannelsPerFrame = (UInt32)ch;
+    cli.mFramesPerPacket = 1;
+    cli.mBytesPerFrame = (UInt32)(sizeof(float) * ch);
+    cli.mBytesPerPacket = cli.mBytesPerFrame;
+    if (ExtAudioFileSetProperty(af, kExtAudioFileProperty_ClientDataFormat, sizeof(cli), &cli) != noErr) {
+        ExtAudioFileDispose(af);
+        return -2;
+    }
+
+    const UInt32 chunkFrames = (UInt32)kTargetSampleRate; // 1 s
+    float* buf = nullptr;
+    size_t cap = 0, used = 0; // frames
+    for (;;) {
+        if (cap - used < chunkFrames) {
+            const size_t newcap = cap ? cap * 2 : (size_t)chunkFrames * 8;
+            float* nb = (float*)std::realloc(buf, newcap * (size_t)ch * sizeof(float));
+            if (!nb) {
+                std::free(buf);
+                ExtAudioFileDispose(af);
+                return -3;
+            }
+            buf = nb;
+            cap = newcap;
+        }
+        AudioBufferList abl;
+        abl.mNumberBuffers = 1;
+        abl.mBuffers[0].mNumberChannels = (UInt32)ch;
+        abl.mBuffers[0].mDataByteSize = (UInt32)(chunkFrames * (UInt32)ch * sizeof(float));
+        abl.mBuffers[0].mData = buf + used * (size_t)ch;
+        UInt32 n = chunkFrames;
+        if (ExtAudioFileRead(af, &n, &abl) != noErr) {
+            std::free(buf);
+            ExtAudioFileDispose(af);
+            return -4;
+        }
+        if (n == 0)
+            break;
+        used += n;
+    }
+    ExtAudioFileDispose(af);
+    if (used == 0) {
+        std::free(buf);
+        return -2;
+    }
+    *out_interleaved = buf;
+    *out_frames = (int)used;
+    *out_channels = ch;
+    return 0;
+}
+} // namespace
+#endif // __APPLE__
+
 /// Decode an audio file into float32 mono PCM at 16 kHz. Supports WAV,
 /// MP3, and FLAC via miniaudio. The returned buffer is malloc-owned and
 /// must be released with `crispasr_audio_free`.
@@ -117,6 +217,20 @@ CA_EXPORT int crispasr_audio_load(const char* path, float** out_pcm, int* out_sa
     CRISPASR_OPUS_DECODER_CONFIG(cfg);
     ma_decoder decoder;
     if (ma_decoder_init_file(path, &cfg, &decoder) != MA_SUCCESS) {
+#if defined(__APPLE__)
+        // Format miniaudio can't decode (AAC / M4A / ALAC / CAF …) — try the
+        // OS-native AudioToolbox decoder. Requesting 1 channel gives mono
+        // directly (AudioConverter downmixes).
+        float* itl = nullptr;
+        int fr = 0, ch = 0;
+        if (crispasr_at_decode(path, 1, &itl, &fr, &ch) == 0) {
+            *out_pcm = itl;
+            *out_samples = fr;
+            if (out_sample_rate)
+                *out_sample_rate = kTargetSampleRate;
+            return 0;
+        }
+#endif
         return -2;
     }
 
@@ -195,8 +309,43 @@ CA_EXPORT int crispasr_audio_load_stereo(const char* path, float** out_left, flo
     ma_decoder_config probe_cfg = ma_decoder_config_init(ma_format_f32, 0, kTargetSampleRate);
     CRISPASR_OPUS_DECODER_CONFIG(probe_cfg);
     ma_decoder probe;
-    if (ma_decoder_init_file(path, &probe_cfg, &probe) != MA_SUCCESS)
+    if (ma_decoder_init_file(path, &probe_cfg, &probe) != MA_SUCCESS) {
+#if defined(__APPLE__)
+        // AAC / M4A / ALAC / CAF … via AudioToolbox. Decode native (≤2 ch)
+        // interleaved, then split into the per-channel L/R outputs.
+        float* itl = nullptr;
+        int fr = 0, ch = 0;
+        if (crispasr_at_decode(path, 0, &itl, &fr, &ch) == 0) {
+            float* left = (float*)std::malloc((size_t)fr * sizeof(float));
+            float* right = (float*)std::malloc((size_t)fr * sizeof(float));
+            if (!left || !right) {
+                std::free(itl);
+                std::free(left);
+                std::free(right);
+                return -3;
+            }
+            if (ch >= 2) {
+                for (int i = 0; i < fr; ++i) {
+                    left[i] = itl[(size_t)i * 2];
+                    right[i] = itl[(size_t)i * 2 + 1];
+                }
+                *out_channels = 2;
+            } else {
+                std::memcpy(left, itl, (size_t)fr * sizeof(float));
+                std::memcpy(right, itl, (size_t)fr * sizeof(float));
+                *out_channels = 1;
+            }
+            std::free(itl);
+            *out_left = left;
+            *out_right = right;
+            *out_samples = fr;
+            if (out_sample_rate)
+                *out_sample_rate = kTargetSampleRate;
+            return 0;
+        }
+#endif
         return -2;
+    }
     const int native_channels = (int)probe.outputChannels;
     ma_decoder_uninit(&probe);
 

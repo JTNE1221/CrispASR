@@ -295,6 +295,15 @@ if (CRISPASR_OPUS)
     endif()
 endif()
 
+# Apple: AudioToolbox ExtAudioFile decodes AAC / M4A / ALAC / CAF — formats the
+# permissive miniaudio path can't — with no ffmpeg and no GPL (crispasr_audio.cpp
+# falls back to it under __APPLE__). miniaudio's own CoreAudio backend dlopen's
+# its frameworks, but our direct ExtAudioFile calls must be linked.
+if (APPLE)
+    target_link_libraries(crispasr-lib PRIVATE
+        "-framework AudioToolbox" "-framework CoreFoundation" "-framework CoreAudio")
+endif()
+
 if (CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN")
     target_compile_definitions(crispasr-lib PRIVATE CRISPASR_BIG_ENDIAN)
 endif()

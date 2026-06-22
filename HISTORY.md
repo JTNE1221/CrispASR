@@ -6,6 +6,29 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-22 audio — AAC/M4A/ALAC/CAF on Apple (AudioToolbox) + AIFF/W64/RF64 (free)
+
+More `crispasr_audio_load` formats, still ffmpeg-free:
+
+- **AIFF / W64 / RF64** already decode — miniaudio's bundled `ma_dr_wav` handles
+  the WAV family. Verified (3 s test files round-trip to 16 kHz). No code; noted
+  here so it's discoverable.
+- **AAC / M4A / ALAC / CAF on Apple** via an `ExtAudioFile` (AudioToolbox)
+  fallback in `crispasr_audio.cpp` (`__APPLE__`): when miniaudio can't open the
+  file, decode + resample + remix to f32 16 kHz through the system framework —
+  **no ffmpeg, no GPL** (AudioToolbox is an OS framework; `-framework
+  AudioToolbox/CoreFoundation/CoreAudio` linked on Apple). Verified on macOS: AAC
+  `.m4a`, ADTS `.aac`, ALAC `.m4a`, PCM `.caf` all decode (3 s, mono + stereo);
+  WAV/MP3/FLAC/Vorbis/Opus paths unchanged.
+
+**AAC without ffmpeg/GPL — the cross-platform picture.** No fully-permissive
+(MIT/BSD/Apache) AAC decoder exists. AAC is decodable via free OS-native APIs:
+AudioToolbox (Apple, done here), Media Foundation (Windows), MediaCodec (Android).
+Linux has no system AAC decoder — only fdk-aac (Fraunhofer license: not (L)GPL,
+but not OSI-permissive + patent-disclaimed) or the optional ffmpeg fallback.
+Windows/Android native paths + the permissive codec libs (AMR via opencore-amr
+Apache-2.0; Speex/WavPack BSD; WebM demux) are follow-ups (PLAN §219).
+
 ## 2026-06-22 audio — .opus decode in crispasr_audio_load (no ffmpeg)
 
 `crispasr_audio_load` / `_stereo` now decode `.opus` (Ogg/Opus) alongside

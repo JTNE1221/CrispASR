@@ -195,6 +195,35 @@ the "don't extract single-consumer helpers" rule.
 
 ---
 
+## §219 — more permissive audio input formats for crispasr_audio_load (OPEN)
+
+Done so far (ffmpeg-free): WAV/MP3/FLAC (miniaudio), Ogg Vorbis (stb_vorbis),
+Opus (libopus/opusfile), AIFF/W64/RF64 (miniaudio dr_wav, free), and AAC/M4A/
+ALAC/CAF on **Apple** via AudioToolbox `ExtAudioFile`. Remaining, by value:
+
+1. **AAC/M4A on Windows + Android (native, HIGH).** Mirror the Apple AudioToolbox
+   fallback with Media Foundation (`IMFSourceReader`, Windows) and NDK
+   `MediaExtractor`+`MediaCodec` (Android) — free OS decoders, no ffmpeg/GPL.
+   Same `crispasr_audio.cpp` fallback hook, platform-`#if`'d. Linux still has no
+   permissive AAC decoder (fdk-aac is non-OSI/patent-disclaimed) → optional
+   ffmpeg dynamic fallback only.
+2. **AMR-NB/WB (MED).** opencore-amr (Apache-2.0) — telephony/voicemail speech.
+   Direct decode (simple `#!AMR` framing) → ma_resampler to 16 k. pkg-config +
+   FetchContent-static (autotools upstream → compile the amrnb/amrwb sources).
+3. **WebM/Matroska Opus|Vorbis (MED).** libwebm (BSD-3) demux → feed the already-
+   linked libopus / stb_vorbis. Web/browser audio.
+4. **Speex / WavPack (LOW).** BSD libs; Speex is obsolete (Opus superseded it),
+   WavPack niche. Only if a corpus needs them.
+5. **AU / Sun .snd (LOW).** Tiny PCM/µ-law parser; cheap if requested.
+
+Pattern is fixed: permissive decoder (or OS-native) behind the miniaudio custom
+backend / fallback hook, CMake-gated (pkg-config primary + FetchContent static
+fallback for no-system-lib platforms), greedy decode → 16 k. ffmpeg stays an
+optional dynamic fallback only for what none of the above covers (AAC-on-Linux,
+WMA, AC-3/DTS, .ape).
+
+---
+
 ## §166 follow-up — WASM `asr*` session surface needs a build-verify (OPEN)
 
 Round 4 (2026-06-13, see HISTORY) added a backend-agnostic ASR session surface to
