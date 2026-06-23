@@ -372,7 +372,9 @@ endif()
 # falls back to it under __APPLE__). miniaudio's own CoreAudio backend dlopen's
 # its frameworks, but our direct ExtAudioFile calls must be linked.
 if (APPLE)
-    target_link_libraries(crispasr-lib PRIVATE
+    # PUBLIC so consumers (tests, CLI, xcframework) transitively pick up the
+    # framework linkage — PRIVATE breaks the Xcode/iOS all-targets build.
+    target_link_libraries(crispasr-lib PUBLIC
         "-framework AudioToolbox" "-framework CoreFoundation" "-framework CoreAudio")
 endif()
 
@@ -396,7 +398,11 @@ target_link_libraries(crispasr-lib PUBLIC ggml Threads::Threads audioseal crispa
 # tests don't have to remember to add it. Mirrors how Threads::Threads
 # already flows through.
 if (WIN32)
-    target_link_libraries(crispasr-lib PUBLIC winhttp)
+    # winhttp: HF auto-download in crispasr_cache.cpp
+    # mfplat/mfreadwrite/mfuuid: Media Foundation AAC decoder in crispasr_audio.cpp
+    # ole32: CoInitializeEx for MF
+    # MSVC auto-links via #pragma comment(lib,...) but MinGW/Clang/lld ignores those.
+    target_link_libraries(crispasr-lib PUBLIC winhttp mfplat mfreadwrite mfuuid ole32)
 endif()
 
 if (CRISPASR_COREML)

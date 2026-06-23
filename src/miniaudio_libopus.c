@@ -10,46 +10,42 @@
 #include <string.h> /* For memset(). */
 #include <assert.h>
 
-static ma_result ma_libopus_ds_read(ma_data_source* pDataSource, void* pFramesOut, ma_uint64 frameCount, ma_uint64* pFramesRead)
-{
+static ma_result ma_libopus_ds_read(ma_data_source* pDataSource, void* pFramesOut, ma_uint64 frameCount,
+                                    ma_uint64* pFramesRead) {
     return ma_libopus_read_pcm_frames((ma_libopus*)pDataSource, pFramesOut, frameCount, pFramesRead);
 }
 
-static ma_result ma_libopus_ds_seek(ma_data_source* pDataSource, ma_uint64 frameIndex)
-{
+static ma_result ma_libopus_ds_seek(ma_data_source* pDataSource, ma_uint64 frameIndex) {
     return ma_libopus_seek_to_pcm_frame((ma_libopus*)pDataSource, frameIndex);
 }
 
-static ma_result ma_libopus_ds_get_data_format(ma_data_source* pDataSource, ma_format* pFormat, ma_uint32* pChannels, ma_uint32* pSampleRate, ma_channel* pChannelMap, size_t channelMapCap)
-{
-    return ma_libopus_get_data_format((ma_libopus*)pDataSource, pFormat, pChannels, pSampleRate, pChannelMap, channelMapCap);
+static ma_result ma_libopus_ds_get_data_format(ma_data_source* pDataSource, ma_format* pFormat, ma_uint32* pChannels,
+                                               ma_uint32* pSampleRate, ma_channel* pChannelMap, size_t channelMapCap) {
+    return ma_libopus_get_data_format((ma_libopus*)pDataSource, pFormat, pChannels, pSampleRate, pChannelMap,
+                                      channelMapCap);
 }
 
-static ma_result ma_libopus_ds_get_cursor(ma_data_source* pDataSource, ma_uint64* pCursor)
-{
+static ma_result ma_libopus_ds_get_cursor(ma_data_source* pDataSource, ma_uint64* pCursor) {
     return ma_libopus_get_cursor_in_pcm_frames((ma_libopus*)pDataSource, pCursor);
 }
 
-static ma_result ma_libopus_ds_get_length(ma_data_source* pDataSource, ma_uint64* pLength)
-{
+static ma_result ma_libopus_ds_get_length(ma_data_source* pDataSource, ma_uint64* pLength) {
     return ma_libopus_get_length_in_pcm_frames((ma_libopus*)pDataSource, pLength);
 }
 
-static ma_data_source_vtable g_ma_libopus_ds_vtable =
-{
+static ma_data_source_vtable g_ma_libopus_ds_vtable = {
     ma_libopus_ds_read,
     ma_libopus_ds_seek,
     ma_libopus_ds_get_data_format,
     ma_libopus_ds_get_cursor,
     ma_libopus_ds_get_length,
-    NULL,   /* onSetLooping */
-    0       /* flags */
+    NULL, /* onSetLooping */
+    0     /* flags */
 };
 
 
 #if !defined(MA_NO_LIBOPUS)
-static int ma_libopus_of_callback__read(void* pUserData, unsigned char* pBufferOut, int bytesToRead)
-{
+static int ma_libopus_of_callback__read(void* pUserData, unsigned char* pBufferOut, int bytesToRead) {
     ma_libopus* pOpus = (ma_libopus*)pUserData;
     ma_result result;
     size_t bytesRead;
@@ -63,8 +59,7 @@ static int ma_libopus_of_callback__read(void* pUserData, unsigned char* pBufferO
     return (int)bytesRead;
 }
 
-static int ma_libopus_of_callback__seek(void* pUserData, ogg_int64_t offset, int whence)
-{
+static int ma_libopus_of_callback__seek(void* pUserData, ogg_int64_t offset, int whence) {
     ma_libopus* pOpus = (ma_libopus*)pUserData;
     ma_result result;
     ma_seek_origin origin;
@@ -85,8 +80,7 @@ static int ma_libopus_of_callback__seek(void* pUserData, ogg_int64_t offset, int
     return 0;
 }
 
-static opus_int64 ma_libopus_of_callback__tell(void* pUserData)
-{
+static opus_int64 ma_libopus_of_callback__tell(void* pUserData) {
     ma_libopus* pOpus = (ma_libopus*)pUserData;
     ma_result result;
     ma_int64 cursor;
@@ -104,8 +98,7 @@ static opus_int64 ma_libopus_of_callback__tell(void* pUserData)
 }
 #endif
 
-static ma_result ma_libopus_init_internal(const ma_decoding_backend_config* pConfig, ma_libopus* pOpus)
-{
+static ma_result ma_libopus_init_internal(const ma_decoding_backend_config* pConfig, ma_libopus* pOpus) {
     ma_result result;
     ma_data_source_config dataSourceConfig;
 
@@ -114,7 +107,7 @@ static ma_result ma_libopus_init_internal(const ma_decoding_backend_config* pCon
     }
 
     memset(pOpus, 0, sizeof(*pOpus));
-    pOpus->format = ma_format_f32;    /* f32 by default. */
+    pOpus->format = ma_format_f32; /* f32 by default. */
 
     if (pConfig != NULL && (pConfig->preferredFormat == ma_format_f32 || pConfig->preferredFormat == ma_format_s16)) {
         pOpus->format = pConfig->preferredFormat;
@@ -127,18 +120,19 @@ static ma_result ma_libopus_init_internal(const ma_decoding_backend_config* pCon
 
     result = ma_data_source_init(&dataSourceConfig, &pOpus->ds);
     if (result != MA_SUCCESS) {
-        return result;  /* Failed to initialize the base data source. */
+        return result; /* Failed to initialize the base data source. */
     }
 
     return MA_SUCCESS;
 }
 
-MA_API ma_result ma_libopus_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_proc onTell, void* pReadSeekTellUserData, const ma_decoding_backend_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_libopus* pOpus)
-{
+MA_API ma_result ma_libopus_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_proc onTell,
+                                 void* pReadSeekTellUserData, const ma_decoding_backend_config* pConfig,
+                                 const ma_allocation_callbacks* pAllocationCallbacks, ma_libopus* pOpus) {
     ma_result result;
 
     (void)pAllocationCallbacks; /* Can't seem to find a way to configure memory allocations in libopus. */
-    
+
     result = ma_libopus_init_internal(pConfig, pOpus);
     if (result != MA_SUCCESS) {
         return result;
@@ -153,16 +147,16 @@ MA_API ma_result ma_libopus_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_te
     pOpus->onTell = onTell;
     pOpus->pReadSeekTellUserData = pReadSeekTellUserData;
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         int libopusResult;
         OpusFileCallbacks libopusCallbacks;
 
         /* We can now initialize the Opus decoder. This must be done after we've set up the callbacks. */
-        libopusCallbacks.read  = ma_libopus_of_callback__read;
-        libopusCallbacks.seek  = ma_libopus_of_callback__seek;
+        libopusCallbacks.read = ma_libopus_of_callback__read;
+        libopusCallbacks.seek = ma_libopus_of_callback__seek;
         libopusCallbacks.close = NULL;
-        libopusCallbacks.tell  = ma_libopus_of_callback__tell;
+        libopusCallbacks.tell = ma_libopus_of_callback__tell;
 
         pOpus->of = op_open_callbacks(pOpus, &libopusCallbacks, NULL, 0, &libopusResult);
         if (pOpus->of == NULL) {
@@ -171,16 +165,16 @@ MA_API ma_result ma_libopus_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_te
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. */
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API ma_result ma_libopus_init_file(const char* pFilePath, const ma_decoding_backend_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_libopus* pOpus)
-{
+MA_API ma_result ma_libopus_init_file(const char* pFilePath, const ma_decoding_backend_config* pConfig,
+                                      const ma_allocation_callbacks* pAllocationCallbacks, ma_libopus* pOpus) {
     ma_result result;
 
     (void)pAllocationCallbacks; /* Can't seem to find a way to configure memory allocations in libopus. */
@@ -190,7 +184,7 @@ MA_API ma_result ma_libopus_init_file(const char* pFilePath, const ma_decoding_b
         return result;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         int libopusResult;
 
@@ -201,39 +195,36 @@ MA_API ma_result ma_libopus_init_file(const char* pFilePath, const ma_decoding_b
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. */
         (void)pFilePath;
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API void ma_libopus_uninit(ma_libopus* pOpus, const ma_allocation_callbacks* pAllocationCallbacks)
-{
+MA_API void ma_libopus_uninit(ma_libopus* pOpus, const ma_allocation_callbacks* pAllocationCallbacks) {
     if (pOpus == NULL) {
         return;
     }
 
     (void)pAllocationCallbacks;
 
-    #if !defined(MA_NO_LIBOPUS)
-    {
-        op_free((OggOpusFile*)pOpus->of);
-    }
-    #else
+#if !defined(MA_NO_LIBOPUS)
+    { op_free((OggOpusFile*)pOpus->of); }
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
     }
-    #endif
+#endif
 
     ma_data_source_uninit(&pOpus->ds);
 }
 
-MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut, ma_uint64 frameCount, ma_uint64* pFramesRead)
-{
+MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut, ma_uint64 frameCount,
+                                            ma_uint64* pFramesRead) {
     if (pFramesRead != NULL) {
         *pFramesRead = 0;
     }
@@ -246,10 +237,10 @@ MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut,
         return MA_INVALID_ARGS;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         /* We always use floating point format. */
-        ma_result result = MA_SUCCESS;  /* Must be initialized to MA_SUCCESS. */
+        ma_result result = MA_SUCCESS; /* Must be initialized to MA_SUCCESS. */
         ma_uint64 totalFramesRead;
         ma_format format;
         ma_uint32 channels;
@@ -269,13 +260,19 @@ MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut,
             }
 
             if (format == ma_format_f32) {
-                libopusResult = op_read_float((OggOpusFile*)pOpus->of, (float*     )ma_offset_pcm_frames_ptr(pFramesOut, totalFramesRead, format, channels), (int)(framesToRead * channels), NULL);
+                libopusResult =
+                    op_read_float((OggOpusFile*)pOpus->of,
+                                  (float*)ma_offset_pcm_frames_ptr(pFramesOut, totalFramesRead, format, channels),
+                                  (int)(framesToRead * channels), NULL);
             } else {
-                libopusResult = op_read      ((OggOpusFile*)pOpus->of, (opus_int16*)ma_offset_pcm_frames_ptr(pFramesOut, totalFramesRead, format, channels), (int)(framesToRead * channels), NULL);
+                libopusResult =
+                    op_read((OggOpusFile*)pOpus->of,
+                            (opus_int16*)ma_offset_pcm_frames_ptr(pFramesOut, totalFramesRead, format, channels),
+                            (int)(framesToRead * channels), NULL);
             }
 
             if (libopusResult < 0) {
-                result = MA_ERROR;  /* Error while decoding. */
+                result = MA_ERROR; /* Error while decoding. */
                 break;
             } else {
                 totalFramesRead += libopusResult;
@@ -297,7 +294,7 @@ MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut,
 
         return result;
     }
-    #else
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
@@ -308,21 +305,20 @@ MA_API ma_result ma_libopus_read_pcm_frames(ma_libopus* pOpus, void* pFramesOut,
 
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API ma_result ma_libopus_seek_to_pcm_frame(ma_libopus* pOpus, ma_uint64 frameIndex)
-{
+MA_API ma_result ma_libopus_seek_to_pcm_frame(ma_libopus* pOpus, ma_uint64 frameIndex) {
     if (pOpus == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         int libopusResult = op_pcm_seek((OggOpusFile*)pOpus->of, (ogg_int64_t)frameIndex);
         if (libopusResult != 0) {
             if (libopusResult == OP_ENOSEEK) {
-                return MA_INVALID_OPERATION;    /* Not seekable. */
+                return MA_INVALID_OPERATION; /* Not seekable. */
             } else if (libopusResult == OP_EINVAL) {
                 return MA_INVALID_ARGS;
             } else {
@@ -332,7 +328,7 @@ MA_API ma_result ma_libopus_seek_to_pcm_frame(ma_libopus* pOpus, ma_uint64 frame
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
@@ -341,11 +337,11 @@ MA_API ma_result ma_libopus_seek_to_pcm_frame(ma_libopus* pOpus, ma_uint64 frame
 
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API ma_result ma_libopus_get_data_format(ma_libopus* pOpus, ma_format* pFormat, ma_uint32* pChannels, ma_uint32* pSampleRate, ma_channel* pChannelMap, size_t channelMapCap)
-{
+MA_API ma_result ma_libopus_get_data_format(ma_libopus* pOpus, ma_format* pFormat, ma_uint32* pChannels,
+                                            ma_uint32* pSampleRate, ma_channel* pChannelMap, size_t channelMapCap) {
     /* Defaults for safety. */
     if (pFormat != NULL) {
         *pFormat = ma_format_unknown;
@@ -368,7 +364,7 @@ MA_API ma_result ma_libopus_get_data_format(ma_libopus* pOpus, ma_format* pForma
         *pFormat = pOpus->format;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         ma_uint32 channels = op_channel_count((OggOpusFile*)pOpus->of, -1);
 
@@ -386,28 +382,27 @@ MA_API ma_result ma_libopus_get_data_format(ma_libopus* pOpus, ma_format* pForma
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API ma_result ma_libopus_get_cursor_in_pcm_frames(ma_libopus* pOpus, ma_uint64* pCursor)
-{
+MA_API ma_result ma_libopus_get_cursor_in_pcm_frames(ma_libopus* pOpus, ma_uint64* pCursor) {
     if (pCursor == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    *pCursor = 0;   /* Safety. */
+    *pCursor = 0; /* Safety. */
 
     if (pOpus == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         ogg_int64_t offset = op_pcm_tell((OggOpusFile*)pOpus->of);
         if (offset < 0) {
@@ -418,28 +413,27 @@ MA_API ma_result ma_libopus_get_cursor_in_pcm_frames(ma_libopus* pOpus, ma_uint6
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
-MA_API ma_result ma_libopus_get_length_in_pcm_frames(ma_libopus* pOpus, ma_uint64* pLength)
-{
+MA_API ma_result ma_libopus_get_length_in_pcm_frames(ma_libopus* pOpus, ma_uint64* pLength) {
     if (pLength == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    *pLength = 0;   /* Safety. */
+    *pLength = 0; /* Safety. */
 
     if (pOpus == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    #if !defined(MA_NO_LIBOPUS)
+#if !defined(MA_NO_LIBOPUS)
     {
         ogg_int64_t length = op_pcm_total((OggOpusFile*)pOpus->of, -1);
         if (length < 0) {
@@ -450,13 +444,13 @@ MA_API ma_result ma_libopus_get_length_in_pcm_frames(ma_libopus* pOpus, ma_uint6
 
         return MA_SUCCESS;
     }
-    #else
+#else
     {
         /* libopus is disabled. Should never hit this since initialization would have failed. */
         assert(MA_FALSE);
         return MA_NOT_IMPLEMENTED;
     }
-    #endif
+#endif
 }
 
 
@@ -464,8 +458,11 @@ MA_API ma_result ma_libopus_get_length_in_pcm_frames(ma_libopus* pOpus, ma_uint6
 The code below defines the vtable that you'll plug into your `ma_decoder_config` object.
 */
 #if !defined(MA_NO_LIBOPUS)
-static ma_result ma_decoding_backend_init__libopus(void* pUserData, ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_proc onTell, void* pReadSeekTellUserData, const ma_decoding_backend_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_data_source** ppBackend)
-{
+static ma_result ma_decoding_backend_init__libopus(void* pUserData, ma_read_proc onRead, ma_seek_proc onSeek,
+                                                   ma_tell_proc onTell, void* pReadSeekTellUserData,
+                                                   const ma_decoding_backend_config* pConfig,
+                                                   const ma_allocation_callbacks* pAllocationCallbacks,
+                                                   ma_data_source** ppBackend) {
     ma_result result;
     ma_libopus* pOpus;
 
@@ -487,8 +484,10 @@ static ma_result ma_decoding_backend_init__libopus(void* pUserData, ma_read_proc
     return MA_SUCCESS;
 }
 
-static ma_result ma_decoding_backend_init_file__libopus(void* pUserData, const char* pFilePath, const ma_decoding_backend_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_data_source** ppBackend)
-{
+static ma_result ma_decoding_backend_init_file__libopus(void* pUserData, const char* pFilePath,
+                                                        const ma_decoding_backend_config* pConfig,
+                                                        const ma_allocation_callbacks* pAllocationCallbacks,
+                                                        ma_data_source** ppBackend) {
     ma_result result;
     ma_libopus* pOpus;
 
@@ -510,8 +509,8 @@ static ma_result ma_decoding_backend_init_file__libopus(void* pUserData, const c
     return MA_SUCCESS;
 }
 
-static void ma_decoding_backend_uninit__libopus(void* pUserData, ma_data_source* pBackend, const ma_allocation_callbacks* pAllocationCallbacks)
-{
+static void ma_decoding_backend_uninit__libopus(void* pUserData, ma_data_source* pBackend,
+                                                const ma_allocation_callbacks* pAllocationCallbacks) {
     ma_libopus* pOpus = (ma_libopus*)pBackend;
 
     (void)pUserData;
@@ -520,17 +519,13 @@ static void ma_decoding_backend_uninit__libopus(void* pUserData, ma_data_source*
     ma_free(pOpus, pAllocationCallbacks);
 }
 
-static ma_decoding_backend_vtable ma_gDecodingBackendVTable_libopus =
-{
-    ma_decoding_backend_init__libopus,
-    ma_decoding_backend_init_file__libopus,
-    NULL, /* onInitFileW() */
-    NULL, /* onInitMemory() */
-    ma_decoding_backend_uninit__libopus
-};
+static ma_decoding_backend_vtable ma_gDecodingBackendVTable_libopus = {
+    ma_decoding_backend_init__libopus, ma_decoding_backend_init_file__libopus, NULL, /* onInitFileW() */
+    NULL,                                                                            /* onInitMemory() */
+    ma_decoding_backend_uninit__libopus};
 ma_decoding_backend_vtable* ma_decoding_backend_libopus = &ma_gDecodingBackendVTable_libopus;
 #else
 ma_decoding_backend_vtable* ma_decoding_backend_libopus = NULL;
 #endif
 
-#endif  /* miniaudio_libopus_c */
+#endif /* miniaudio_libopus_c */
